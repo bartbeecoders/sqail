@@ -7,6 +7,7 @@ import { useEditorStore } from "../stores/editorStore";
 import { useConnectionStore } from "../stores/connectionStore";
 import { useSchemaStore } from "../stores/schemaStore";
 import { useAiStore } from "../stores/aiStore";
+import { useSettingsStore } from "../stores/settingsStore";
 import { buildSchemaContext } from "../lib/schemaContext";
 import { sqlaiDark, sqlaiLight } from "../lib/monacoThemes";
 import { createSqlCompletionProvider } from "../lib/sqlCompletions";
@@ -22,6 +23,12 @@ export default function SqlEditor({ onExecute, onFormat }: SqlEditorProps) {
   const isDark = useDarkMode();
   const editorRef = useRef<monacoEditor.IStandaloneCodeEditor | null>(null);
   const { activeTabId, tabs, setContent } = useEditorStore();
+  const fontSize = useSettingsStore((s) => s.editorFontSize);
+  const fontFamily = useSettingsStore((s) => s.editorFontFamily);
+  const tabSize = useSettingsStore((s) => s.editorTabSize);
+  const minimap = useSettingsStore((s) => s.editorMinimap);
+  const wordWrap = useSettingsStore((s) => s.editorWordWrap);
+  const lineNumbers = useSettingsStore((s) => s.editorLineNumbers);
   const [dragOver, setDragOver] = useState(false);
   const activeTab = tabs.find((t) => t.id === activeTabId);
 
@@ -262,14 +269,14 @@ export default function SqlEditor({ onExecute, onFormat }: SqlEditorProps) {
         beforeMount={handleBeforeMount}
         onMount={handleMount}
         options={{
-          fontSize: 14,
-          fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace",
-          lineNumbers: "on",
-          minimap: { enabled: false },
-          wordWrap: "on",
+          fontSize,
+          fontFamily,
+          lineNumbers: lineNumbers ? "on" : "off",
+          minimap: { enabled: minimap },
+          wordWrap: wordWrap ? "on" : "off",
           scrollBeyondLastLine: false,
           automaticLayout: true,
-          tabSize: 2,
+          tabSize,
           suggestOnTriggerCharacters: true,
           quickSuggestions: true,
           padding: { top: 8, bottom: 8 },

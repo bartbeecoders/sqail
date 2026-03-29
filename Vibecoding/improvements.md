@@ -81,7 +81,7 @@ api: https://llm.hideterms.com
 
 Make sure you add a test button for each AI provider to test the connection and configuration.
 
-[ ] Add keyboard shortcuts for common actions:
+[x] Add keyboard shortcuts for common actions:
 - Ctrl + N: New connection
 - Ctrl + S: Save query
 - Ctrl + O: Open query
@@ -91,3 +91,5 @@ Make sure you add a test button for each AI provider to test the connection and 
 
 Add a setting page to configure the application.
 Add a tab for the keyboard shortcuts configuration.
+
+[ ] Save the applicactions state when closing the app, and restore it when opening the app. (maximazed, window size, etc.)

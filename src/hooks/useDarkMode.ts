@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { useSettingsStore } from "../stores/settingsStore";
 
 function subscribe(callback: () => void) {
   const mql = window.matchMedia("(prefers-color-scheme: dark)");
@@ -11,5 +12,10 @@ function getSnapshot() {
 }
 
 export function useDarkMode(): boolean {
-  return useSyncExternalStore(subscribe, getSnapshot);
+  const systemDark = useSyncExternalStore(subscribe, getSnapshot);
+  const theme = useSettingsStore((s) => s.theme);
+
+  if (theme === "dark") return true;
+  if (theme === "light") return false;
+  return systemDark;
 }

@@ -10,9 +10,23 @@ import {
   type ColumnFiltersState,
 } from "@tanstack/react-table";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ArrowUp, ArrowDown, ArrowUpDown, Search, X, Filter } from "lucide-react";
+import { ArrowUp, ArrowDown, ArrowUpDown, Search, X, Filter, Check } from "lucide-react";
 import { cn } from "../lib/utils";
 import type { QueryColumn } from "../types/query";
+
+/** Flash a "Copied" tooltip near the click position. */
+function useCopyFeedback() {
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  const showCopied = useCallback((id: string) => {
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    setCopiedId(id);
+    timeoutRef.current = setTimeout(() => setCopiedId(null), 1200);
+  }, []);
+
+  return { copiedId, showCopied };
+}
 
 type CellValue = string | number | boolean | null;
 
@@ -44,6 +58,28 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
   const [globalFilter, setGlobalFilter] = useState("");
   const [showColumnFilters, setShowColumnFilters] = useState(false);
   const parentRef = useRef<HTMLDivElement>(null);
+  const { copiedId, showCopied } = useCopyFeedback();
+
+  const copyCell = useCallback(
+    (rowIdx: number, colIdx: number) => {
+      const value = rows[rowIdx]?.[colIdx];
+      const text = value === null ? "NULL" : String(value);
+      navigator.clipboard.writeText(text);
+      showCopied(`cell-${rowIdx}-${colIdx}`);
+    },
+    [rows, showCopied],
+  );
+
+  const copyRow = useCallback(
+    (rowIdx: number) => {
+      const row = rows[rowIdx];
+      if (!row) return;
+      const text = row.map((v) => (v === null ? "NULL" : String(v))).join("\t");
+      navigator.clipboard.writeText(text);
+      showCopied(`row-${rowIdx}`);
+    },
+    [rows, showCopied],
+  );
 
   const gridTemplateColumns = `40px ${columns.map(() => "minmax(80px, 1fr)").join(" ")}`;
 
@@ -256,16 +292,30 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
                     gridTemplateColumns,
                   }}
                 >
-                  {/* Row number */}
-                  <div className="border-r border-border px-2 py-1 text-right text-[10px] text-muted-foreground/50 tabular-nums">
-                    {virtualRow.index + 1}
+                  {/* Row number — click to copy entire row */}
+                  <div
+                    onClick={() => copyRow(row.index)}
+                    className="relative cursor-pointer border-r border-border px-2 py-1 text-right text-[10px] text-muted-foreground/50 tabular-nums hover:bg-primary/10 hover:text-primary"
+                    title="Click to copy row"
+                  >
+                    {copiedId === `row-${row.index}` ? (
+                      <Check size={10} className="inline text-success" />
+                    ) : (
+                      virtualRow.index + 1
+                    )}
                   </div>
-                  {row.getVisibleCells().map((cell) => (
+                  {row.getVisibleCells().map((cell, cellIdx) => (
                     <div
                       key={cell.id}
-                      className="truncate border-r border-border px-2 py-1"
+                      onClick={() => copyCell(row.index, cellIdx)}
+                      className="cursor-pointer truncate border-r border-border px-2 py-1 hover:bg-primary/5"
+                      title="Click to copy cell"
                     >
-                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                      {copiedId === `cell-${row.index}-${cellIdx}` ? (
+                        <span className="text-[10px] text-success">Copied</span>
+                      ) : (
+                        flexRender(cell.column.columnDef.cell, cell.getContext())
+                      )}
                     </div>
                   ))}
                 </div>

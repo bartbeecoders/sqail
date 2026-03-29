@@ -158,6 +158,8 @@ const EXPORT_OPTIONS: { format: ExportFormat; label: string; desc: string }[] = 
   { format: "csv", label: "CSV", desc: "Comma-separated values" },
   { format: "excel", label: "Excel", desc: "Excel XML spreadsheet (.xls)" },
   { format: "json", label: "JSON", desc: "JSON array of objects" },
+  { format: "sql", label: "SQL INSERT", desc: "INSERT statements" },
+  { format: "markdown", label: "Markdown", desc: "Markdown table" },
   { format: "xml", label: "XML", desc: "XML document" },
 ];
 

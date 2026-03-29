@@ -16,13 +16,37 @@ import { useAiStore } from "./stores/aiStore";
 import { useAiStream } from "./hooks/useAiStream";
 import { useGlobalShortcuts, type ShortcutHandlers } from "./hooks/useGlobalShortcuts";
 
+function loadUiState<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw !== null) return JSON.parse(raw) as T;
+  } catch { /* ignore */ }
+  return fallback;
+}
+
 export default function App() {
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => loadUiState("sqail_sidebar_collapsed", false));
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [connectionFormOpen, setConnectionFormOpen] = useState(false);
   const aiPanelOpen = useAiStore((s) => s.panelOpen);
 
+  // Restore AI panel state on mount
+  useEffect(() => {
+    const saved = loadUiState("sqail_ai_panel_open", false);
+    if (saved) useAiStore.getState().setPanel(true);
+  }, []);
+
   useAiStream();
+
+  // Persist sidebar collapsed state
+  useEffect(() => {
+    localStorage.setItem("sqail_sidebar_collapsed", JSON.stringify(sidebarCollapsed));
+  }, [sidebarCollapsed]);
+
+  // Persist AI panel open state
+  useEffect(() => {
+    localStorage.setItem("sqail_ai_panel_open", JSON.stringify(aiPanelOpen));
+  }, [aiPanelOpen]);
 
   useEffect(() => {
     getCurrentWindow().setTitle(

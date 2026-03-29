@@ -131,15 +131,61 @@ export function toExcelXml(columns: QueryColumn[], rows: CellValue[][]): string 
   return lines.join("\n");
 }
 
+// ── SQL INSERT ────────────────────────────────────────────
+
+function escapeSqlValue(value: CellValue): string {
+  if (value === null) return "NULL";
+  if (typeof value === "number") return String(value);
+  if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function escapeSqlIdentifier(name: string): string {
+  return `"${name.replace(/"/g, '""')}"`;
+}
+
+export function toSqlInsert(columns: QueryColumn[], rows: CellValue[][], tableName = "table_name"): string {
+  if (rows.length === 0) return `-- No rows to export`;
+  const colList = columns.map((c) => escapeSqlIdentifier(c.name)).join(", ");
+  const lines = rows.map((row) => {
+    const values = row.map((v) => escapeSqlValue(v)).join(", ");
+    return `INSERT INTO ${escapeSqlIdentifier(tableName)} (${colList}) VALUES (${values});`;
+  });
+  return lines.join("\n");
+}
+
+// ── Markdown Table ────────────────────────────────────────
+
+export function toMarkdown(columns: QueryColumn[], rows: CellValue[][]): string {
+  const header = columns.map((c) => c.name);
+  const separator = columns.map(() => "---");
+  const body = rows.map((row) =>
+    row.map((v) => {
+      if (v === null) return "NULL";
+      const s = String(v).replace(/\|/g, "\\|").replace(/\n/g, " ");
+      return s;
+    }),
+  );
+
+  const lines = [
+    `| ${header.join(" | ")} |`,
+    `| ${separator.join(" | ")} |`,
+    ...body.map((row) => `| ${row.join(" | ")} |`),
+  ];
+  return lines.join("\n");
+}
+
 // ── Download helper ────────────────────────────────────────
 
-export type ExportFormat = "csv" | "json" | "xml" | "excel";
+export type ExportFormat = "csv" | "json" | "xml" | "excel" | "sql" | "markdown";
 
 const FORMAT_CONFIG: Record<ExportFormat, { mime: string; ext: string }> = {
   csv: { mime: "text/csv;charset=utf-8", ext: "csv" },
   json: { mime: "application/json;charset=utf-8", ext: "json" },
   xml: { mime: "application/xml;charset=utf-8", ext: "xml" },
   excel: { mime: "application/vnd.ms-excel", ext: "xls" },
+  sql: { mime: "text/sql;charset=utf-8", ext: "sql" },
+  markdown: { mime: "text/markdown;charset=utf-8", ext: "md" },
 };
 
 export function exportResults(
@@ -161,6 +207,12 @@ export function exportResults(
       break;
     case "excel":
       content = toExcelXml(columns, rows);
+      break;
+    case "sql":
+      content = toSqlInsert(columns, rows);
+      break;
+    case "markdown":
+      content = toMarkdown(columns, rows);
       break;
   }
 

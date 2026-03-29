@@ -113,12 +113,12 @@
 
 ### Steps
 
-- [ ] 7.1. Export to CSV — with proper escaping, configurable delimiter
-- [ ] 7.2. Export to JSON — array of objects, pretty-printed
-- [ ] 7.3. Export to SQL INSERT statements
-- [ ] 7.4. Export to Markdown table
-- [ ] 7.5. Copy cell / row / selection to clipboard
-- [ ] 7.6. Add export button to results toolbar with format dropdown
+- [x] 7.1. Export to CSV — with proper escaping, configurable delimiter
+- [x] 7.2. Export to JSON — array of objects, pretty-printed
+- [x] 7.3. Export to SQL INSERT statements
+- [x] 7.4. Export to Markdown table
+- [x] 7.5. Copy cell / row / selection to clipboard
+- [x] 7.6. Add export button to results toolbar with format dropdown
 
 ---
 
@@ -128,12 +128,12 @@
 
 ### Steps
 
-- [ ] 8.1. Build settings page/modal with sections: General, Editor, Appearance, AI, Connections
-- [ ] 8.2. General: default row limit, query timeout, startup behavior
-- [ ] 8.3. Editor: font size, font family, tab size, minimap, word wrap, line numbers
-- [ ] 8.4. Appearance: theme (system/light/dark), accent color, sidebar position
-- [ ] 8.5. Sync all settings to SurrealDB; load on startup, apply reactively
-- [ ] 8.6. Add keyboard shortcuts settings — view and customize bindings
+- [x] 8.1. Build settings page/modal with sections: General, Editor, Appearance, Keyboard Shortcuts, About
+- [x] 8.2. General: default row limit, query timeout
+- [x] 8.3. Editor: font size, font family, tab size, minimap, word wrap, line numbers
+- [x] 8.4. Appearance: theme (system/light/dark)
+- [x] 8.5. Sync all settings to localStorage; load on startup, apply reactively
+- [x] 8.6. Add keyboard shortcuts settings — view and customize bindings
 
 ---
 

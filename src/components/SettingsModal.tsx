@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { X, RotateCcw, Settings, Keyboard, Info } from "lucide-react";
 import { cn } from "../lib/utils";
 import { useShortcutStore } from "../stores/shortcutStore";
+import { useSettingsStore } from "../stores/settingsStore";
 import {
   SHORTCUT_ACTIONS,
   CATEGORY_LABELS,
@@ -97,33 +98,157 @@ function TabButton({
 // ── General Tab ────────────────────────────────────────────
 
 function GeneralTab() {
+  const settings = useSettingsStore();
+  const update = settings.updateSetting;
+
   return (
     <div className="space-y-6">
+      {/* Editor section */}
       <section>
-        <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+        <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
           Editor
         </h3>
-        <p className="text-xs text-muted-foreground">
-          Editor preferences (font size, font family, tab size, word wrap) will be configurable here in a future update.
-        </p>
+        <div className="space-y-3">
+          <SettingRow label="Font Size">
+            <input
+              type="number"
+              min={8}
+              max={32}
+              value={settings.editorFontSize}
+              onChange={(e) => update("editorFontSize", Number(e.target.value))}
+              className="input w-20 text-center"
+            />
+          </SettingRow>
+          <SettingRow label="Font Family">
+            <input
+              value={settings.editorFontFamily}
+              onChange={(e) => update("editorFontFamily", e.target.value)}
+              className="input w-64"
+            />
+          </SettingRow>
+          <SettingRow label="Tab Size">
+            <select
+              value={settings.editorTabSize}
+              onChange={(e) => update("editorTabSize", Number(e.target.value))}
+              className="input w-20"
+            >
+              <option value={2}>2</option>
+              <option value={4}>4</option>
+              <option value={8}>8</option>
+            </select>
+          </SettingRow>
+          <SettingRow label="Minimap">
+            <ToggleSwitch
+              checked={settings.editorMinimap}
+              onChange={(v) => update("editorMinimap", v)}
+            />
+          </SettingRow>
+          <SettingRow label="Word Wrap">
+            <ToggleSwitch
+              checked={settings.editorWordWrap}
+              onChange={(v) => update("editorWordWrap", v)}
+            />
+          </SettingRow>
+          <SettingRow label="Line Numbers">
+            <ToggleSwitch
+              checked={settings.editorLineNumbers}
+              onChange={(v) => update("editorLineNumbers", v)}
+            />
+          </SettingRow>
+        </div>
       </section>
+
+      {/* Appearance section */}
       <section>
-        <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+        <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
           Appearance
         </h3>
-        <p className="text-xs text-muted-foreground">
-          Theme and accent color settings will be configurable here in a future update. Currently follows system dark/light preference.
-        </p>
+        <div className="space-y-3">
+          <SettingRow label="Theme">
+            <div className="flex gap-1">
+              {(["system", "light", "dark"] as const).map((t) => (
+                <button
+                  key={t}
+                  onClick={() => update("theme", t)}
+                  className={cn(
+                    "rounded-md px-3 py-1.5 text-xs font-medium transition-colors capitalize",
+                    settings.theme === t
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-muted text-muted-foreground hover:bg-accent",
+                  )}
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
+          </SettingRow>
+        </div>
       </section>
+
+      {/* Query section */}
       <section>
-        <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+        <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
           Query Execution
         </h3>
-        <p className="text-xs text-muted-foreground">
-          Default row limit, query timeout, and startup behavior will be configurable here in a future update.
-        </p>
+        <div className="space-y-3">
+          <SettingRow label="Default Row Limit">
+            <input
+              type="number"
+              min={1}
+              max={100000}
+              value={settings.defaultRowLimit}
+              onChange={(e) => update("defaultRowLimit", Number(e.target.value))}
+              className="input w-24 text-center"
+            />
+          </SettingRow>
+          <SettingRow label="Query Timeout (seconds)">
+            <input
+              type="number"
+              min={1}
+              max={600}
+              value={settings.queryTimeoutSeconds}
+              onChange={(e) => update("queryTimeoutSeconds", Number(e.target.value))}
+              className="input w-24 text-center"
+            />
+          </SettingRow>
+        </div>
       </section>
+
+      <div className="pt-2">
+        <button onClick={settings.resetSettings} className="btn-secondary flex items-center gap-1 text-[10px]">
+          <RotateCcw size={10} />
+          Reset All Settings
+        </button>
+      </div>
     </div>
+  );
+}
+
+function SettingRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex items-center justify-between">
+      <span className="text-xs text-foreground">{label}</span>
+      {children}
+    </div>
+  );
+}
+
+function ToggleSwitch({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <button
+      onClick={() => onChange(!checked)}
+      className={cn(
+        "relative h-5 w-9 rounded-full transition-colors",
+        checked ? "bg-primary" : "bg-muted-foreground/30",
+      )}
+    >
+      <span
+        className={cn(
+          "absolute top-0.5 left-0.5 h-4 w-4 rounded-full bg-white transition-transform shadow-sm",
+          checked && "translate-x-4",
+        )}
+      />
+    </button>
   );
 }
 

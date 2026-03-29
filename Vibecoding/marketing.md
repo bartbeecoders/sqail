@@ -1,0 +1,2 @@
+SQaiL -  Smart SQL editor
+

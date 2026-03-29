@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+src-tauri/target/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tauri
+src-tauri/gen/
+src-tauri/WixTools/
+
+# Vite
+*.local
+
+# Debug logs
+npm-debug.log*
+pnpm-debug.log*
+
+# Generated build number
+build-number.json
+
+
+scripts/secrets.md

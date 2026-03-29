@@ -34,6 +34,7 @@ interface EditorState {
   setActiveTab: (id: string) => void;
   renameTab: (id: string, title: string) => void;
   setContent: (id: string, content: string) => void;
+  setFilePath: (id: string, filePath: string) => void;
   getActiveTab: () => EditorTab | undefined;
   clearActiveTab: () => void;
 }
@@ -81,6 +82,13 @@ export const useEditorStore = create<EditorState>((set, get) => {
     setContent: (id, content) => {
       set((s) => ({
         tabs: s.tabs.map((t) => (t.id === id ? { ...t, content } : t)),
+      }));
+      persist();
+    },
+
+    setFilePath: (id, filePath) => {
+      set((s) => ({
+        tabs: s.tabs.map((t) => (t.id === id ? { ...t, filePath } : t)),
       }));
       persist();
     },

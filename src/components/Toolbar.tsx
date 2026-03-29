@@ -1,5 +1,6 @@
-import { Play, AlignLeft, Trash2, Sparkles, Loader2 } from "lucide-react";
+import { Play, AlignLeft, Trash2, Sparkles, Loader2, Settings } from "lucide-react";
 import { cn } from "../lib/utils";
+import { useAiStore } from "../stores/aiStore";
 
 interface ToolbarProps {
   onRun?: () => void;
@@ -7,6 +8,7 @@ interface ToolbarProps {
   onClear?: () => void;
   hasConnection?: boolean;
   loading?: boolean;
+  onOpenSettings?: () => void;
 }
 
 interface ToolbarButtonProps {
@@ -44,13 +46,16 @@ function ToolbarButton({
   );
 }
 
-export default function Toolbar({ onRun, onFormat, onClear, hasConnection, loading }: ToolbarProps) {
+export default function Toolbar({ onRun, onFormat, onClear, hasConnection, loading, onOpenSettings }: ToolbarProps) {
+  const aiPanelOpen = useAiStore((s) => s.panelOpen);
+  const toggleAiPanel = useAiStore((s) => s.togglePanel);
+
   return (
     <div className="flex h-10 items-center gap-1 border-b border-border bg-muted/30 px-2">
       <ToolbarButton
         icon={loading ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
         label={loading ? "Running..." : "Run"}
-        shortcut="Ctrl+Enter"
+        shortcut="F5 / Ctrl+Enter"
         variant="primary"
         onClick={onRun}
         disabled={!hasConnection || loading}
@@ -67,11 +72,30 @@ export default function Toolbar({ onRun, onFormat, onClear, hasConnection, loadi
         onClick={onClear}
       />
       <div className="mx-1 h-4 w-px bg-border" />
-      <ToolbarButton
-        icon={<Sparkles size={14} />}
-        label="AI"
-        disabled
-      />
+      <button
+        onClick={toggleAiPanel}
+        className={cn(
+          "flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors",
+          aiPanelOpen
+            ? "bg-primary text-primary-foreground"
+            : "text-foreground hover:bg-accent",
+        )}
+        title="Toggle AI Assistant (Ctrl+Shift+A)"
+      >
+        <Sparkles size={14} />
+        <span>AI</span>
+      </button>
+
+      {/* Spacer to push settings to the right */}
+      <div className="flex-1" />
+
+      <button
+        onClick={onOpenSettings}
+        className="flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+        title="Settings (Ctrl+,)"
+      >
+        <Settings size={14} />
+      </button>
     </div>
   );
 }

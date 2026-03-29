@@ -1,3 +1,4 @@
+mod ai;
 mod commands;
 mod db;
 mod pool;
@@ -5,6 +6,7 @@ mod query;
 mod schema;
 mod state;
 
+use ai::store::{AiHistoryStore, AiProviderStore};
 use db::store::ConnectionStore;
 use state::AppState;
 use tauri::Manager;
@@ -13,6 +15,8 @@ use tauri::Manager;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_sql::Builder::default().build())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -28,8 +32,10 @@ pub fn run() {
                 .expect("failed to resolve app data dir");
             eprintln!("App data dir: {}", app_data_dir.display());
             let store =
-                ConnectionStore::new(app_data_dir).expect("failed to create connection store");
-            app.manage(AppState::new(store));
+                ConnectionStore::new(app_data_dir.clone()).expect("failed to create connection store");
+            let ai_provider_store = AiProviderStore::new(&app_data_dir);
+            let ai_history_store = AiHistoryStore::new(&app_data_dir);
+            app.manage(AppState::new(store, ai_provider_store, ai_history_store));
 
             Ok(())
         })
@@ -48,6 +54,19 @@ pub fn run() {
             commands::list_columns,
             commands::list_indexes,
             commands::list_routines,
+            commands::list_ai_providers,
+            commands::create_ai_provider,
+            commands::update_ai_provider,
+            commands::delete_ai_provider,
+            commands::set_default_ai_provider,
+            commands::test_ai_provider,
+            commands::ai_generate_sql,
+            commands::ai_explain_query,
+            commands::ai_optimize_query,
+            commands::ai_generate_docs,
+            commands::list_ai_history,
+            commands::save_ai_history_entry,
+            commands::clear_ai_history,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

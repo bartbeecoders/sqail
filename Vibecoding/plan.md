@@ -93,17 +93,17 @@
 
 ### Steps
 
-- [ ] 6.1. Design AI provider model: `{ id, name, provider, apiKey, model, baseUrl?, isDefault? }`
-- [ ] 6.2. Store AI provider configs in SurrealDB; build settings UI to add/edit/remove providers
-- [ ] 6.3. Create Rust-side HTTP client for AI API calls (Claude, OpenAI, Minimax, custom OpenAI-compatible)
-- [ ] 6.4. Build AI sidebar panel — text input for natural language prompt, output area for AI response
-- [ ] 6.5. Implement "Generate SQL" flow: user describes query in natural language → AI returns SQL → insert into editor
-- [ ] 6.6. Implement "Explain Query" flow: send current query → AI returns explanation displayed in sidebar
-- [ ] 6.7. Implement "Optimize Query" flow: send current query + schema context → AI suggests optimized version
-- [ ] 6.8. Implement "Generate Documentation" flow: send schema info → AI produces markdown documentation for tables/columns
-- [ ] 6.9. Add context injection: automatically include active schema/table metadata in AI prompts for better results
-- [ ] 6.10. Stream AI responses (SSE/streaming) for real-time output in the sidebar
-- [ ] 6.11. Add prompt history — recall previous AI interactions
+- [x] 6.1. Design AI provider model: `{ id, name, provider, apiKey, model, baseUrl?, isDefault? }`
+- [x] 6.2. Store AI provider configs in JSON file; build settings UI to add/edit/remove providers
+- [x] 6.3. Create Rust-side HTTP client for AI API calls (Claude, OpenAI, Minimax, custom OpenAI-compatible)
+- [x] 6.4. Build AI sidebar panel — text input for natural language prompt, output area for AI response
+- [x] 6.5. Implement "Generate SQL" flow: user describes query in natural language → AI returns SQL → insert into editor
+- [x] 6.6. Implement "Explain Query" flow: send current query → AI returns explanation displayed in sidebar
+- [x] 6.7. Implement "Optimize Query" flow: send current query + schema context → AI suggests optimized version
+- [x] 6.8. Implement "Generate Documentation" flow: send schema info → AI produces markdown documentation for tables/columns
+- [x] 6.9. Add context injection: automatically include active schema/table metadata in AI prompts for better results
+- [x] 6.10. Stream AI responses (SSE/streaming) for real-time output in the sidebar
+- [x] 6.11. Add prompt history — recall previous AI interactions
 
 ---
 

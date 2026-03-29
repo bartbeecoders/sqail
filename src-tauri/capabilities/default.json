@@ -8,6 +8,9 @@
   "permissions": [
     "core:default",
     "core:window:allow-set-title",
-    "sql:default"
+    "core:event:default",
+    "sql:default",
+    "dialog:default",
+    "fs:default"
   ]
 }

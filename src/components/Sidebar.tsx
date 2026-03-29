@@ -20,6 +20,8 @@ import SchemaTree from "./SchemaTree";
 interface SidebarProps {
   collapsed: boolean;
   onToggle: () => void;
+  externalFormOpen?: boolean;
+  onExternalFormClose?: () => void;
 }
 
 const DRIVER_ICONS: Record<string, string> = {
@@ -29,12 +31,21 @@ const DRIVER_ICONS: Record<string, string> = {
   mssql: "MS",
 };
 
-export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
+export default function Sidebar({ collapsed, onToggle, externalFormOpen, onExternalFormClose }: SidebarProps) {
   const { connections, activeConnectionId, loading, loadConnections, connect, disconnect, deleteConnection } =
     useConnectionStore();
   const [formOpen, setFormOpen] = useState(false);
   const [editingConn, setEditingConn] = useState<ConnectionConfig | undefined>();
   const [connectingId, setConnectingId] = useState<string | null>(null);
+
+  // Open form from external trigger (e.g. keyboard shortcut)
+  useEffect(() => {
+    if (externalFormOpen) {
+      setEditingConn(undefined);
+      setFormOpen(true);
+      onExternalFormClose?.();
+    }
+  }, [externalFormOpen, onExternalFormClose]);
 
   useEffect(() => {
     loadConnections();

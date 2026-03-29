@@ -6,6 +6,8 @@ import { useDarkMode } from "../hooks/useDarkMode";
 import { useEditorStore } from "../stores/editorStore";
 import { useConnectionStore } from "../stores/connectionStore";
 import { useSchemaStore } from "../stores/schemaStore";
+import { useAiStore } from "../stores/aiStore";
+import { buildSchemaContext } from "../lib/schemaContext";
 import { sqlaiDark, sqlaiLight } from "../lib/monacoThemes";
 import { createSqlCompletionProvider } from "../lib/sqlCompletions";
 import { buildSelectStatement } from "../lib/sqlGenerate";
@@ -76,6 +78,51 @@ export default function SqlEditor({ onExecute, onFormat }: SqlEditorProps) {
         run: () => {
           const state = useEditorStore.getState();
           state.closeTab(state.activeTabId);
+        },
+      });
+
+      // AI context menu actions
+      editor.addAction({
+        id: "ai-explain-query",
+        label: "AI: Explain Query",
+        contextMenuGroupId: "ai",
+        contextMenuOrder: 1,
+        run: (ed) => {
+          const selection = ed.getSelection();
+          const model = ed.getModel();
+          if (!model) return;
+          const sql =
+            selection && !selection.isEmpty() ? model.getValueInRange(selection) : model.getValue();
+          if (!sql.trim()) return;
+          const connStore = useConnectionStore.getState();
+          const conn = connStore.connections.find((c) => c.id === connStore.activeConnectionId);
+          const driver = conn?.driver ?? "";
+          const schemaContext = buildSchemaContext();
+          const ai = useAiStore.getState();
+          ai.setPanel(true);
+          ai.explainQuery(sql.trim(), schemaContext, driver);
+        },
+      });
+
+      editor.addAction({
+        id: "ai-optimize-query",
+        label: "AI: Optimize Query",
+        contextMenuGroupId: "ai",
+        contextMenuOrder: 2,
+        run: (ed) => {
+          const selection = ed.getSelection();
+          const model = ed.getModel();
+          if (!model) return;
+          const sql =
+            selection && !selection.isEmpty() ? model.getValueInRange(selection) : model.getValue();
+          if (!sql.trim()) return;
+          const connStore = useConnectionStore.getState();
+          const conn = connStore.connections.find((c) => c.id === connStore.activeConnectionId);
+          const driver = conn?.driver ?? "";
+          const schemaContext = buildSchemaContext();
+          const ai = useAiStore.getState();
+          ai.setPanel(true);
+          ai.optimizeQuery(sql.trim(), schemaContext, driver);
         },
       });
 

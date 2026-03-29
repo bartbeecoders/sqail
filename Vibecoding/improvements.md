@@ -8,8 +8,27 @@ For dev purposes set the following connection details:
 
 
 [ ] Format document feature
+Implement the document format feature (Format tool in the menu or Ctrl+Shift+F)
+Formatting a select statement should align the columns and keywords in a readable way.
+Example:
+SELECT
+    eg.[id]                        AS 'Id',
+    eg.[plant_cd]                  AS 'PlantCd',
+    eg.[equipment_class_cd]        AS 'EquipmentClassCd',
+    eg.[equipment_group_cd]        AS 'EquipmentGroupCd',
+    eg.[description]               AS 'Description',
+    eg.[application_cd]            AS 'ApplicationCd',
+    eg.[group_type]                AS 'GroupType',
+    eg.[is_active]                 AS 'IsActive',
+    eg.[created_date]              AS 'CreatedDate',
+    eg.[last_edit_date]            AS 'LastEditDate',
+    eg.[last_edit_user_cd]         AS 'LastEditUserCd'
+FROM [mas].[equipment_group] eg;
 
-[ ] Multi select feature
+Do not include spaces in the alias names. And add alieses for the table names.
+
+
+[x] Multi select feature
 
 [x] Implement the ability to export results to excel, csv, json, xml
 
@@ -28,7 +47,7 @@ The columns should be well aligned and easy to read.
 Add Sorting and Filtering capabilities to the results table.
 Add a search bar to filter the results table.
 
-[ ] Multi platform deployment
+[x] Multi platform deployment
 Create build scripts for each platform: 
 Try to create  single executable files for each platform, with instructions on how to run them.
 Add a README file with instructions on how to build and run the application.
@@ -36,7 +55,39 @@ Add a README file with instructions on how to build and run the application.
 - [ ] macOS
 - [ ] Linux
 
-[ ] App Versioning
+[x] App Versioning
 Set the main version to 0.1.0. ANd set a build nr (yyyymmdd-revision)
 Increase/set the build nr every time a new build is created.
 Show the app version in the title bar
+
+
+[x] Add more AI providers:
+Minimax: 
+api: https://api.minimax.io/v1
+docs: https://platform.minimax.io/docs/api-reference/text-openai-api
+models: https://platform.minimax.io/docs/guides/models-intro
+
+Z.ai:
+api: https://api.z.ai/api/paas/v4/
+docs: https://docs.z.ai/api-reference/introduction
+models: https://docs.z.ai/api-reference/introduction
+
+claude code cli:
+use the claude code cli as an AI llm provider
+
+LM STudio:
+use LM Studio as an AI llm provider
+api: https://llm.hideterms.com
+
+Make sure you add a test button for each AI provider to test the connection and configuration.
+
+[ ] Add keyboard shortcuts for common actions:
+- Ctrl + N: New connection
+- Ctrl + S: Save query
+- Ctrl + O: Open query
+- F5: Run query
+- Ctrl + Shift + S: Save query as
+- Ctrl + Shift + F: Format query
+
+Add a setting page to configure the application.
+Add a tab for the keyboard shortcuts configuration.

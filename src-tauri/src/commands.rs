@@ -2,10 +2,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sqlx::any::AnyPoolOptions;
-use tauri::State;
+use tauri::{AppHandle, State};
 use tokio::net::TcpStream;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 
+use crate::ai::client;
+use crate::ai::provider::{AiHistoryEntry, AiProviderConfig};
 use crate::db::connections::{ConnectionConfig, Driver};
 use crate::pool::DbPool;
 use crate::query::{self, QueryResponse};
@@ -309,4 +311,266 @@ pub async fn list_routines(
 ) -> Result<Vec<RoutineInfo>, String> {
     let (pool, driver) = get_pool_and_driver(&state, &connection_id).await?;
     schema::list_routines(pool, &driver, &schema_name).await
+}
+
+// ── AI provider commands ───────────────────────────────────
+
+#[tauri::command]
+pub async fn list_ai_providers(
+    state: State<'_, AppState>,
+) -> Result<Vec<AiProviderConfig>, String> {
+    let providers = state.ai_providers.lock().await;
+    Ok(providers.clone())
+}
+
+#[tauri::command]
+pub async fn create_ai_provider(
+    state: State<'_, AppState>,
+    config: AiProviderConfig,
+) -> Result<AiProviderConfig, String> {
+    let mut providers = state.ai_providers.lock().await;
+
+    let mut config = config;
+    if config.id.is_empty() {
+        config.id = uuid::Uuid::new_v4().to_string();
+    }
+
+    // If this is the first provider or marked as default, ensure only one default
+    if config.is_default || providers.is_empty() {
+        for p in providers.iter_mut() {
+            p.is_default = false;
+        }
+        config.is_default = true;
+    }
+
+    providers.push(config.clone());
+    drop(providers);
+    state.save_ai_providers().await?;
+    Ok(config)
+}
+
+#[tauri::command]
+pub async fn update_ai_provider(
+    state: State<'_, AppState>,
+    config: AiProviderConfig,
+) -> Result<AiProviderConfig, String> {
+    let mut providers = state.ai_providers.lock().await;
+    let pos = providers
+        .iter()
+        .position(|p| p.id == config.id)
+        .ok_or_else(|| format!("AI provider '{}' not found", config.id))?;
+
+    if config.is_default {
+        for p in providers.iter_mut() {
+            p.is_default = false;
+        }
+    }
+
+    providers[pos] = config.clone();
+    drop(providers);
+    state.save_ai_providers().await?;
+    Ok(config)
+}
+
+#[tauri::command]
+pub async fn delete_ai_provider(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    let mut providers = state.ai_providers.lock().await;
+    let pos = providers
+        .iter()
+        .position(|p| p.id == id)
+        .ok_or_else(|| format!("AI provider '{id}' not found"))?;
+    let was_default = providers[pos].is_default;
+    providers.remove(pos);
+
+    // If we removed the default, make the first remaining one the default
+    if was_default && !providers.is_empty() {
+        providers[0].is_default = true;
+    }
+
+    drop(providers);
+    state.save_ai_providers().await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_default_ai_provider(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    let mut providers = state.ai_providers.lock().await;
+    let mut found = false;
+    for p in providers.iter_mut() {
+        p.is_default = p.id == id;
+        if p.id == id {
+            found = true;
+        }
+    }
+    if !found {
+        return Err(format!("AI provider '{id}' not found"));
+    }
+    drop(providers);
+    state.save_ai_providers().await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn test_ai_provider(config: AiProviderConfig) -> Result<String, String> {
+    client::test_ai_provider(&config).await
+}
+
+// ── AI flow commands ───────────────────────────────────────
+
+async fn get_default_provider(state: &State<'_, AppState>) -> Result<AiProviderConfig, String> {
+    let providers = state.ai_providers.lock().await;
+    providers
+        .iter()
+        .find(|p| p.is_default)
+        .or_else(|| providers.first())
+        .cloned()
+        .ok_or_else(|| "No AI provider configured. Add one in AI settings.".to_string())
+}
+
+#[tauri::command]
+pub async fn ai_generate_sql(
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+    prompt: String,
+    schema_context: String,
+    driver: String,
+) -> Result<String, String> {
+    let config = get_default_provider(&state).await?;
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let rid = request_id.clone();
+
+    tokio::spawn(async move {
+        client::stream_ai_response(
+            app_handle,
+            rid,
+            &config,
+            &prompt,
+            "generate_sql",
+            Some(&driver),
+            Some(&schema_context),
+        )
+        .await;
+    });
+
+    Ok(request_id)
+}
+
+#[tauri::command]
+pub async fn ai_explain_query(
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+    sql: String,
+    schema_context: String,
+    driver: String,
+) -> Result<String, String> {
+    let config = get_default_provider(&state).await?;
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let rid = request_id.clone();
+
+    tokio::spawn(async move {
+        client::stream_ai_response(
+            app_handle,
+            rid,
+            &config,
+            &sql,
+            "explain",
+            Some(&driver),
+            Some(&schema_context),
+        )
+        .await;
+    });
+
+    Ok(request_id)
+}
+
+#[tauri::command]
+pub async fn ai_optimize_query(
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+    sql: String,
+    schema_context: String,
+    driver: String,
+) -> Result<String, String> {
+    let config = get_default_provider(&state).await?;
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let rid = request_id.clone();
+
+    tokio::spawn(async move {
+        client::stream_ai_response(
+            app_handle,
+            rid,
+            &config,
+            &sql,
+            "optimize",
+            Some(&driver),
+            Some(&schema_context),
+        )
+        .await;
+    });
+
+    Ok(request_id)
+}
+
+#[tauri::command]
+pub async fn ai_generate_docs(
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+    schema_context: String,
+    driver: String,
+) -> Result<String, String> {
+    let config = get_default_provider(&state).await?;
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let rid = request_id.clone();
+
+    tokio::spawn(async move {
+        client::stream_ai_response(
+            app_handle,
+            rid,
+            &config,
+            "Generate documentation for the following database schema.",
+            "document",
+            Some(&driver),
+            Some(&schema_context),
+        )
+        .await;
+    });
+
+    Ok(request_id)
+}
+
+// ── AI history commands ────────────────────────────────────
+
+#[tauri::command]
+pub async fn list_ai_history(
+    state: State<'_, AppState>,
+) -> Result<Vec<AiHistoryEntry>, String> {
+    let history = state.ai_history.lock().await;
+    Ok(history.clone())
+}
+
+#[tauri::command]
+pub async fn save_ai_history_entry(
+    state: State<'_, AppState>,
+    entry: AiHistoryEntry,
+) -> Result<(), String> {
+    let mut history = state.ai_history.lock().await;
+    history.push(entry);
+    drop(history);
+    state.save_ai_history().await
+}
+
+#[tauri::command]
+pub async fn clear_ai_history(
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mut history = state.ai_history.lock().await;
+    history.clear();
+    drop(history);
+    state.save_ai_history().await
 }

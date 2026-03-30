@@ -1,13 +1,16 @@
 import { useState } from "react";
-import { X, Loader2, CheckCircle2, XCircle } from "lucide-react";
+import { X, Loader2, CheckCircle2, XCircle, ExternalLink } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
 import { cn } from "../lib/utils";
 import { useConnectionStore } from "../stores/connectionStore";
 import {
   type ConnectionConfig,
   type Driver,
+  type MssqlAuthMethod,
   defaultConnection,
   defaultPort,
   DRIVER_LABELS,
+  MSSQL_AUTH_LABELS,
 } from "../types/connection";
 
 interface ConnectionFormProps {
@@ -17,11 +20,22 @@ interface ConnectionFormProps {
 
 type TestStatus = "idle" | "testing" | "success" | "error";
 
+interface DeviceCodeInfo {
+  userCode: string;
+  deviceCode: string;
+  verificationUri: string;
+  expiresIn: number;
+  interval: number;
+}
+
 export default function ConnectionForm({ initial, onClose }: ConnectionFormProps) {
   const [form, setForm] = useState<ConnectionConfig>(initial ?? defaultConnection());
   const [testStatus, setTestStatus] = useState<TestStatus>("idle");
   const [testMessage, setTestMessage] = useState("");
   const [saving, setSaving] = useState(false);
+  const [entraSignedIn, setEntraSignedIn] = useState(false);
+  const [entraLoading, setEntraLoading] = useState(false);
+  const [deviceCode, setDeviceCode] = useState<DeviceCodeInfo | null>(null);
 
   const { createConnection, updateConnection, testConnection } = useConnectionStore();
   const isEdit = !!initial;
@@ -35,6 +49,45 @@ export default function ConnectionForm({ initial, onClose }: ConnectionFormProps
       driver,
       port: defaultPort(driver),
     }));
+  };
+
+  const handleEntraSignIn = async () => {
+    setEntraLoading(true);
+    setEntraSignedIn(false);
+    setTestStatus("idle");
+
+    // Ensure the form has an ID so the token can be stored against it
+    let connId = form.id;
+    if (!connId) {
+      connId = crypto.randomUUID();
+      setForm((prev) => ({ ...prev, id: connId }));
+    }
+
+    try {
+      // Step 1: Start device code flow
+      const dcInfo = await invoke<DeviceCodeInfo>("start_entra_login", {
+        tenantId: form.tenantId,
+        azureClientId: form.azureClientId,
+      });
+      setDeviceCode(dcInfo);
+
+      // Step 2: Poll for token (blocks until user completes auth)
+      await invoke<void>("poll_entra_token", {
+        connectionId: connId,
+        tenantId: form.tenantId,
+        azureClientId: form.azureClientId,
+        deviceCode: dcInfo.deviceCode,
+      });
+
+      setDeviceCode(null);
+      setEntraSignedIn(true);
+    } catch (e) {
+      setDeviceCode(null);
+      setTestStatus("error");
+      setTestMessage(String(e));
+    } finally {
+      setEntraLoading(false);
+    }
   };
 
   const handleTest = async () => {
@@ -145,24 +198,125 @@ export default function ConnectionForm({ initial, onClose }: ConnectionFormProps
                   className="input"
                 />
               </Field>
-              <div className="flex gap-2">
-                <Field label="User" className="flex-1">
-                  <input
-                    value={form.user}
-                    onChange={(e) => set("user", e.target.value)}
-                    placeholder="postgres"
-                    className="input"
-                  />
-                </Field>
-                <Field label="Password" className="flex-1">
-                  <input
-                    type="password"
-                    value={form.password}
-                    onChange={(e) => set("password", e.target.value)}
-                    className="input"
-                  />
-                </Field>
-              </div>
+              {form.driver === "mssql" && (
+                <>
+                  <Field label="Authentication">
+                    <div className="flex gap-1">
+                      {(Object.keys(MSSQL_AUTH_LABELS) as MssqlAuthMethod[]).map((m) => (
+                        <button
+                          key={m}
+                          type="button"
+                          onClick={() => set("mssqlAuthMethod", m)}
+                          className={cn(
+                            "flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
+                            form.mssqlAuthMethod === m
+                              ? "bg-primary text-primary-foreground"
+                              : "bg-muted text-muted-foreground hover:bg-accent",
+                          )}
+                        >
+                          {MSSQL_AUTH_LABELS[m]}
+                        </button>
+                      ))}
+                    </div>
+                  </Field>
+                  <label className="flex items-center gap-2 text-xs">
+                    <input
+                      type="checkbox"
+                      checked={form.trustServerCertificate}
+                      onChange={(e) => set("trustServerCertificate", e.target.checked)}
+                      className="h-3.5 w-3.5 accent-primary"
+                    />
+                    <span className="text-muted-foreground">Trust Server Certificate</span>
+                  </label>
+                </>
+              )}
+              {form.driver === "mssql" && form.mssqlAuthMethod === "entra_id" && (
+                <>
+                  <Field label="Tenant ID">
+                    <input
+                      value={form.tenantId}
+                      onChange={(e) => set("tenantId", e.target.value)}
+                      placeholder="organizations"
+                      className="input"
+                    />
+                  </Field>
+                  {deviceCode ? (
+                    <div className="rounded-md border border-border bg-muted/50 p-3 text-xs space-y-2">
+                      <p className="text-muted-foreground">
+                        Go to{" "}
+                        <span className="font-medium text-foreground">{deviceCode.verificationUri}</span>
+                        {" "}and enter the code:
+                      </p>
+                      <p className="text-center text-lg font-mono font-bold tracking-widest text-foreground">
+                        {deviceCode.userCode}
+                      </p>
+                      <p className="text-muted-foreground flex items-center gap-1">
+                        <Loader2 size={12} className="animate-spin" />
+                        Waiting for authentication...
+                      </p>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={handleEntraSignIn}
+                      disabled={entraLoading}
+                      className={cn(
+                        "btn-secondary flex items-center gap-2 w-full justify-center",
+                        entraSignedIn && "border-success/30 text-success",
+                      )}
+                    >
+                      {entraLoading ? (
+                        <Loader2 size={14} className="animate-spin" />
+                      ) : entraSignedIn ? (
+                        <CheckCircle2 size={14} />
+                      ) : (
+                        <ExternalLink size={14} />
+                      )}
+                      {entraSignedIn ? "Signed In" : "Sign in with Microsoft"}
+                    </button>
+                  )}
+                </>
+              )}
+              {form.driver !== "mssql" && (
+                <div className="flex gap-2">
+                  <Field label="User" className="flex-1">
+                    <input
+                      value={form.user}
+                      onChange={(e) => set("user", e.target.value)}
+                      placeholder="postgres"
+                      className="input"
+                    />
+                  </Field>
+                  <Field label="Password" className="flex-1">
+                    <input
+                      type="password"
+                      value={form.password}
+                      onChange={(e) => set("password", e.target.value)}
+                      className="input"
+                    />
+                  </Field>
+                </div>
+              )}
+              {form.driver === "mssql" && form.mssqlAuthMethod === "sql_server" && (
+                <div className="flex gap-2">
+                  <Field label="User" className="flex-1">
+                    <input
+                      value={form.user}
+                      onChange={(e) => set("user", e.target.value)}
+                      placeholder="sa"
+                      className="input"
+                    />
+                  </Field>
+                  <Field label="Password" className="flex-1">
+                    <input
+                      type="password"
+                      value={form.password}
+                      onChange={(e) => set("password", e.target.value)}
+                      className="input"
+                    />
+                  </Field>
+                </div>
+              )}
             </>
           )}
 

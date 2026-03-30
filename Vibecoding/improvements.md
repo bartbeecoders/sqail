@@ -92,4 +92,5 @@ Make sure you add a test button for each AI provider to test the connection and 
 Add a setting page to configure the application.
 Add a tab for the keyboard shortcuts configuration.
 
-[ ] Save the applicactions state when closing the app, and restore it when opening the app. (maximazed, window size, etc.)
+[x] Save the applicactions state when closing the app, and restore it when opening the app. (maximazed, window size, etc.)
+

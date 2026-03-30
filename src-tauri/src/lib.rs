@@ -1,4 +1,5 @@
 mod ai;
+mod auth;
 mod commands;
 mod db;
 mod pool;
@@ -55,6 +56,8 @@ pub fn run() {
             commands::list_columns,
             commands::list_indexes,
             commands::list_routines,
+            commands::start_entra_login,
+            commands::poll_entra_token,
             commands::list_ai_providers,
             commands::create_ai_provider,
             commands::update_ai_provider,

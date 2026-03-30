@@ -1,4 +1,5 @@
 export type Driver = "postgres" | "mysql" | "sqlite" | "mssql";
+export type MssqlAuthMethod = "sql_server" | "windows" | "entra_id";
 
 export interface ConnectionConfig {
   id: string;
@@ -11,6 +12,11 @@ export interface ConnectionConfig {
   password: string;
   filePath: string;
   sslMode: string;
+  integratedSecurity: boolean;
+  trustServerCertificate: boolean;
+  mssqlAuthMethod: MssqlAuthMethod;
+  tenantId: string;
+  azureClientId: string;
   color: string;
 }
 
@@ -39,6 +45,11 @@ export function defaultConnection(driver: Driver = "postgres"): ConnectionConfig
     password: "",
     filePath: "",
     sslMode: "",
+    integratedSecurity: false,
+    trustServerCertificate: false,
+    mssqlAuthMethod: "sql_server",
+    tenantId: "",
+    azureClientId: "",
     color: "",
   };
 }
@@ -48,4 +59,10 @@ export const DRIVER_LABELS: Record<Driver, string> = {
   mysql: "MySQL",
   sqlite: "SQLite",
   mssql: "SQL Server",
+};
+
+export const MSSQL_AUTH_LABELS: Record<MssqlAuthMethod, string> = {
+  sql_server: "SQL Server",
+  windows: "Windows",
+  entra_id: "Entra ID",
 };

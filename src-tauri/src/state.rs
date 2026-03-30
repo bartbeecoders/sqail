@@ -12,6 +12,8 @@ pub struct AppState {
     pub connections: Mutex<Vec<ConnectionConfig>>,
     pub pools: Mutex<HashMap<String, DbPool>>,
     pub active_connection_id: Mutex<Option<String>>,
+    /// Entra ID access tokens keyed by connection ID
+    pub entra_tokens: Mutex<HashMap<String, String>>,
 
     pub ai_provider_store: AiProviderStore,
     pub ai_providers: Mutex<Vec<AiProviderConfig>>,
@@ -33,6 +35,7 @@ impl AppState {
             connections: Mutex::new(connections),
             pools: Mutex::new(HashMap::new()),
             active_connection_id: Mutex::new(None),
+            entra_tokens: Mutex::new(HashMap::new()),
             ai_provider_store,
             ai_providers: Mutex::new(ai_providers),
             ai_history_store,

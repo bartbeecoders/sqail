@@ -8,7 +8,8 @@ use tokio_util::compat::TokioAsyncWriteCompatExt;
 
 use crate::ai::client;
 use crate::ai::provider::{AiHistoryEntry, AiProviderConfig};
-use crate::db::connections::{ConnectionConfig, Driver};
+use crate::auth::entra;
+use crate::db::connections::{ConnectionConfig, Driver, MssqlAuthMethod};
 use crate::pool::DbPool;
 use crate::query::{self, QueryResponse};
 use crate::schema::{self, ColumnInfo, IndexInfo, RoutineInfo, SchemaInfo, TableInfo};
@@ -100,10 +101,21 @@ pub async fn delete_connection(
 }
 
 #[tauri::command]
-pub async fn test_connection(config: ConnectionConfig) -> Result<String, String> {
+pub async fn test_connection(
+    state: State<'_, AppState>,
+    config: ConnectionConfig,
+) -> Result<String, String> {
     match config.driver {
         Driver::Mssql => {
-            let tib_config = config.tiberius_config()?;
+            let token = if config.mssql_auth_method == MssqlAuthMethod::EntraId {
+                let tokens = state.entra_tokens.lock().await;
+                Some(tokens.get(&config.id).cloned().ok_or_else(|| {
+                    "Entra ID token not found. Please sign in first.".to_string()
+                })?)
+            } else {
+                None
+            };
+            let tib_config = config.tiberius_config(token.as_deref())?;
             let tcp = TcpStream::connect(format!("{}:{}", config.host, config.port))
                 .await
                 .map_err(|e| format!("TCP connection failed: {e}"))?;
@@ -162,7 +174,15 @@ pub async fn connect(
 
     let pool = match config.driver {
         Driver::Mssql => {
-            let mgr = bb8_tiberius::ConnectionManager::build(config.tiberius_config()?)
+            let token = if config.mssql_auth_method == MssqlAuthMethod::EntraId {
+                let tokens = state.entra_tokens.lock().await;
+                Some(tokens.get(&id).cloned().ok_or_else(|| {
+                    "Entra ID token not found. Please sign in first.".to_string()
+                })?)
+            } else {
+                None
+            };
+            let mgr = bb8_tiberius::ConnectionManager::build(config.tiberius_config(token.as_deref())?)
                 .map_err(|e| format!("Failed to build MSSQL pool manager: {e}"))?;
             let pool = bb8::Pool::builder()
                 .max_size(5)
@@ -311,6 +331,31 @@ pub async fn list_routines(
 ) -> Result<Vec<RoutineInfo>, String> {
     let (pool, driver) = get_pool_and_driver(&state, &connection_id).await?;
     schema::list_routines(pool, &driver, &schema_name).await
+}
+
+// ── Entra ID auth commands ────────────────────────────────
+
+#[tauri::command]
+pub async fn start_entra_login(
+    tenant_id: String,
+    azure_client_id: String,
+) -> Result<entra::DeviceCodeResponse, String> {
+    entra::start_device_code_flow(&tenant_id, &azure_client_id).await
+}
+
+#[tauri::command]
+pub async fn poll_entra_token(
+    state: State<'_, AppState>,
+    connection_id: String,
+    tenant_id: String,
+    azure_client_id: String,
+    device_code: String,
+) -> Result<(), String> {
+    let token_resp =
+        entra::poll_for_token(&tenant_id, &azure_client_id, &device_code).await?;
+    let mut tokens = state.entra_tokens.lock().await;
+    tokens.insert(connection_id, token_resp.access_token);
+    Ok(())
 }
 
 // ── AI provider commands ───────────────────────────────────

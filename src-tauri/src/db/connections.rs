@@ -10,6 +10,20 @@ pub enum Driver {
     Mssql,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MssqlAuthMethod {
+    SqlServer,
+    Windows,
+    EntraId,
+}
+
+impl Default for MssqlAuthMethod {
+    fn default() -> Self {
+        MssqlAuthMethod::SqlServer
+    }
+}
+
 impl std::fmt::Display for Driver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -42,6 +56,16 @@ pub struct ConnectionConfig {
     #[serde(default)]
     pub ssl_mode: String,
     #[serde(default)]
+    pub integrated_security: bool,
+    #[serde(default)]
+    pub trust_server_certificate: bool,
+    #[serde(default)]
+    pub mssql_auth_method: MssqlAuthMethod,
+    #[serde(default)]
+    pub tenant_id: String,
+    #[serde(default)]
+    pub azure_client_id: String,
+    #[serde(default)]
     pub color: String,
 }
 
@@ -64,6 +88,11 @@ impl ConnectionConfig {
             password: String::new(),
             file_path: String::new(),
             ssl_mode: String::new(),
+            integrated_security: false,
+            trust_server_certificate: false,
+            mssql_auth_method: MssqlAuthMethod::SqlServer,
+            tenant_id: String::new(),
+            azure_client_id: String::new(),
             color: String::new(),
         }
     }
@@ -98,14 +127,36 @@ impl ConnectionConfig {
         }
     }
 
-    /// Build a tiberius Config for MSSQL connections
-    pub fn tiberius_config(&self) -> Result<tiberius::Config, String> {
+    /// Build a tiberius Config for MSSQL connections.
+    /// For Entra ID auth, pass the access token obtained from the device code flow.
+    pub fn tiberius_config(&self, entra_token: Option<&str>) -> Result<tiberius::Config, String> {
         let mut config = tiberius::Config::new();
         config.host(&self.host);
         config.port(self.port);
         config.database(&self.database);
-        config.authentication(tiberius::AuthMethod::sql_server(&self.user, &self.password));
-        config.trust_cert();
+
+        match self.mssql_auth_method {
+            MssqlAuthMethod::EntraId => {
+                let token = entra_token
+                    .ok_or_else(|| "Entra ID auth requires an access token".to_string())?;
+                config.authentication(tiberius::AuthMethod::aad_token(token));
+            }
+            MssqlAuthMethod::Windows => {
+                config.authentication(tiberius::AuthMethod::Integrated);
+            }
+            MssqlAuthMethod::SqlServer => {
+                // Backward compat: also check legacy integrated_security flag
+                if self.integrated_security {
+                    config.authentication(tiberius::AuthMethod::Integrated);
+                } else {
+                    config.authentication(tiberius::AuthMethod::sql_server(&self.user, &self.password));
+                }
+            }
+        }
+
+        if self.trust_server_certificate {
+            config.trust_cert();
+        }
         Ok(config)
     }
 }

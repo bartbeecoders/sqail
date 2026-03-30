@@ -383,6 +383,27 @@ interface Release {
 
 const RELEASES: Release[] = [
   {
+    version: "0.2.1",
+    sections: [
+      {
+        title: "MSSQL Authentication",
+        items: [
+          "MSSQL authentication method selector: Entra ID, Windows, and SQL Server auth",
+          "Azure Entra ID device code flow with user code display and automatic token polling",
+          "Trust Server Certificate option for MSSQL connections",
+          "Tenant ID and Azure Client ID fields for Entra ID configuration",
+        ],
+      },
+      {
+        title: "Build & Platform",
+        items: [
+          "Linux build scripts (bash) replacing PowerShell-only scripts",
+          "Build error fix for tiberius Integrated auth on non-Windows platforms",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.2.0",
     sections: [
       {

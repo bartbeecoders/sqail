@@ -1,13 +1,13 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "sqail",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "identifier": "dev.sqail",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://127.0.0.1:1420",
-    "beforeDevCommand": "powershell -ExecutionPolicy Bypass -File scripts/build-number.ps1 && pnpm dev",
-    "beforeBuildCommand": "powershell -ExecutionPolicy Bypass -File scripts/build-number.ps1 && pnpm build"
+    "beforeDevCommand": "./scripts/build-number.sh && pnpm dev",
+    "beforeBuildCommand": "./scripts/build-number.sh && pnpm build"
   },
   "app": {
     "windows": [

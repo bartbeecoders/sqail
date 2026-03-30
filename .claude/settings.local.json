@@ -6,7 +6,13 @@
       "WebFetch(domain:docs.rs)",
       "WebFetch(domain:github.com)",
       "Bash(cargo check:*)",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "Bash(npm run:*)",
+      "Bash(cargo build:*)",
+      "Bash(grep -r 'enum AuthMethod' /run/media/bart/Development/dev/codeberg/sqail/src-tauri/target/debug/.fingerprint/../../../build/tiberius-*/out)",
+      "Read(//home/bart/.cargo/registry/src/**)",
+      "Bash(git -C /run/media/bart/Development/dev/codeberg/sqail diff HEAD)",
+      "Bash(git:*)"
     ]
   }
 }

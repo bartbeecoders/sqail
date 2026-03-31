@@ -1,7 +1,9 @@
 import { useSchemaStore } from "../stores/schemaStore";
+import { useMetadataStore } from "../stores/metadataStore";
 
 export function buildSchemaContext(): string {
   const { schemas, tables, columns } = useSchemaStore.getState();
+  const metadataEntries = useMetadataStore.getState().entries;
   if (schemas.length === 0) return "";
 
   const lines: string[] = [];
@@ -24,6 +26,14 @@ export function buildSchemaContext(): string {
         lines.push(`  ${table.tableType === "view" ? "View" : "Table"}: ${table.name} (${colDefs})`);
       } else {
         lines.push(`  ${table.tableType === "view" ? "View" : "Table"}: ${table.name}`);
+      }
+
+      // Enrich with metadata description if available
+      const meta = metadataEntries.find(
+        (m) => m.schemaName === schema.name && m.objectName === table.name,
+      );
+      if (meta) {
+        lines.push(`    -- ${meta.metadata.description}`);
       }
     }
   }

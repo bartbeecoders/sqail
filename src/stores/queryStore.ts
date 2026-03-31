@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import type { QueryResponse, QueryResult } from "../types/query";
+import { useQueryHistoryStore } from "./queryHistoryStore";
+import { useConnectionStore } from "./connectionStore";
 
 interface QueryState {
   results: QueryResult[];
@@ -35,6 +37,21 @@ export const useQueryStore = create<QueryState>((set) => ({
         error: response.error,
         loading: false,
       });
+
+      // Auto-log to query history
+      const conn = useConnectionStore.getState().connections.find((c) => c.id === connectionId);
+      const totalRows = response.results.reduce((sum, r) => sum + r.rowCount, 0);
+      useQueryHistoryStore.getState().addHistoryEntry({
+        id: crypto.randomUUID(),
+        timestamp: new Date().toISOString(),
+        connectionId,
+        connectionName: conn?.name,
+        query: sql,
+        executionTimeMs: response.totalTimeMs,
+        rowCount: totalRows,
+        success: !response.error,
+        errorMessage: response.error ?? undefined,
+      });
     } catch (e) {
       set({
         results: [],
@@ -42,6 +59,19 @@ export const useQueryStore = create<QueryState>((set) => ({
         totalTimeMs: 0,
         error: String(e),
         loading: false,
+      });
+
+      // Log failed queries too
+      const conn = useConnectionStore.getState().connections.find((c) => c.id === connectionId);
+      useQueryHistoryStore.getState().addHistoryEntry({
+        id: crypto.randomUUID(),
+        timestamp: new Date().toISOString(),
+        connectionId,
+        connectionName: conn?.name,
+        query: sql,
+        executionTimeMs: 0,
+        success: false,
+        errorMessage: String(e),
       });
     }
   },

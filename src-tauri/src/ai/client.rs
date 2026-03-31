@@ -66,6 +66,151 @@ pub async fn stream_ai_response(
     }
 }
 
+/// Non-streaming AI call that returns the full response text.
+/// Used for metadata generation where we need to parse the JSON response.
+pub async fn call_ai_response(
+    config: &AiProviderConfig,
+    user_message: &str,
+    flow: &str,
+    driver: Option<&str>,
+    schema_context: Option<&str>,
+) -> Result<String, String> {
+    let system_prompt = build_system_prompt(flow, driver, schema_context);
+
+    match config.provider {
+        AiProviderType::Claude => {
+            call_claude(config, &system_prompt, user_message).await
+        }
+        AiProviderType::OpenAi | AiProviderType::OpenAiCompatible => {
+            call_openai(config, &system_prompt, user_message, "https://api.openai.com/v1").await
+        }
+        AiProviderType::Minimax => {
+            call_openai(config, &system_prompt, user_message, "https://api.minimax.io/v1").await
+        }
+        AiProviderType::Zai => {
+            call_openai(config, &system_prompt, user_message, "https://api.z.ai/api/paas/v4").await
+        }
+        AiProviderType::ClaudeCodeCli => {
+            call_claude_code_cli(&system_prompt, user_message).await
+        }
+        AiProviderType::LmStudio => {
+            call_openai(config, &system_prompt, user_message, "https://llm.hideterms.com/v1").await
+        }
+    }
+}
+
+async fn call_claude(
+    config: &AiProviderConfig,
+    system_prompt: &str,
+    user_message: &str,
+) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let url = config
+        .base_url
+        .as_deref()
+        .unwrap_or("https://api.anthropic.com/v1/messages");
+
+    let body = json!({
+        "model": config.model,
+        "max_tokens": 4096,
+        "system": system_prompt,
+        "messages": [
+            { "role": "user", "content": user_message }
+        ]
+    });
+
+    let resp = client
+        .post(url)
+        .header("x-api-key", &config.api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Claude API error ({status}): {text}"));
+    }
+
+    let json: serde_json::Value = resp.json().await
+        .map_err(|e| format!("Failed to parse response: {e}"))?;
+
+    json.get("content")
+        .and_then(|c| c.get(0))
+        .and_then(|b| b.get("text"))
+        .and_then(|t| t.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "Unexpected Claude response format".to_string())
+}
+
+async fn call_openai(
+    config: &AiProviderConfig,
+    system_prompt: &str,
+    user_message: &str,
+    default_base: &str,
+) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let url = resolve_openai_url(config.base_url.as_deref(), default_base);
+    let body = build_openai_body(config, system_prompt, user_message, false);
+
+    let mut req = client
+        .post(&url)
+        .header("content-type", "application/json");
+
+    if !config.api_key.is_empty() {
+        req = req.header("authorization", format!("Bearer {}", config.api_key));
+    }
+
+    let resp = req
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("API error ({status}): {text}"));
+    }
+
+    let json: serde_json::Value = resp.json().await
+        .map_err(|e| format!("Failed to parse response: {e}"))?;
+
+    json.get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|t| t.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "Unexpected API response format".to_string())
+}
+
+async fn call_claude_code_cli(
+    system_prompt: &str,
+    user_message: &str,
+) -> Result<String, String> {
+    let full_prompt = format!("{system_prompt}\n\n{user_message}");
+
+    let output = Command::new("claude")
+        .arg("--print")
+        .arg("--output-format")
+        .arg("text")
+        .arg(&full_prompt)
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run claude CLI: {e}"))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        Err(format!("claude CLI error: {stderr}"))
+    }
+}
+
 /// Test connectivity for an AI provider. Returns Ok(message) on success.
 pub async fn test_ai_provider(config: &AiProviderConfig) -> Result<String, String> {
     match config.provider {

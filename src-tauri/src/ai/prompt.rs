@@ -35,6 +35,16 @@ pub fn build_system_prompt(flow: &str, driver: Option<&str>, schema_context: Opt
                          documentation describing the tables, their columns, relationships, and purpose. \
                          Infer likely purpose from naming conventions.".to_string());
         }
+        "generate_metadata" => {
+            parts.push("The user will provide the structure of a single database object (table, view, function, or procedure). \
+                         Generate documentation metadata as a JSON object with these exact fields:\n\
+                         - \"description\": string, 1-3 sentence description of the object's purpose\n\
+                         - \"columns\": array of {\"name\": string, \"description\": string} for each column or parameter\n\
+                         - \"exampleUsage\": string, one practical SQL example using this object\n\
+                         - \"relatedObjects\": array of strings, names of likely related tables/views inferred from naming, foreign keys, and conventions\n\
+                         - \"dependencies\": array of strings, objects this depends on inferred from structure and naming\n\n\
+                         Respond with ONLY the raw JSON object. No markdown code fences, no explanation, no extra text.".to_string());
+        }
         _ => {}
     }
 

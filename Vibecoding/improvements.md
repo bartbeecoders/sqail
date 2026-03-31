@@ -94,3 +94,4 @@ Add a tab for the keyboard shortcuts configuration.
 
 [x] Save the applicactions state when closing the app, and restore it when opening the app. (maximazed, window size, etc.)
 
+[x] Use mouse wheel scroll + shift to zoom in and out the query editor (larger/smaller font size)

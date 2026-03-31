@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sqlx::any::AnyPoolOptions;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::net::TcpStream;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 
@@ -10,6 +10,7 @@ use crate::ai::client;
 use crate::ai::provider::{AiHistoryEntry, AiProviderConfig};
 use crate::auth::entra;
 use crate::db::connections::{ConnectionConfig, Driver, MssqlAuthMethod};
+use crate::metadata::{GeneratedMetadata, ObjectMetadata};
 use crate::pool::DbPool;
 use crate::query::{self, QueryResponse};
 use crate::schema::{self, ColumnInfo, IndexInfo, RoutineInfo, SchemaInfo, TableInfo};
@@ -618,4 +619,442 @@ pub async fn clear_ai_history(
     history.clear();
     drop(history);
     state.save_ai_history().await
+}
+
+// ── Query history commands ────────────────────────────────
+
+use crate::query_history::{QueryHistoryEntry, SavedQuery};
+
+#[tauri::command]
+pub async fn list_query_history(
+    state: State<'_, AppState>,
+) -> Result<Vec<QueryHistoryEntry>, String> {
+    let history = state.query_history.lock().await;
+    Ok(history.clone())
+}
+
+#[tauri::command]
+pub async fn save_query_history_entry(
+    state: State<'_, AppState>,
+    entry: QueryHistoryEntry,
+) -> Result<(), String> {
+    let mut history = state.query_history.lock().await;
+    history.push(entry);
+    drop(history);
+    state.save_query_history().await
+}
+
+#[tauri::command]
+pub async fn delete_query_history_entry(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    let mut history = state.query_history.lock().await;
+    history.retain(|e| e.id != id);
+    drop(history);
+    state.save_query_history().await
+}
+
+#[tauri::command]
+pub async fn clear_query_history(
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mut history = state.query_history.lock().await;
+    history.clear();
+    drop(history);
+    state.save_query_history().await
+}
+
+// ── Saved queries commands ────────────────────────────────
+
+#[tauri::command]
+pub async fn list_saved_queries(
+    state: State<'_, AppState>,
+) -> Result<Vec<SavedQuery>, String> {
+    let queries = state.saved_queries.lock().await;
+    Ok(queries.clone())
+}
+
+#[tauri::command]
+pub async fn create_saved_query(
+    state: State<'_, AppState>,
+    query: SavedQuery,
+) -> Result<(), String> {
+    let mut queries = state.saved_queries.lock().await;
+    queries.push(query);
+    drop(queries);
+    state.save_saved_queries().await
+}
+
+#[tauri::command]
+pub async fn update_saved_query(
+    state: State<'_, AppState>,
+    query: SavedQuery,
+) -> Result<(), String> {
+    let mut queries = state.saved_queries.lock().await;
+    if let Some(existing) = queries.iter_mut().find(|q| q.id == query.id) {
+        *existing = query;
+    } else {
+        return Err("Saved query not found".to_string());
+    }
+    drop(queries);
+    state.save_saved_queries().await
+}
+
+#[tauri::command]
+pub async fn delete_saved_query(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    let mut queries = state.saved_queries.lock().await;
+    queries.retain(|q| q.id != id);
+    drop(queries);
+    state.save_saved_queries().await
+}
+
+// ── Metadata commands ─────────────────────────────────────
+
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct MetadataProgressPayload {
+    connection_id: String,
+    current: usize,
+    total: usize,
+    object_name: String,
+    status: String, // "generating", "complete", "error"
+}
+
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct MetadataDonePayload {
+    connection_id: String,
+    total_generated: usize,
+}
+
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct MetadataErrorPayload {
+    connection_id: String,
+    error: String,
+}
+
+fn build_object_prompt(
+    object_name: &str,
+    object_type: &str,
+    schema_name: &str,
+    columns: &[ColumnInfo],
+    indexes: &[IndexInfo],
+) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "{}: {}.{} (type: {})",
+        object_type, schema_name, object_name, object_type
+    ));
+
+    if !columns.is_empty() {
+        lines.push("Columns:".to_string());
+        for col in columns {
+            let mut def = format!("  - {} {}", col.name, col.data_type);
+            if col.is_primary_key {
+                def.push_str(" PRIMARY KEY");
+            }
+            if !col.is_nullable {
+                def.push_str(" NOT NULL");
+            }
+            if let Some(ref default) = col.column_default {
+                def.push_str(&format!(" DEFAULT {}", default));
+            }
+            lines.push(def);
+        }
+    }
+
+    if !indexes.is_empty() {
+        lines.push("Indexes:".to_string());
+        for idx in indexes {
+            let unique = if idx.is_unique { " UNIQUE" } else { "" };
+            lines.push(format!(
+                "  - {}{} ({})",
+                idx.name,
+                unique,
+                idx.columns.join(", ")
+            ));
+        }
+    }
+
+    lines.join("\n")
+}
+
+fn parse_metadata_response(response: &str) -> GeneratedMetadata {
+    // Strip markdown fences if present
+    let cleaned = response
+        .trim()
+        .strip_prefix("```json")
+        .or_else(|| response.trim().strip_prefix("```"))
+        .unwrap_or(response.trim());
+    let cleaned = cleaned
+        .strip_suffix("```")
+        .unwrap_or(cleaned)
+        .trim();
+
+    if let Ok(parsed) = serde_json::from_str::<GeneratedMetadata>(cleaned) {
+        return parsed;
+    }
+
+    // Fallback: use the raw response as the description
+    GeneratedMetadata {
+        description: response.trim().to_string(),
+        columns: Vec::new(),
+        example_usage: String::new(),
+        related_objects: Vec::new(),
+        dependencies: Vec::new(),
+    }
+}
+
+#[tauri::command]
+pub async fn generate_all_metadata(
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+    connection_id: String,
+) -> Result<String, String> {
+    let (pool, driver) = get_pool_and_driver(&state, &connection_id).await?;
+    let ai_config = get_default_provider(&state).await?;
+    let driver_str = format!("{:?}", driver).to_lowercase();
+    let generation_id = uuid::Uuid::new_v4().to_string();
+    let conn_id = connection_id.clone();
+
+    // Gather all schemas, tables, and routines upfront
+    let schemas = schema::list_schemas(pool.clone(), &driver).await?;
+
+    let mut all_objects: Vec<(String, String, String)> = Vec::new(); // (schema, name, type)
+
+    for s in &schemas {
+        let tables = schema::list_tables(pool.clone(), &driver, &s.name).await.unwrap_or_default();
+        for t in &tables {
+            all_objects.push((s.name.clone(), t.name.clone(), t.table_type.clone()));
+        }
+        let routines = schema::list_routines(pool.clone(), &driver, &s.name).await.unwrap_or_default();
+        for r in &routines {
+            all_objects.push((s.name.clone(), r.name.clone(), r.routine_type.clone()));
+        }
+    }
+
+    let total = all_objects.len();
+
+    tokio::spawn(async move {
+        let app_state = app_handle.state::<AppState>();
+        let mut generated_count = 0;
+
+        for (i, (schema_name, object_name, object_type)) in all_objects.iter().enumerate() {
+            let _ = app_handle.emit(
+                "metadata:progress",
+                MetadataProgressPayload {
+                    connection_id: conn_id.clone(),
+                    current: i + 1,
+                    total,
+                    object_name: object_name.clone(),
+                    status: "generating".to_string(),
+                },
+            );
+
+            // Fetch columns and indexes for tables/views
+            let (columns, indexes) = if object_type == "table" || object_type == "view" {
+                let cols = schema::list_columns(pool.clone(), &driver, schema_name, object_name)
+                    .await
+                    .unwrap_or_default();
+                let idxs = schema::list_indexes(pool.clone(), &driver, schema_name, object_name)
+                    .await
+                    .unwrap_or_default();
+                (cols, idxs)
+            } else {
+                (Vec::new(), Vec::new())
+            };
+
+            let prompt = build_object_prompt(object_name, object_type, schema_name, &columns, &indexes);
+
+            match client::call_ai_response(
+                &ai_config,
+                &prompt,
+                "generate_metadata",
+                Some(&driver_str),
+                None,
+            )
+            .await
+            {
+                Ok(response) => {
+                    let metadata = parse_metadata_response(&response);
+                    let now = chrono::Utc::now().to_rfc3339();
+                    let entry = ObjectMetadata {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        connection_id: conn_id.clone(),
+                        schema_name: schema_name.clone(),
+                        object_name: object_name.clone(),
+                        object_type: object_type.clone(),
+                        metadata,
+                        generated_at: now.clone(),
+                        updated_at: now,
+                    };
+
+                    // Upsert into state
+                    let mut entries = app_state.metadata.lock().await;
+                    if let Some(existing) = entries.iter_mut().find(|e| {
+                        e.connection_id == conn_id
+                            && e.schema_name == *schema_name
+                            && e.object_name == *object_name
+                    }) {
+                        *existing = entry;
+                    } else {
+                        entries.push(entry);
+                    }
+                    drop(entries);
+                    generated_count += 1;
+
+                    let _ = app_handle.emit(
+                        "metadata:progress",
+                        MetadataProgressPayload {
+                            connection_id: conn_id.clone(),
+                            current: i + 1,
+                            total,
+                            object_name: object_name.clone(),
+                            status: "complete".to_string(),
+                        },
+                    );
+                }
+                Err(err) => {
+                    let _ = app_handle.emit(
+                        "metadata:progress",
+                        MetadataProgressPayload {
+                            connection_id: conn_id.clone(),
+                            current: i + 1,
+                            total,
+                            object_name: object_name.clone(),
+                            status: "error".to_string(),
+                        },
+                    );
+                    eprintln!("Metadata generation error for {object_name}: {err}");
+                }
+            }
+        }
+
+        // Save to disk
+        if let Err(e) = app_state.save_metadata().await {
+            eprintln!("Failed to save metadata: {e}");
+        }
+
+        let _ = app_handle.emit(
+            "metadata:done",
+            MetadataDonePayload {
+                connection_id: conn_id,
+                total_generated: generated_count,
+            },
+        );
+    });
+
+    Ok(generation_id)
+}
+
+#[tauri::command]
+pub async fn generate_single_metadata(
+    _app_handle: AppHandle,
+    state: State<'_, AppState>,
+    connection_id: String,
+    schema_name: String,
+    object_name: String,
+    object_type: String,
+) -> Result<String, String> {
+    let (pool, driver) = get_pool_and_driver(&state, &connection_id).await?;
+    let ai_config = get_default_provider(&state).await?;
+    let driver_str = format!("{:?}", driver).to_lowercase();
+
+    let (columns, indexes) = if object_type == "table" || object_type == "view" {
+        let cols = schema::list_columns(pool.clone(), &driver, &schema_name, &object_name)
+            .await
+            .unwrap_or_default();
+        let idxs = schema::list_indexes(pool.clone(), &driver, &schema_name, &object_name)
+            .await
+            .unwrap_or_default();
+        (cols, idxs)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
+    let prompt = build_object_prompt(&object_name, &object_type, &schema_name, &columns, &indexes);
+
+    let response = client::call_ai_response(
+        &ai_config,
+        &prompt,
+        "generate_metadata",
+        Some(&driver_str),
+        None,
+    )
+    .await?;
+
+    let metadata = parse_metadata_response(&response);
+    let now = chrono::Utc::now().to_rfc3339();
+    let entry = ObjectMetadata {
+        id: uuid::Uuid::new_v4().to_string(),
+        connection_id: connection_id.clone(),
+        schema_name: schema_name.clone(),
+        object_name: object_name.clone(),
+        object_type: object_type.clone(),
+        metadata,
+        generated_at: now.clone(),
+        updated_at: now,
+    };
+
+    let mut entries = state.metadata.lock().await;
+    if let Some(existing) = entries.iter_mut().find(|e| {
+        e.connection_id == connection_id
+            && e.schema_name == schema_name
+            && e.object_name == object_name
+    }) {
+        *existing = entry.clone();
+    } else {
+        entries.push(entry.clone());
+    }
+    drop(entries);
+    state.save_metadata().await?;
+
+    Ok(entry.id)
+}
+
+#[tauri::command]
+pub async fn list_metadata(
+    state: State<'_, AppState>,
+    connection_id: String,
+) -> Result<Vec<ObjectMetadata>, String> {
+    let entries = state.metadata.lock().await;
+    Ok(entries
+        .iter()
+        .filter(|e| e.connection_id == connection_id)
+        .cloned()
+        .collect())
+}
+
+#[tauri::command]
+pub async fn update_metadata(
+    state: State<'_, AppState>,
+    entry: ObjectMetadata,
+) -> Result<(), String> {
+    let mut entries = state.metadata.lock().await;
+    let pos = entries
+        .iter()
+        .position(|e| e.id == entry.id)
+        .ok_or_else(|| format!("Metadata entry '{}' not found", entry.id))?;
+
+    let mut updated = entry;
+    updated.updated_at = chrono::Utc::now().to_rfc3339();
+    entries[pos] = updated;
+    drop(entries);
+    state.save_metadata().await
+}
+
+#[tauri::command]
+pub async fn delete_all_metadata(
+    state: State<'_, AppState>,
+    connection_id: String,
+) -> Result<(), String> {
+    let mut entries = state.metadata.lock().await;
+    entries.retain(|e| e.connection_id != connection_id);
+    drop(entries);
+    state.save_metadata().await
 }

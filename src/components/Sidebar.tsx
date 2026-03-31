@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import {
   Database,
   ChevronLeft,
@@ -9,13 +9,23 @@ import {
   Pencil,
   Trash2,
   Loader2,
+  TableProperties,
+  Clock,
+  Bookmark,
+  BookOpen,
 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { useConnectionStore } from "../stores/connectionStore";
 import { DRIVER_LABELS } from "../types/connection";
 import type { ConnectionConfig } from "../types/connection";
+import { useEditorStore } from "../stores/editorStore";
 import ConnectionForm from "./ConnectionForm";
 import SchemaTree from "./SchemaTree";
+import QueryHistoryPanel from "./QueryHistoryPanel";
+import SavedQueriesPanel from "./SavedQueriesPanel";
+import MetadataPanel from "./MetadataPanel";
+
+type BottomTab = "schema" | "history" | "saved" | "metadata";
 
 interface SidebarProps {
   collapsed: boolean;
@@ -37,6 +47,15 @@ export default function Sidebar({ collapsed, onToggle, externalFormOpen, onExter
   const [formOpen, setFormOpen] = useState(false);
   const [editingConn, setEditingConn] = useState<ConnectionConfig | undefined>();
   const [connectingId, setConnectingId] = useState<string | null>(null);
+  const [bottomTab, setBottomTab] = useState<BottomTab>("schema");
+
+  const handleSaveFromHistory = useCallback((sql: string) => {
+    // Load the query into the editor, then switch to saved tab so user can click "+"
+    const state = useEditorStore.getState();
+    const tab = state.getActiveTab();
+    if (tab) state.setContent(tab.id, sql);
+    setBottomTab("saved");
+  }, []);
 
   // Open form from external trigger (e.g. keyboard shortcut)
   useEffect(() => {
@@ -228,10 +247,40 @@ export default function Sidebar({ collapsed, onToggle, externalFormOpen, onExter
           )}
         </div>
 
-        {/* Schema tree */}
+        {/* Bottom panel: Schema / History / Saved */}
         {!collapsed && (
-          <div className="flex-1 overflow-y-auto border-t border-border">
-            <SchemaTree />
+          <div className="flex flex-1 flex-col overflow-hidden border-t border-border">
+            {/* Tab bar */}
+            <div className="flex shrink-0 border-b border-border">
+              {([
+                { id: "schema" as const, icon: TableProperties, label: "Schema" },
+                { id: "history" as const, icon: Clock, label: "History" },
+                { id: "saved" as const, icon: Bookmark, label: "Saved" },
+                { id: "metadata" as const, icon: BookOpen, label: "Metadata" },
+              ]).map(({ id, icon: Icon, label }) => (
+                <button
+                  key={id}
+                  onClick={() => setBottomTab(id)}
+                  className={cn(
+                    "flex flex-1 items-center justify-center gap-1 py-1.5 text-[10px] font-medium transition-colors",
+                    bottomTab === id
+                      ? "border-b-2 border-primary text-primary"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  <Icon size={11} />
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="flex-1 overflow-hidden">
+              {bottomTab === "schema" && <SchemaTree />}
+              {bottomTab === "history" && (
+                <QueryHistoryPanel onSaveQuery={handleSaveFromHistory} />
+              )}
+              {bottomTab === "saved" && <SavedQueriesPanel />}
+              {bottomTab === "metadata" && <MetadataPanel />}
+            </div>
           </div>
         )}
       </aside>

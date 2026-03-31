@@ -12,17 +12,20 @@ import { buildSchemaContext } from "../lib/schemaContext";
 import { sqlaiDark, sqlaiLight } from "../lib/monacoThemes";
 import { createSqlCompletionProvider } from "../lib/sqlCompletions";
 import { buildSelectStatement } from "../lib/sqlGenerate";
+import { validateSql, toMonacoMarkers } from "../lib/sqlValidator";
 import type { ColumnInfo } from "../types/schema";
 
 interface SqlEditorProps {
   onExecute?: (sql: string) => void;
   onFormat?: () => void;
+  overrideTabId?: string;
 }
 
-export default function SqlEditor({ onExecute, onFormat }: SqlEditorProps) {
+export default function SqlEditor({ onExecute, onFormat, overrideTabId }: SqlEditorProps) {
   const isDark = useDarkMode();
   const editorRef = useRef<monacoEditor.IStandaloneCodeEditor | null>(null);
-  const { activeTabId, tabs, setContent } = useEditorStore();
+  const { activeTabId: storeActiveTabId, tabs, setContent } = useEditorStore();
+  const activeTabId = overrideTabId ?? storeActiveTabId;
   const fontSize = useSettingsStore((s) => s.editorFontSize);
   const fontFamily = useSettingsStore((s) => s.editorFontFamily);
   const tabSize = useSettingsStore((s) => s.editorTabSize);
@@ -30,6 +33,10 @@ export default function SqlEditor({ onExecute, onFormat }: SqlEditorProps) {
   const wordWrap = useSettingsStore((s) => s.editorWordWrap);
   const lineNumbers = useSettingsStore((s) => s.editorLineNumbers);
   const [dragOver, setDragOver] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const monacoRef = useRef<any>(null);
+  const validationTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const activeTab = tabs.find((t) => t.id === activeTabId);
 
   const handleBeforeMount: BeforeMount = useCallback((monaco) => {
@@ -38,9 +45,29 @@ export default function SqlEditor({ onExecute, onFormat }: SqlEditorProps) {
     monaco.languages.registerCompletionItemProvider("sql", createSqlCompletionProvider());
   }, []);
 
+  const runValidation = useCallback(() => {
+    const editor = editorRef.current;
+    const monaco = monacoRef.current;
+    if (!editor || !monaco) return;
+    const model = editor.getModel();
+    if (!model) return;
+    const text = model.getValue();
+    if (!text.trim()) {
+      monaco.editor.setModelMarkers(model, "sql-validator", []);
+      return;
+    }
+    const errors = validateSql(text);
+    const markers = toMonacoMarkers(errors);
+    monaco.editor.setModelMarkers(model, "sql-validator", markers);
+  }, []);
+
   const handleMount: OnMount = useCallback(
     (editor, monaco) => {
       editorRef.current = editor;
+      monacoRef.current = monaco;
+
+      // Initial validation
+      setTimeout(() => runValidation(), 100);
 
       // Ctrl+Enter / Cmd+Enter → execute
       editor.addAction({
@@ -143,11 +170,16 @@ export default function SqlEditor({ onExecute, onFormat }: SqlEditorProps) {
       if (activeTabId && value !== undefined) {
         setContent(activeTabId, value);
       }
+      // Debounced validation
+      if (validationTimer.current) clearTimeout(validationTimer.current);
+      validationTimer.current = setTimeout(() => {
+        runValidation();
+      }, 500);
     },
-    [activeTabId, setContent],
+    [activeTabId, setContent, runValidation],
   );
 
-  // Expose editor ref for external formatting
+  // Expose editor ref for external formatting + re-validate on tab switch
   useEffect(() => {
     if (editorRef.current && activeTab) {
       const model = editorRef.current.getModel();
@@ -155,8 +187,36 @@ export default function SqlEditor({ onExecute, onFormat }: SqlEditorProps) {
         model.setValue(activeTab.content);
       }
     }
+    // Re-validate when switching tabs
+    setTimeout(() => runValidation(), 50);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-set model on tab switch, not content changes
   }, [activeTabId]);
+
+  // Shift + Mouse Wheel → zoom editor font size
+  // Must attach to the editor's DOM directly and use capture phase
+  // because Monaco intercepts wheel events internally.
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const dom = editor.getDomNode();
+    if (!dom) return;
+    const handleWheel = (e: WheelEvent) => {
+      if (!e.shiftKey) return;
+      e.preventDefault();
+      e.stopPropagation();
+      // Shift+wheel may swap deltaY↔deltaX depending on OS/browser
+      const raw = e.deltaY || e.deltaX;
+      if (raw === 0) return;
+      const delta = raw > 0 ? -1 : 1;
+      const current = useSettingsStore.getState().editorFontSize;
+      const next = Math.min(40, Math.max(8, current + delta));
+      if (next !== current) {
+        useSettingsStore.getState().updateSetting("editorFontSize", next);
+      }
+    };
+    dom.addEventListener("wheel", handleWheel, { passive: false, capture: true });
+    return () => dom.removeEventListener("wheel", handleWheel, { capture: true });
+  });
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     if (e.dataTransfer.types.includes("application/sqlai-table")) {
@@ -249,6 +309,7 @@ export default function SqlEditor({ onExecute, onFormat }: SqlEditorProps) {
 
   return (
     <div
+      ref={containerRef}
       className={`flex-1 overflow-hidden relative ${dragOver ? "ring-2 ring-inset ring-primary/40" : ""}`}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}

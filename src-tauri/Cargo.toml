@@ -1,6 +1,6 @@
 [package]
 name = "sqail"
-version = "0.2.0"
+version = "0.2.2"
 description = "A lightweight SQL database editor with AI integration"
 authors = ["sqail"]
 license = "MIT"
@@ -24,6 +24,7 @@ tauri-plugin-sql = { version = "2", features = ["sqlite", "postgres", "mysql"] }
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-native-tls", "postgres", "mysql", "sqlite"] }
+chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 hex = "0.4"
 tiberius = { version = "0.12", default-features = false, features = ["tds73", "rustls"] }

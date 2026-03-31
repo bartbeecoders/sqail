@@ -143,12 +143,12 @@
 
 ### Steps
 
-- [ ] 9.1. Auto-log every executed query with timestamp, connection, execution time, status (success/error)
-- [ ] 9.2. Build query history panel — searchable, filterable by connection/date/status
-- [ ] 9.3. Click history entry to load it into editor
-- [ ] 9.4. Add "Save Query" action — name, optional description, tags
-- [ ] 9.5. Build saved queries panel with folders/tags organization
-- [ ] 9.6. Import/export saved queries as `.sql` files
+- [x] 9.1. Auto-log every executed query with timestamp, connection, execution time, status (success/error)
+- [x] 9.2. Build query history panel — searchable, filterable by connection/date/status
+- [x] 9.3. Click history entry to load it into editor
+- [x] 9.4. Add "Save Query" action — name, optional description, tags
+- [x] 9.5. Build saved queries panel with folders/tags organization
+- [x] 9.6. Import/export saved queries as `.sql` files
 
 ---
 
@@ -158,12 +158,12 @@
 
 ### Steps
 
-- [ ] 10.1. Multi-cursor editing support (Monaco built-in, ensure it works)
-- [ ] 10.2. Find and replace within editor (`Ctrl+H`)
-- [ ] 10.3. Query snippets — user-defined templates with `$1`, `$2` placeholders
-- [ ] 10.4. Split editor view — run two queries side by side
-- [ ] 10.5. Syntax error highlighting via a lightweight SQL parser
-- [ ] 10.6. Bracket matching and auto-close for parentheses and quotes
+- [x] 10.1. Multi-cursor editing support (Monaco built-in, ensure it works)
+- [x] 10.2. Find and replace within editor (`Ctrl+H`)
+- [x] 10.3. Query snippets — user-defined templates with `$1`, `$2` placeholders
+- [x] 10.4. Split editor view — run two queries side by side
+- [x] 10.5. Syntax error highlighting via a lightweight SQL parser
+- [x] 10.6. Bracket matching and auto-close for parentheses and quotes
 
 ---
 

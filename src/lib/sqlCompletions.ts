@@ -1,5 +1,6 @@
 import type { languages } from "monaco-editor";
 import { useSchemaStore } from "../stores/schemaStore";
+import { useSnippetStore } from "../stores/snippetStore";
 
 const SQL_KEYWORDS = [
   "SELECT", "FROM", "WHERE", "AND", "OR", "NOT", "IN", "IS", "NULL",
@@ -72,6 +73,21 @@ export function createSqlCompletionProvider(): languages.CompletionItemProvider 
           detail: "column",
           range,
           sortText: `1_${name}`,
+        });
+      }
+
+      // Snippets
+      const snippets = useSnippetStore.getState().allSnippets;
+      for (const snippet of snippets) {
+        suggestions.push({
+          label: { label: snippet.prefix, description: snippet.name },
+          kind: 27, // Snippet
+          insertText: snippet.body,
+          insertTextRules: 4, // InsertAsSnippet
+          detail: snippet.description ?? snippet.name,
+          documentation: snippet.body,
+          range,
+          sortText: `0_snippet_${snippet.prefix}`,
         });
       }
 

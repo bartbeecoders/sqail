@@ -72,9 +72,59 @@ fn decode_sqlx_value(row: &sqlx::any::AnyRow, idx: usize) -> serde_json::Value {
     serde_json::Value::Null
 }
 
+/// Convert days since an epoch year-01-01 into (year, month, day).
+fn days_to_ymd(days: i64, epoch_year: i32) -> (i32, u32, u32) {
+    // Convert to a civil date using a simple algorithm.
+    // Shift to epoch 0000-03-01 for easier leap year math.
+    let epoch_jdn = jdn(epoch_year, 1, 1);
+    let target_jdn = epoch_jdn + days;
+    jdn_to_ymd(target_jdn)
+}
+
+/// Julian Day Number from (year, month, day).
+fn jdn(y: i32, m: u32, d: u32) -> i64 {
+    let y = y as i64;
+    let m = m as i64;
+    let d = d as i64;
+    (1461 * (y + 4800 + (m - 14) / 12)) / 4
+        + (367 * (m - 2 - 12 * ((m - 14) / 12))) / 12
+        - (3 * ((y + 4900 + (m - 14) / 12) / 100)) / 4
+        + d
+        - 32075
+}
+
+/// JDN back to (year, month, day).
+fn jdn_to_ymd(jdn: i64) -> (i32, u32, u32) {
+    let a = jdn + 32044;
+    let b = (4 * a + 3) / 146097;
+    let c = a - (146097 * b) / 4;
+    let d = (4 * c + 3) / 1461;
+    let e = c - (1461 * d) / 4;
+    let m = (5 * e + 2) / 153;
+    let day = (e - (153 * m + 2) / 5 + 1) as u32;
+    let month = (m + 3 - 12 * (m / 10)) as u32;
+    let year = (100 * b + d - 4800 + m / 10) as i32;
+    (year, month, day)
+}
+
+/// Format seconds + fractional nanoseconds as HH:MM:SS[.fff].
+fn format_time(total_secs: u64, nanos: u64) -> String {
+    let h = total_secs / 3600;
+    let m = (total_secs % 3600) / 60;
+    let s = total_secs % 60;
+    if nanos == 0 {
+        format!("{h:02}:{m:02}:{s:02}")
+    } else {
+        // Trim trailing zeros from fractional part
+        let frac = format!("{:09}", nanos);
+        let trimmed = frac.trim_end_matches('0');
+        format!("{h:02}:{m:02}:{s:02}.{trimmed}")
+    }
+}
+
 fn decode_tiberius_value(col: &tiberius::Column, data: &tiberius::ColumnData<'_>) -> serde_json::Value {
     use tiberius::ColumnData;
-    let _ = col; // col used for context if needed
+    let _ = col;
     match data {
         ColumnData::Bit(v) => match v {
             Some(b) => serde_json::Value::Bool(*b),
@@ -108,13 +158,16 @@ fn decode_tiberius_value(col: &tiberius::Column, data: &tiberius::ColumnData<'_>
             Some(s) => serde_json::Value::String(s.to_string()),
             None => serde_json::Value::Null,
         },
+        ColumnData::Guid(v) => match v {
+            Some(uuid) => serde_json::Value::String(uuid.to_string()),
+            None => serde_json::Value::Null,
+        },
         ColumnData::Binary(v) => match v {
             Some(bytes) => serde_json::Value::String(format!("0x{}", hex::encode(bytes))),
             None => serde_json::Value::Null,
         },
         ColumnData::Numeric(v) => match v {
             Some(n) => {
-                // Convert to f64 for JSON
                 let s = format!("{n}");
                 if let Ok(f) = s.parse::<f64>() {
                     serde_json::json!(f)
@@ -128,12 +181,82 @@ fn decode_tiberius_value(col: &tiberius::Column, data: &tiberius::ColumnData<'_>
             Some(xml) => serde_json::Value::String(xml.to_string()),
             None => serde_json::Value::Null,
         },
-        // DateTime types — render as string
-        _ => {
-            // For date/time/datetime/etc, try to use Display
-            let s = format!("{data:?}");
-            serde_json::Value::String(s)
-        }
+        // datetime: days since 1900-01-01, seconds_fragments in 1/300ths of a second
+        ColumnData::DateTime(v) => match v {
+            Some(dt) => {
+                let (y, mo, d) = days_to_ymd(dt.days() as i64, 1900);
+                let total_ns = dt.seconds_fragments() as u64 * 1_000_000_000 / 300;
+                let total_secs = total_ns / 1_000_000_000;
+                let nanos = total_ns % 1_000_000_000;
+                let time = format_time(total_secs, nanos);
+                serde_json::Value::String(format!("{y:04}-{mo:02}-{d:02} {time}"))
+            }
+            None => serde_json::Value::Null,
+        },
+        // smalldatetime: days since 1900-01-01, seconds_fragments = minutes since midnight
+        ColumnData::SmallDateTime(v) => match v {
+            Some(dt) => {
+                let (y, mo, d) = days_to_ymd(dt.days() as i64, 1900);
+                let mins = dt.seconds_fragments() as u64;
+                let total_secs = mins * 60;
+                let time = format_time(total_secs, 0);
+                serde_json::Value::String(format!("{y:04}-{mo:02}-{d:02} {time}"))
+            }
+            None => serde_json::Value::Null,
+        },
+        // date (tds73): days since 0001-01-01
+        ColumnData::Date(v) => match v {
+            Some(dt) => {
+                let (y, mo, d) = days_to_ymd(dt.days() as i64, 1);
+                serde_json::Value::String(format!("{y:04}-{mo:02}-{d:02}"))
+            }
+            None => serde_json::Value::Null,
+        },
+        // time (tds73): increments of 10^-scale seconds
+        ColumnData::Time(v) => match v {
+            Some(t) => {
+                let divisor = 10u64.pow(t.scale() as u32);
+                let total_secs = t.increments() / divisor;
+                let remainder = t.increments() % divisor;
+                let nanos = remainder * 1_000_000_000 / divisor;
+                serde_json::Value::String(format_time(total_secs, nanos))
+            }
+            None => serde_json::Value::Null,
+        },
+        // datetime2 (tds73): Date + Time
+        ColumnData::DateTime2(v) => match v {
+            Some(dt2) => {
+                let (y, mo, d) = days_to_ymd(dt2.date().days() as i64, 1);
+                let t = dt2.time();
+                let divisor = 10u64.pow(t.scale() as u32);
+                let total_secs = t.increments() / divisor;
+                let remainder = t.increments() % divisor;
+                let nanos = remainder * 1_000_000_000 / divisor;
+                let time = format_time(total_secs, nanos);
+                serde_json::Value::String(format!("{y:04}-{mo:02}-{d:02} {time}"))
+            }
+            None => serde_json::Value::Null,
+        },
+        // datetimeoffset (tds73): DateTime2 + offset in minutes
+        ColumnData::DateTimeOffset(v) => match v {
+            Some(dto) => {
+                let dt2 = dto.datetime2();
+                let (y, mo, d) = days_to_ymd(dt2.date().days() as i64, 1);
+                let t = dt2.time();
+                let divisor = 10u64.pow(t.scale() as u32);
+                let total_secs = t.increments() / divisor;
+                let remainder = t.increments() % divisor;
+                let nanos = remainder * 1_000_000_000 / divisor;
+                let time = format_time(total_secs, nanos);
+                let off = dto.offset();
+                let sign = if off >= 0 { '+' } else { '-' };
+                let abs_off = off.unsigned_abs() as u32;
+                let oh = abs_off / 60;
+                let om = abs_off % 60;
+                serde_json::Value::String(format!("{y:04}-{mo:02}-{d:02} {time} {sign}{oh:02}:{om:02}"))
+            }
+            None => serde_json::Value::Null,
+        },
     }
 }
 

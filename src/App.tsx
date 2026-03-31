@@ -14,6 +14,7 @@ import { useConnectionStore } from "./stores/connectionStore";
 import { useQueryStore } from "./stores/queryStore";
 import { useAiStore } from "./stores/aiStore";
 import { useAiStream } from "./hooks/useAiStream";
+import { useMetadataEvents } from "./hooks/useMetadataEvents";
 import { useGlobalShortcuts, type ShortcutHandlers } from "./hooks/useGlobalShortcuts";
 
 function loadUiState<T>(key: string, fallback: T): T {
@@ -37,6 +38,7 @@ export default function App() {
   }, []);
 
   useAiStream();
+  useMetadataEvents();
 
   // Persist sidebar collapsed state
   useEffect(() => {

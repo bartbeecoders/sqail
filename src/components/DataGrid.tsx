@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useRef, useState, useCallback } from "react";
+import { Fragment, useMemo, useRef, useState, useCallback, useEffect } from "react";
 import {
   useReactTable,
   getCoreRowModel,
@@ -81,7 +81,51 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
     [rows, showCopied],
   );
 
-  const gridTemplateColumns = `40px ${columns.map(() => "minmax(80px, 1fr)").join(" ")}`;
+  const [colWidths, setColWidths] = useState<number[]>(() =>
+    columns.map(() => 150),
+  );
+
+  // Reset widths when columns change
+  useEffect(() => {
+    setColWidths(columns.map(() => 150));
+  }, [columns]);
+
+  const resizing = useRef<{ colIdx: number; startX: number; startW: number } | null>(null);
+
+  const onResizeStart = useCallback(
+    (e: React.MouseEvent, colIdx: number) => {
+      e.preventDefault();
+      e.stopPropagation();
+      resizing.current = { colIdx, startX: e.clientX, startW: colWidths[colIdx] };
+
+      const onMove = (ev: MouseEvent) => {
+        if (!resizing.current) return;
+        const delta = ev.clientX - resizing.current.startX;
+        const newW = Math.max(50, resizing.current.startW + delta);
+        setColWidths((prev) => {
+          const next = [...prev];
+          next[resizing.current!.colIdx] = newW;
+          return next;
+        });
+      };
+
+      const onUp = () => {
+        resizing.current = null;
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+      };
+
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    },
+    [colWidths],
+  );
+
+  const gridTemplateColumns = `40px ${colWidths.map((w) => `${w}px`).join(" ")}`;
 
   const columnDefs = useMemo<ColumnDef<CellValue[]>[]>(
     () =>
@@ -209,7 +253,7 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
                   <div className="border-b border-r border-border px-2 py-1.5 text-right text-[10px] font-normal text-muted-foreground">
                     #
                   </div>
-                  {headerGroup.headers.map((header) => {
+                  {headerGroup.headers.map((header, hIdx) => {
                     const sorted = header.column.getIsSorted();
                     const meta = header.column.columnDef.meta as
                       | { typeName: string }
@@ -218,7 +262,7 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
                       <div
                         key={header.id}
                         onClick={header.column.getToggleSortingHandler()}
-                        className="cursor-pointer select-none border-b border-r border-border px-2 py-1.5 text-left hover:bg-accent/50"
+                        className="relative cursor-pointer select-none border-b border-r border-border px-2 py-1.5 text-left hover:bg-accent/50"
                       >
                         <div className="flex items-center gap-1.5">
                           <div className="flex flex-col gap-0">
@@ -241,6 +285,11 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
                             )}
                           </span>
                         </div>
+                        {/* Resize handle */}
+                        <div
+                          onMouseDown={(e) => onResizeStart(e, hIdx)}
+                          className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize hover:bg-primary/30 active:bg-primary/50"
+                        />
                       </div>
                     );
                   })}

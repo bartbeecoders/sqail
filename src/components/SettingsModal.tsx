@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { X, RotateCcw, Settings, Keyboard, Info } from "lucide-react";
+import { X, RotateCcw, Settings, Keyboard, Info, Code2, Plus, Trash2, Pencil } from "lucide-react";
 import { cn } from "../lib/utils";
 import { useShortcutStore } from "../stores/shortcutStore";
 import { useSettingsStore } from "../stores/settingsStore";
+import { useSnippetStore, type SqlSnippet } from "../stores/snippetStore";
 import {
   SHORTCUT_ACTIONS,
   CATEGORY_LABELS,
@@ -14,7 +15,7 @@ interface SettingsModalProps {
   initialTab?: SettingsTab;
 }
 
-type SettingsTab = "general" | "shortcuts" | "about";
+type SettingsTab = "general" | "shortcuts" | "snippets" | "about";
 
 export default function SettingsModal({ onClose, initialTab = "general" }: SettingsModalProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
@@ -49,6 +50,12 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Setti
               onClick={() => setActiveTab("shortcuts")}
             />
             <TabButton
+              active={activeTab === "snippets"}
+              icon={<Code2 size={14} />}
+              label="Query Snippets"
+              onClick={() => setActiveTab("snippets")}
+            />
+            <TabButton
               active={activeTab === "about"}
               icon={<Info size={14} />}
               label="About / Releases"
@@ -60,6 +67,7 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Setti
           <div className="flex-1 overflow-y-auto p-5">
             {activeTab === "general" && <GeneralTab />}
             {activeTab === "shortcuts" && <ShortcutsTab />}
+            {activeTab === "snippets" && <SnippetsTab />}
             {activeTab === "about" && <AboutTab />}
           </div>
         </div>
@@ -365,6 +373,195 @@ function ShortcutsTab() {
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+// ── Snippets Tab ───────────────────────────────────────────
+
+function SnippetsTab() {
+  const { allSnippets, userSnippets, addSnippet, updateSnippet, deleteSnippet, resetToDefaults } =
+    useSnippetStore();
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [showNew, setShowNew] = useState(false);
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-sm font-semibold">Query Snippets</h3>
+          <p className="text-[11px] text-muted-foreground">
+            Type a prefix in the editor to expand a snippet. Use <code className="text-[10px] bg-muted px-1 rounded">{"$1"}</code>, <code className="text-[10px] bg-muted px-1 rounded">{"$2"}</code> for tab stops.
+          </p>
+        </div>
+        <div className="flex gap-1">
+          <button
+            onClick={() => { setShowNew(true); setEditingId(null); }}
+            className="flex items-center gap-1 rounded-md bg-primary px-2 py-1 text-[11px] font-medium text-primary-foreground hover:bg-primary/90"
+          >
+            <Plus size={12} />
+            New Snippet
+          </button>
+          {userSnippets.length > 0 && (
+            <button
+              onClick={resetToDefaults}
+              className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent"
+              title="Reset to built-in snippets only"
+            >
+              <RotateCcw size={12} />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {(showNew || editingId) && (
+        <SnippetForm
+          initial={editingId ? allSnippets.find((s) => s.id === editingId) : undefined}
+          onSave={(snippet) => {
+            if (editingId) updateSnippet(snippet);
+            else addSnippet(snippet);
+            setShowNew(false);
+            setEditingId(null);
+          }}
+          onCancel={() => { setShowNew(false); setEditingId(null); }}
+        />
+      )}
+
+      <div className="space-y-1">
+        {allSnippets.map((snippet) => {
+          const isBuiltin = snippet.id.startsWith("builtin-");
+          const isUserOverride = !isBuiltin;
+          return (
+            <div
+              key={snippet.id}
+              className="group flex items-start gap-3 rounded-md border border-border px-3 py-2"
+            >
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <code className="rounded bg-muted px-1.5 py-0.5 text-[11px] font-semibold text-primary">
+                    {snippet.prefix}
+                  </code>
+                  <span className="text-xs font-medium">{snippet.name}</span>
+                  {isBuiltin && (
+                    <span className="rounded bg-muted px-1 py-0.5 text-[9px] text-muted-foreground">built-in</span>
+                  )}
+                  {isUserOverride && (
+                    <span className="rounded bg-primary/10 px-1 py-0.5 text-[9px] text-primary">custom</span>
+                  )}
+                </div>
+                {snippet.description && (
+                  <p className="mt-0.5 text-[10px] text-muted-foreground">{snippet.description}</p>
+                )}
+                <pre className="mt-1 overflow-x-auto rounded bg-muted/50 px-2 py-1 text-[10px] font-mono text-foreground/70 leading-relaxed">
+                  {snippet.body}
+                </pre>
+              </div>
+              {isUserOverride && (
+                <div className="flex shrink-0 gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                  <button
+                    onClick={() => { setEditingId(snippet.id); setShowNew(false); }}
+                    className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+                  >
+                    <Pencil size={12} />
+                  </button>
+                  <button
+                    onClick={() => deleteSnippet(snippet.id)}
+                    className="rounded p-1 text-destructive/70 hover:bg-accent hover:text-destructive"
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function SnippetForm({
+  initial,
+  onSave,
+  onCancel,
+}: {
+  initial?: SqlSnippet;
+  onSave: (snippet: SqlSnippet) => void;
+  onCancel: () => void;
+}) {
+  const [prefix, setPrefix] = useState(initial?.prefix ?? "");
+  const [name, setName] = useState(initial?.name ?? "");
+  const [body, setBody] = useState(initial?.body ?? "");
+  const [description, setDescription] = useState(initial?.description ?? "");
+
+  return (
+    <div className="rounded-md border border-border bg-muted/30 p-3 space-y-2">
+      <div className="flex gap-2">
+        <div className="w-24">
+          <label className="text-[10px] font-medium text-muted-foreground">Prefix *</label>
+          <input
+            value={prefix}
+            onChange={(e) => setPrefix(e.target.value)}
+            placeholder="sel"
+            className="input mt-0.5 h-7 w-full text-xs"
+            autoFocus
+          />
+        </div>
+        <div className="flex-1">
+          <label className="text-[10px] font-medium text-muted-foreground">Name *</label>
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="SELECT statement"
+            className="input mt-0.5 h-7 w-full text-xs"
+          />
+        </div>
+      </div>
+      <div>
+        <label className="text-[10px] font-medium text-muted-foreground">Description</label>
+        <input
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          placeholder="Optional description"
+          className="input mt-0.5 h-7 w-full text-xs"
+        />
+      </div>
+      <div>
+        <label className="text-[10px] font-medium text-muted-foreground">
+          Body * <span className="font-normal">(use $1, $2 for tab stops)</span>
+        </label>
+        <textarea
+          value={body}
+          onChange={(e) => setBody(e.target.value)}
+          placeholder={"SELECT ${1:*}\nFROM ${2:table};"}
+          className="input mt-0.5 w-full font-mono text-xs leading-relaxed"
+          rows={4}
+        />
+      </div>
+      <div className="flex gap-1">
+        <button
+          onClick={() => {
+            if (!prefix.trim() || !name.trim() || !body.trim()) return;
+            onSave({
+              id: initial?.id ?? crypto.randomUUID(),
+              prefix: prefix.trim(),
+              name: name.trim(),
+              body,
+              description: description.trim() || undefined,
+            });
+          }}
+          disabled={!prefix.trim() || !name.trim() || !body.trim()}
+          className="rounded bg-primary px-3 py-1 text-[11px] font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-40"
+        >
+          {initial ? "Update" : "Add"}
+        </button>
+        <button
+          onClick={onCancel}
+          className="rounded px-3 py-1 text-[11px] text-muted-foreground hover:bg-accent"
+        >
+          Cancel
+        </button>
+      </div>
     </div>
   );
 }

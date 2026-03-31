@@ -2,13 +2,17 @@ mod ai;
 mod auth;
 mod commands;
 mod db;
+mod metadata;
 mod pool;
 mod query;
+mod query_history;
 mod schema;
 mod state;
 
 use ai::store::{AiHistoryStore, AiProviderStore};
 use db::store::ConnectionStore;
+use metadata::MetadataStore;
+use query_history::{QueryHistoryStore, SavedQueryStore};
 use state::AppState;
 use tauri::Manager;
 
@@ -37,7 +41,17 @@ pub fn run() {
                 ConnectionStore::new(app_data_dir.clone()).expect("failed to create connection store");
             let ai_provider_store = AiProviderStore::new(&app_data_dir);
             let ai_history_store = AiHistoryStore::new(&app_data_dir);
-            app.manage(AppState::new(store, ai_provider_store, ai_history_store));
+            let query_history_store = QueryHistoryStore::new(&app_data_dir);
+            let saved_query_store = SavedQueryStore::new(&app_data_dir);
+            let metadata_store = MetadataStore::new(&app_data_dir);
+            app.manage(AppState::new(
+                store,
+                ai_provider_store,
+                ai_history_store,
+                query_history_store,
+                saved_query_store,
+                metadata_store,
+            ));
 
             Ok(())
         })
@@ -71,6 +85,19 @@ pub fn run() {
             commands::list_ai_history,
             commands::save_ai_history_entry,
             commands::clear_ai_history,
+            commands::list_query_history,
+            commands::save_query_history_entry,
+            commands::delete_query_history_entry,
+            commands::clear_query_history,
+            commands::list_saved_queries,
+            commands::create_saved_query,
+            commands::update_saved_query,
+            commands::delete_saved_query,
+            commands::generate_all_metadata,
+            commands::generate_single_metadata,
+            commands::list_metadata,
+            commands::update_metadata,
+            commands::delete_all_metadata,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -95,6 +95,7 @@ pub fn run() {
             commands::delete_saved_query,
             commands::generate_all_metadata,
             commands::generate_single_metadata,
+            commands::generate_schema_metadata,
             commands::list_metadata,
             commands::update_metadata,
             commands::delete_all_metadata,

@@ -13,22 +13,93 @@ import {
   Folder,
   Cog,
   AlertCircle,
+  Sparkles,
 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { useSchemaStore } from "../stores/schemaStore";
 import { useConnectionStore } from "../stores/connectionStore";
 import { useEditorStore } from "../stores/editorStore";
+import { useMetadataStore } from "../stores/metadataStore";
 import type { TableInfo, ColumnInfo, RoutineInfo } from "../types/schema";
+import type { Driver } from "../types/connection";
+
+/** Quote an identifier for the given dialect. */
+function quoteId(name: string, driver: Driver): string {
+  switch (driver) {
+    case "mssql":
+      return `[${name}]`;
+    case "mysql":
+      return `\`${name}\``;
+    default: // postgres, sqlite
+      return `"${name}"`;
+  }
+}
+
+/** Build a qualified table reference: schema.table (or just table for sqlite). */
+function qualifiedTable(schema: string, table: string, driver: Driver): string {
+  if (driver === "sqlite") {
+    return quoteId(table, driver);
+  }
+  return `${quoteId(schema, driver)}.${quoteId(table, driver)}`;
+}
+
+/** Generate dialect-specific SQL snippets for the context menu. */
+function dialectSql(schema: string, table: string, tableType: "table" | "view", driver: Driver) {
+  const ref = qualifiedTable(schema, table, driver);
+
+  const selectTop =
+    driver === "mssql"
+      ? `SELECT TOP 100 * FROM ${ref};`
+      : `SELECT * FROM ${ref}\nLIMIT 100;`;
+
+  const selectCount = `SELECT COUNT(*) FROM ${ref};`;
+
+  const columnInfo = (() => {
+    switch (driver) {
+      case "mssql":
+        return (
+          `-- Columns of ${ref}\n` +
+          `SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT\n` +
+          `FROM INFORMATION_SCHEMA.COLUMNS\n` +
+          `WHERE TABLE_SCHEMA = '${schema}' AND TABLE_NAME = '${table}'\n` +
+          `ORDER BY ORDINAL_POSITION;`
+        );
+      case "mysql":
+        return `DESCRIBE ${ref};`;
+      case "sqlite":
+        return `PRAGMA table_info(${quoteId(table, driver)});`;
+      default: // postgres
+        return (
+          `-- Columns of ${ref}\n` +
+          `SELECT column_name, data_type, is_nullable, column_default\n` +
+          `FROM information_schema.columns\n` +
+          `WHERE table_schema = '${schema}' AND table_name = '${table}'\n` +
+          `ORDER BY ordinal_position;`
+        );
+    }
+  })();
+
+  const dropLabel = tableType === "view" ? "DROP VIEW" : "DROP TABLE";
+  const dropSql =
+    `-- ⚠️ DANGER: This will drop the ${tableType}!\n` +
+    `-- ${dropLabel} ${ref};`;
+
+  return { selectTop, selectCount, columnInfo, dropLabel, dropSql };
+}
 
 interface ContextMenu {
   x: number;
   y: number;
   schemaName: string;
   tableName: string;
+  tableType: "table" | "view";
 }
 
 export default function SchemaTree() {
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId);
+  const connections = useConnectionStore((s) => s.connections);
+  const activeConnection = connections.find((c) => c.id === activeConnectionId);
+  const driver: Driver = activeConnection?.driver ?? "postgres";
   const {
     schemas,
     tables,
@@ -51,6 +122,8 @@ export default function SchemaTree() {
   const contextRef = useRef<HTMLDivElement>(null);
   const prevConnectionId = useRef<string | null>(null);
 
+  const loadMetadata = useMetadataStore((s) => s.loadMetadata);
+
   // Load schemas + all tables/routines when connection changes
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
@@ -60,8 +133,9 @@ export default function SchemaTree() {
       setExpandedSchemaNodes(new Set());
       setExpandedTables(new Set());
       loadSchemas(activeConnectionId);
+      loadMetadata(activeConnectionId);
     }
-  }, [activeConnectionId, loadSchemas]);
+  }, [activeConnectionId, loadSchemas, loadMetadata]);
 
   // When schemas load, eagerly fetch tables + routines for all schemas
   // and auto-expand "Tables" category
@@ -138,12 +212,17 @@ export default function SchemaTree() {
   }, []);
 
   const handleDoubleClick = (schemaName: string, tableName: string) => {
-    insertIntoEditor(`SELECT * FROM ${schemaName}.${tableName} LIMIT 100;`);
+    const ref = qualifiedTable(schemaName, tableName, driver);
+    const sql =
+      driver === "mssql"
+        ? `SELECT TOP 100 * FROM ${ref};`
+        : `SELECT * FROM ${ref}\nLIMIT 100;`;
+    insertIntoEditor(sql);
   };
 
-  const handleContextMenu = (e: React.MouseEvent, schemaName: string, tableName: string) => {
+  const handleContextMenu = (e: React.MouseEvent, schemaName: string, tableName: string, tableType: "table" | "view") => {
     e.preventDefault();
-    setContextMenu({ x: e.clientX, y: e.clientY, schemaName, tableName });
+    setContextMenu({ x: e.clientX, y: e.clientY, schemaName, tableName, tableType });
   };
 
   const contextAction = (sql: string) => {
@@ -264,6 +343,7 @@ export default function SchemaTree() {
               showSchema={hasMultipleSchemas}
               isExpanded={expandedSchemaNodes.has(`tables:${schema}`)}
               onToggle={() => toggleSchemaNode(`tables:${schema}`)}
+              connectionId={activeConnectionId}
             >
               {items.map((table) => (
                 <TableNode
@@ -274,7 +354,8 @@ export default function SchemaTree() {
                   columns={columns[`${schema}.${table.name}`]}
                   onToggle={() => toggleTable(schema, table.name)}
                   onDoubleClick={() => handleDoubleClick(schema, table.name)}
-                  onContextMenu={(e) => handleContextMenu(e, schema, table.name)}
+                  onContextMenu={(e) => handleContextMenu(e, schema, table.name, table.tableType)}
+                  connectionId={activeConnectionId}
                 />
               ))}
             </SchemaGroupNode>
@@ -299,6 +380,7 @@ export default function SchemaTree() {
               showSchema={hasMultipleSchemas}
               isExpanded={expandedSchemaNodes.has(`views:${schema}`)}
               onToggle={() => toggleSchemaNode(`views:${schema}`)}
+              connectionId={activeConnectionId}
             >
               {items.map((view) => (
                 <TableNode
@@ -309,7 +391,8 @@ export default function SchemaTree() {
                   columns={columns[`${schema}.${view.name}`]}
                   onToggle={() => toggleTable(schema, view.name)}
                   onDoubleClick={() => handleDoubleClick(schema, view.name)}
-                  onContextMenu={(e) => handleContextMenu(e, schema, view.name)}
+                  onContextMenu={(e) => handleContextMenu(e, schema, view.name, view.tableType)}
+                  connectionId={activeConnectionId}
                 />
               ))}
             </SchemaGroupNode>
@@ -334,6 +417,7 @@ export default function SchemaTree() {
               showSchema={hasMultipleSchemas}
               isExpanded={expandedSchemaNodes.has(`procedures:${schema}`)}
               onToggle={() => toggleSchemaNode(`procedures:${schema}`)}
+              connectionId={activeConnectionId}
             >
               {items.map((routine) => (
                 <RoutineNode key={routine.name} routine={routine} />
@@ -344,48 +428,55 @@ export default function SchemaTree() {
       </div>
 
       {/* Context menu */}
-      {contextMenu && (
-        <div
-          ref={contextRef}
-          className="fixed z-50 min-w-40 rounded-md border border-border bg-background py-1 shadow-lg"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
-        >
-          <ContextItem
-            label="SELECT * ... LIMIT 100"
-            onClick={() =>
-              contextAction(
-                `SELECT * FROM ${contextMenu.schemaName}.${contextMenu.tableName} LIMIT 100;`,
-              )
-            }
-          />
-          <ContextItem
-            label="SELECT COUNT(*)"
-            onClick={() =>
-              contextAction(
-                `SELECT COUNT(*) FROM ${contextMenu.schemaName}.${contextMenu.tableName};`,
-              )
-            }
-          />
-          <ContextItem
-            label="DESCRIBE / Column info"
-            onClick={() =>
-              contextAction(
-                `-- Columns of ${contextMenu.schemaName}.${contextMenu.tableName}\nSELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = '${contextMenu.schemaName}' AND table_name = '${contextMenu.tableName}' ORDER BY ordinal_position;`,
-              )
-            }
-          />
-          <div className="my-1 border-t border-border" />
-          <ContextItem
-            label="DROP TABLE"
-            className="text-destructive"
-            onClick={() =>
-              contextAction(
-                `-- ⚠️ DANGER: This will drop the table!\n-- DROP TABLE ${contextMenu.schemaName}.${contextMenu.tableName};`,
-              )
-            }
-          />
-        </div>
-      )}
+      {contextMenu && (() => {
+        const sql = dialectSql(
+          contextMenu.schemaName,
+          contextMenu.tableName,
+          contextMenu.tableType,
+          driver,
+        );
+        return (
+          <div
+            ref={contextRef}
+            className="fixed z-50 min-w-40 rounded-md border border-border bg-background py-1 shadow-lg"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+          >
+            <ContextItem
+              label={driver === "mssql" ? "SELECT TOP 100 *" : "SELECT * ... LIMIT 100"}
+              onClick={() => contextAction(sql.selectTop)}
+            />
+            <ContextItem
+              label="SELECT COUNT(*)"
+              onClick={() => contextAction(sql.selectCount)}
+            />
+            <ContextItem
+              label={driver === "mysql" ? "DESCRIBE" : driver === "sqlite" ? "PRAGMA table_info" : "Column info"}
+              onClick={() => contextAction(sql.columnInfo)}
+            />
+            <div className="my-1 border-t border-border" />
+            <ContextItem
+              label="Generate Metadata"
+              onClick={() => {
+                if (activeConnectionId) {
+                  useMetadataStore.getState().generateSingle(
+                    activeConnectionId,
+                    contextMenu.schemaName,
+                    contextMenu.tableName,
+                    contextMenu.tableType,
+                  );
+                }
+                setContextMenu(null);
+              }}
+            />
+            <div className="my-1 border-t border-border" />
+            <ContextItem
+              label={sql.dropLabel}
+              className="text-destructive"
+              onClick={() => contextAction(sql.dropSql)}
+            />
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -431,13 +522,24 @@ function SchemaGroupNode({
   isExpanded,
   onToggle,
   children,
+  connectionId,
 }: {
   schemaName: string;
   showSchema: boolean;
   isExpanded: boolean;
   onToggle: () => void;
   children: React.ReactNode;
+  connectionId: string | null;
 }) {
+  const isSchemaGenerating = useMetadataStore((s) => s.isGenerating(schemaName));
+
+  const handleGenerateSchema = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (connectionId) {
+      useMetadataStore.getState().generateSchema(connectionId, schemaName);
+    }
+  };
+
   if (!showSchema) {
     // Single schema — skip the schema grouping level, render children directly
     return <>{children}</>;
@@ -447,14 +549,27 @@ function SchemaGroupNode({
 
   return (
     <div>
-      <button
-        onClick={onToggle}
-        className="flex w-full items-center gap-1 rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-      >
-        {isExpanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
-        <FolderIcon size={11} className="shrink-0 opacity-60" />
-        <span className="truncate">{schemaName}</span>
-      </button>
+      <div className="group flex w-full items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-accent-foreground">
+        <button
+          onClick={onToggle}
+          className="flex flex-1 items-center gap-1 min-w-0"
+        >
+          {isExpanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+          <FolderIcon size={11} className="shrink-0 opacity-60" />
+          <span className="truncate">{schemaName}</span>
+        </button>
+        {isSchemaGenerating ? (
+          <Loader2 size={11} className="shrink-0 animate-spin text-muted-foreground" />
+        ) : (
+          <button
+            onClick={handleGenerateSchema}
+            className="shrink-0 rounded p-0.5 text-muted-foreground/40 hover:text-muted-foreground"
+            title={`Generate metadata for all objects in ${schemaName}`}
+          >
+            <Sparkles size={11} />
+          </button>
+        )}
+      </div>
       {isExpanded && <div className="ml-3">{children}</div>}
     </div>
   );
@@ -470,6 +585,7 @@ function TableNode({
   onToggle,
   onDoubleClick,
   onContextMenu,
+  connectionId,
 }: {
   table: TableInfo;
   schemaName: string;
@@ -478,8 +594,23 @@ function TableNode({
   onToggle: () => void;
   onDoubleClick: () => void;
   onContextMenu: (e: React.MouseEvent) => void;
+  connectionId: string | null;
 }) {
   const Icon = table.tableType === "view" ? Eye : Table2;
+  const isObjectGenerating = useMetadataStore((s) => s.isGenerating(schemaName, table.name));
+  const hasMetadata = useMetadataStore((s) => !!s.getForObject(schemaName, table.name));
+
+  const handleGenerateMetadata = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (connectionId) {
+      useMetadataStore.getState().generateSingle(
+        connectionId,
+        schemaName,
+        table.name,
+        table.tableType,
+      );
+    }
+  };
 
   const handleDragStart = (e: React.DragEvent) => {
     e.dataTransfer.setData(
@@ -491,19 +622,37 @@ function TableNode({
 
   return (
     <div>
-      <button
-        draggable
-        onDragStart={handleDragStart}
-        onClick={onToggle}
-        onDoubleClick={onDoubleClick}
-        onContextMenu={onContextMenu}
-        className="flex w-full items-center gap-1 rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-accent-foreground cursor-grab active:cursor-grabbing"
-        title={`${schemaName}.${table.name} (${table.tableType})`}
-      >
-        {isExpanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
-        <Icon size={11} className="shrink-0 opacity-60" />
-        <span className="truncate">{table.name}</span>
-      </button>
+      <div className="group flex w-full items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-accent-foreground">
+        <button
+          draggable
+          onDragStart={handleDragStart}
+          onClick={onToggle}
+          onDoubleClick={onDoubleClick}
+          onContextMenu={onContextMenu}
+          className="flex flex-1 items-center gap-1 min-w-0 cursor-grab active:cursor-grabbing"
+          title={`${schemaName}.${table.name} (${table.tableType})`}
+        >
+          {isExpanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+          <Icon size={11} className="shrink-0 opacity-60" />
+          <span className="truncate">{table.name}</span>
+        </button>
+        {isObjectGenerating ? (
+          <Loader2 size={11} className="shrink-0 animate-spin text-muted-foreground" />
+        ) : (
+          <button
+            onClick={handleGenerateMetadata}
+            className={cn(
+              "shrink-0 rounded p-0.5",
+              hasMetadata
+                ? "text-emerald-500 hover:text-emerald-400"
+                : "text-muted-foreground/40 hover:text-muted-foreground",
+            )}
+            title={hasMetadata ? `Regenerate metadata for ${table.name}` : `Generate metadata for ${table.name}`}
+          >
+            <Sparkles size={11} />
+          </button>
+        )}
+      </div>
 
       {isExpanded && columns && (
         <div className="ml-5">

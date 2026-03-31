@@ -784,13 +784,31 @@ fn build_object_prompt(
     lines.join("\n")
 }
 
+fn strip_thinking_blocks(text: &str) -> String {
+    let mut result = text.to_string();
+    // Strip <think>...</think> blocks (used by reasoning models)
+    while let Some(start) = result.find("<think>") {
+        if let Some(end) = result.find("</think>") {
+            result = format!("{}{}", &result[..start], &result[end + "</think>".len()..]);
+        } else {
+            // Unclosed <think> tag — strip from <think> to end
+            result = result[..start].to_string();
+            break;
+        }
+    }
+    result
+}
+
 fn parse_metadata_response(response: &str) -> GeneratedMetadata {
+    // Strip thinking blocks from reasoning models
+    let response = strip_thinking_blocks(response);
+    let response = response.trim();
+
     // Strip markdown fences if present
     let cleaned = response
-        .trim()
         .strip_prefix("```json")
-        .or_else(|| response.trim().strip_prefix("```"))
-        .unwrap_or(response.trim());
+        .or_else(|| response.strip_prefix("```"))
+        .unwrap_or(response);
     let cleaned = cleaned
         .strip_suffix("```")
         .unwrap_or(cleaned)
@@ -800,9 +818,19 @@ fn parse_metadata_response(response: &str) -> GeneratedMetadata {
         return parsed;
     }
 
+    // Try to extract the first JSON object from the response
+    if let Some(start) = cleaned.find('{') {
+        if let Some(end) = cleaned.rfind('}') {
+            let json_slice = &cleaned[start..=end];
+            if let Ok(parsed) = serde_json::from_str::<GeneratedMetadata>(json_slice) {
+                return parsed;
+            }
+        }
+    }
+
     // Fallback: use the raw response as the description
     GeneratedMetadata {
-        description: response.trim().to_string(),
+        description: response.to_string(),
         columns: Vec::new(),
         example_usage: String::new(),
         related_objects: Vec::new(),
@@ -1015,6 +1043,137 @@ pub async fn generate_single_metadata(
     state.save_metadata().await?;
 
     Ok(entry.id)
+}
+
+#[tauri::command]
+pub async fn generate_schema_metadata(
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+    connection_id: String,
+    schema_name: String,
+) -> Result<String, String> {
+    let (pool, driver) = get_pool_and_driver(&state, &connection_id).await?;
+    let ai_config = get_default_provider(&state).await?;
+    let driver_str = format!("{:?}", driver).to_lowercase();
+    let generation_id = uuid::Uuid::new_v4().to_string();
+    let conn_id = connection_id.clone();
+    let schema = schema_name.clone();
+
+    // Gather all tables and routines in this schema
+    let mut all_objects: Vec<(String, String, String)> = Vec::new();
+    let tables = schema::list_tables(pool.clone(), &driver, &schema)
+        .await
+        .unwrap_or_default();
+    for t in &tables {
+        all_objects.push((schema.clone(), t.name.clone(), t.table_type.clone()));
+    }
+    let routines = schema::list_routines(pool.clone(), &driver, &schema)
+        .await
+        .unwrap_or_default();
+    for r in &routines {
+        all_objects.push((schema.clone(), r.name.clone(), r.routine_type.clone()));
+    }
+
+    let total = all_objects.len();
+
+    tokio::spawn(async move {
+        let app_state = app_handle.state::<AppState>();
+        let mut generated_count = 0;
+
+        for (i, (schema_name, object_name, object_type)) in all_objects.iter().enumerate() {
+            let _ = app_handle.emit(
+                "metadata:progress",
+                MetadataProgressPayload {
+                    connection_id: conn_id.clone(),
+                    current: i + 1,
+                    total,
+                    object_name: object_name.clone(),
+                    status: "generating".to_string(),
+                },
+            );
+
+            let (columns, indexes) = if object_type == "table" || object_type == "view" {
+                let cols = schema::list_columns(pool.clone(), &driver, schema_name, object_name)
+                    .await
+                    .unwrap_or_default();
+                let idxs = schema::list_indexes(pool.clone(), &driver, schema_name, object_name)
+                    .await
+                    .unwrap_or_default();
+                (cols, idxs)
+            } else {
+                (Vec::new(), Vec::new())
+            };
+
+            let prompt =
+                build_object_prompt(object_name, object_type, schema_name, &columns, &indexes);
+
+            match client::call_ai_response(
+                &ai_config,
+                &prompt,
+                "generate_metadata",
+                Some(&driver_str),
+                None,
+            )
+            .await
+            {
+                Ok(response) => {
+                    let metadata = parse_metadata_response(&response);
+                    let now = chrono::Utc::now().to_rfc3339();
+                    let entry = ObjectMetadata {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        connection_id: conn_id.clone(),
+                        schema_name: schema_name.clone(),
+                        object_name: object_name.clone(),
+                        object_type: object_type.clone(),
+                        metadata,
+                        generated_at: now.clone(),
+                        updated_at: now,
+                    };
+
+                    let mut entries = app_state.metadata.lock().await;
+                    if let Some(existing) = entries.iter_mut().find(|e| {
+                        e.connection_id == conn_id
+                            && e.schema_name == *schema_name
+                            && e.object_name == *object_name
+                    }) {
+                        *existing = entry;
+                    } else {
+                        entries.push(entry);
+                    }
+                    drop(entries);
+                    generated_count += 1;
+                }
+                Err(err) => {
+                    eprintln!("Metadata generation error for {object_name}: {err}");
+                }
+            }
+
+            let _ = app_handle.emit(
+                "metadata:progress",
+                MetadataProgressPayload {
+                    connection_id: conn_id.clone(),
+                    current: i + 1,
+                    total,
+                    object_name: object_name.clone(),
+                    status: "complete".to_string(),
+                },
+            );
+        }
+
+        if let Err(e) = app_state.save_metadata().await {
+            eprintln!("Failed to save metadata: {e}");
+        }
+
+        let _ = app_handle.emit(
+            "metadata:done",
+            MetadataDonePayload {
+                connection_id: conn_id,
+                total_generated: generated_count,
+            },
+        );
+    });
+
+    Ok(generation_id)
 }
 
 #[tauri::command]

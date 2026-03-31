@@ -13,6 +13,9 @@ interface MetadataState {
   progress: MetadataProgress | null;
   error: string | null;
 
+  /** Keys currently generating: "schema.object" for single, "schema:*" for whole schema */
+  generatingKeys: Set<string>;
+
   loadMetadata: (connectionId: string) => Promise<void>;
   generateAll: (connectionId: string) => Promise<void>;
   generateSingle: (
@@ -21,12 +24,15 @@ interface MetadataState {
     objectName: string,
     objectType: string,
   ) => Promise<void>;
+  generateSchema: (connectionId: string, schemaName: string) => Promise<void>;
   updateEntry: (entry: ObjectMetadata) => Promise<void>;
   deleteAll: (connectionId: string) => Promise<void>;
 
   setProgress: (progress: MetadataProgress) => void;
   setDone: (done: MetadataDone) => void;
   setError: (error: MetadataError) => void;
+
+  isGenerating: (schemaName: string, objectName?: string) => boolean;
 
   getForObject: (
     schemaName: string,
@@ -39,6 +45,7 @@ export const useMetadataStore = create<MetadataState>((set, get) => ({
   generating: false,
   progress: null,
   error: null,
+  generatingKeys: new Set(),
 
   loadMetadata: async (connectionId) => {
     try {
@@ -61,6 +68,12 @@ export const useMetadataStore = create<MetadataState>((set, get) => ({
   },
 
   generateSingle: async (connectionId, schemaName, objectName, objectType) => {
+    const key = `${schemaName}.${objectName}`;
+    set((s) => {
+      const next = new Set(s.generatingKeys);
+      next.add(key);
+      return { generatingKeys: next };
+    });
     try {
       await invoke<string>("generate_single_metadata", {
         connectionId,
@@ -73,6 +86,36 @@ export const useMetadataStore = create<MetadataState>((set, get) => ({
     } catch (e) {
       console.error("Failed to generate metadata:", e);
       throw e;
+    } finally {
+      set((s) => {
+        const next = new Set(s.generatingKeys);
+        next.delete(key);
+        return { generatingKeys: next };
+      });
+    }
+  },
+
+  generateSchema: async (connectionId, schemaName) => {
+    const schemaKey = `${schemaName}:*`;
+    set((s) => {
+      const next = new Set(s.generatingKeys);
+      next.add(schemaKey);
+      return { generatingKeys: next, generating: true, progress: null, error: null };
+    });
+    try {
+      await invoke<string>("generate_schema_metadata", {
+        connectionId,
+        schemaName,
+      });
+      // The async backend will emit metadata:done which triggers loadMetadata
+    } catch (e) {
+      set({ generating: false, error: String(e) });
+    } finally {
+      set((s) => {
+        const next = new Set(s.generatingKeys);
+        next.delete(schemaKey);
+        return { generatingKeys: next };
+      });
     }
   },
 
@@ -105,13 +148,23 @@ export const useMetadataStore = create<MetadataState>((set, get) => ({
   },
 
   setDone: (done) => {
-    set({ generating: false, progress: null });
+    set({ generating: false, progress: null, generatingKeys: new Set() });
     // Reload metadata entries after generation completes
     get().loadMetadata(done.connectionId);
   },
 
   setError: (error) => {
-    set({ generating: false, error: error.error });
+    set({ generating: false, error: error.error, generatingKeys: new Set() });
+  },
+
+  isGenerating: (schemaName, objectName) => {
+    const keys = get().generatingKeys;
+    if (objectName) {
+      // Check if this specific object or its schema is generating
+      return keys.has(`${schemaName}.${objectName}`) || keys.has(`${schemaName}:*`);
+    }
+    // Check if the whole schema is generating
+    return keys.has(`${schemaName}:*`);
   },
 
   getForObject: (schemaName, objectName) => {

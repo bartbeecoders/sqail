@@ -14,7 +14,8 @@
       "Bash(git -C /run/media/bart/Development/dev/codeberg/sqail diff HEAD)",
       "Bash(git:*)",
       "Bash(grep -rn impl.*DateTimeb /home/bart/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tiberius-0.12.3/src/tds/time/)",
-      "Bash(grep -E '\\\\.\\(ts|tsx\\)$')"
+      "Bash(grep -E '\\\\.\\(ts|tsx\\)$')",
+      "Bash(xargs ls:*)"
     ]
   }
 }

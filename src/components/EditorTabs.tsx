@@ -1,14 +1,25 @@
 import { Plus, X } from "lucide-react";
+import { useRef, useState } from "react";
 import { cn } from "../lib/utils";
 import { useEditorStore } from "../stores/editorStore";
 
 export default function EditorTabs() {
-  const { tabs, activeTabId, addTab, closeTab, setActiveTab } = useEditorStore();
+  const { tabs, activeTabId, addTab, closeTab, setActiveTab, renameTab } = useEditorStore();
+  const [editingTabId, setEditingTabId] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const commitRename = (id: string) => {
+    const trimmed = editValue.trim();
+    if (trimmed) renameTab(id, trimmed);
+    setEditingTabId(null);
+  };
 
   return (
     <div className="flex h-8 items-end gap-px overflow-x-auto border-b border-border bg-muted/30 px-1">
       {tabs.map((tab) => {
         const isActive = tab.id === activeTabId;
+        const isEditing = editingTabId === tab.id;
         return (
           <div
             key={tab.id}
@@ -19,9 +30,31 @@ export default function EditorTabs() {
                 : "text-muted-foreground hover:text-foreground hover:bg-muted",
             )}
             onClick={() => setActiveTab(tab.id)}
+            onDoubleClick={() => {
+              setEditingTabId(tab.id);
+              setEditValue(tab.title);
+              requestAnimationFrame(() => inputRef.current?.select());
+            }}
           >
-            <span className="max-w-24 truncate">{tab.title}</span>
-            {tabs.length > 1 && (
+            {isEditing ? (
+              <input
+                ref={inputRef}
+                value={editValue}
+                onChange={(e) => setEditValue(e.target.value)}
+                onBlur={() => commitRename(tab.id)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") commitRename(tab.id);
+                  if (e.key === "Escape") setEditingTabId(null);
+                }}
+                onClick={(e) => e.stopPropagation()}
+                onDoubleClick={(e) => e.stopPropagation()}
+                className="w-24 bg-transparent outline-none ring-1 ring-border rounded px-1"
+                autoFocus
+              />
+            ) : (
+              <span className="max-w-24 truncate">{tab.title}</span>
+            )}
+            {tabs.length > 1 && !isEditing && (
               <button
                 onClick={(e) => {
                   e.stopPropagation();

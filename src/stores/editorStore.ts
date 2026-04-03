@@ -52,7 +52,12 @@ export const useEditorStore = create<EditorState>((set, get) => {
 
     addTab: () => {
       const { tabs } = get();
-      const tab = createTab(tabs.length + 1);
+      const usedNumbers = tabs
+        .map((t) => t.title.match(/^Query (\d+)$/))
+        .filter(Boolean)
+        .map((m) => Number(m![1]));
+      const nextNumber = usedNumbers.length > 0 ? Math.max(...usedNumbers) + 1 : 1;
+      const tab = createTab(nextNumber);
       set({ tabs: [...tabs, tab], activeTabId: tab.id });
       persist();
     },

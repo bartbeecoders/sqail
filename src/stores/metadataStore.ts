@@ -72,7 +72,7 @@ export const useMetadataStore = create<MetadataState>((set, get) => ({
     set((s) => {
       const next = new Set(s.generatingKeys);
       next.add(key);
-      return { generatingKeys: next };
+      return { generatingKeys: next, error: null };
     });
     try {
       await invoke<string>("generate_single_metadata", {
@@ -85,7 +85,7 @@ export const useMetadataStore = create<MetadataState>((set, get) => ({
       await get().loadMetadata(connectionId);
     } catch (e) {
       console.error("Failed to generate metadata:", e);
-      throw e;
+      set({ error: String(e) });
     } finally {
       set((s) => {
         const next = new Set(s.generatingKeys);

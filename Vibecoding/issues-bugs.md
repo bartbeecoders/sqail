@@ -21,3 +21,18 @@ Guid fields and datetime fields should be formatted as such. Now they show as Da
 
 
 The sql code generated with the right mouse click on a table should be formatted properly and should fit the database type (SQL Server, PostgreSQL, MySQL, etc.)
+
+Improve the editor tab design and functionality
+- when clicking the + icon, a new tab should be created with the name Query x (where x is the next number)
+
+- add the possibility to rename a tab by double clicking on it
+
+Allow to set a LLM provider as the default for the application.
+When starting the application, the default LLM provider should be used.
+
+In the sql editor, the syntax highlighting should be based on the database type (SQL Server, PostgreSQL, MySQL, etc.)
+It does not seem to detect syntax errors properly. I do not see any error highlighting.
+
+Improve the autocomplete functionality in the sql editor.
+when in a sql statement, propose the best matching next character or word. This could be a table name (after FROM or schema name), a column name (after SELECT or WHERE), a keyword (after FROM, WHERE, etc.), or a function name (after SELECT, WHERE, etc.).
+Create a full autocomplete system that can be used in the sql editor.

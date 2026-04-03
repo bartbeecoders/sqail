@@ -14,6 +14,16 @@ import { createSqlCompletionProvider } from "../lib/sqlCompletions";
 import { buildSelectStatement } from "../lib/sqlGenerate";
 import { validateSql, toMonacoMarkers } from "../lib/sqlValidator";
 import type { ColumnInfo } from "../types/schema";
+import type { Driver } from "../types/connection";
+
+/** Map database driver to Monaco language ID */
+function driverToLanguage(driver: Driver | ""): string {
+  switch (driver) {
+    case "postgres": return "pgsql";
+    case "mysql": return "mysql";
+    default: return "sql"; // mssql, sqlite, no connection
+  }
+}
 
 interface SqlEditorProps {
   onExecute?: (sql: string) => void;
@@ -39,10 +49,19 @@ export default function SqlEditor({ onExecute, onFormat, overrideTabId }: SqlEdi
   const validationTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const activeTab = tabs.find((t) => t.id === activeTabId);
 
+  const activeConnectionId = useConnectionStore((s) => s.activeConnectionId);
+  const connections = useConnectionStore((s) => s.connections);
+  const activeConn = connections.find((c) => c.id === activeConnectionId);
+  const driver: Driver | "" = activeConn?.driver ?? "";
+  const monacoLanguage = driverToLanguage(driver);
+
   const handleBeforeMount: BeforeMount = useCallback((monaco) => {
     monaco.editor.defineTheme("sqlai-dark", sqlaiDark);
     monaco.editor.defineTheme("sqlai-light", sqlaiLight);
-    monaco.languages.registerCompletionItemProvider("sql", createSqlCompletionProvider());
+    const completionProvider = createSqlCompletionProvider();
+    for (const lang of ["sql", "mysql", "pgsql"]) {
+      monaco.languages.registerCompletionItemProvider(lang, completionProvider);
+    }
   }, []);
 
   const runValidation = useCallback(() => {
@@ -56,7 +75,10 @@ export default function SqlEditor({ onExecute, onFormat, overrideTabId }: SqlEdi
       monaco.editor.setModelMarkers(model, "sql-validator", []);
       return;
     }
-    const errors = validateSql(text);
+    const connStore = useConnectionStore.getState();
+    const conn = connStore.connections.find((c) => c.id === connStore.activeConnectionId);
+    const currentDriver = conn?.driver ?? "";
+    const errors = validateSql(text, currentDriver);
     const markers = toMonacoMarkers(errors);
     monaco.editor.setModelMarkers(model, "sql-validator", markers);
   }, []);
@@ -192,6 +214,12 @@ export default function SqlEditor({ onExecute, onFormat, overrideTabId }: SqlEdi
   // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-set model on tab switch, not content changes
   }, [activeTabId]);
 
+  // Re-validate when the database driver changes (dialect-specific checks)
+  useEffect(() => {
+    setTimeout(() => runValidation(), 50);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [driver]);
+
   // Shift + Mouse Wheel → zoom editor font size
   // Must attach to the editor's DOM directly and use capture phase
   // because Monaco intercepts wheel events internally.
@@ -323,7 +351,7 @@ export default function SqlEditor({ onExecute, onFormat, overrideTabId }: SqlEdi
         </div>
       )}
       <Editor
-        language="sql"
+        language={monacoLanguage}
         theme={isDark ? "sqlai-dark" : "sqlai-light"}
         value={activeTab?.content ?? ""}
         onChange={handleChange}

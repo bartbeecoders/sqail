@@ -17,6 +17,8 @@ interface SchemaState {
   loadColumns: (connectionId: string, schemaName: string, tableName: string) => Promise<void>;
   loadIndexes: (connectionId: string, schemaName: string, tableName: string) => Promise<void>;
   loadRoutines: (connectionId: string, schemaName: string) => Promise<void>;
+  /** Load columns for all tables in a schema (for completions) */
+  loadAllColumns: (connectionId: string, schemaName: string) => Promise<void>;
   clear: () => void;
 
   /** Flat list of all loaded table names (for completions) */
@@ -95,6 +97,35 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
       set((s) => ({ routines: { ...s.routines, [schemaName]: routines } }));
     } catch (e) {
       console.error("Failed to load routines:", e);
+    }
+  },
+
+  loadAllColumns: async (connectionId, schemaName) => {
+    const tableList = get().tables[schemaName];
+    if (!tableList) return;
+    // Load columns for each table in parallel
+    const results = await Promise.allSettled(
+      tableList.map(async (t) => {
+        const key = `${schemaName}.${t.name}`;
+        // Skip if already loaded
+        if (get().columns[key]) return;
+        const columns = await invoke<ColumnInfo[]>("list_columns", {
+          connectionId,
+          schemaName,
+          tableName: t.name,
+        });
+        return { key, columns };
+      }),
+    );
+    // Batch update the store once
+    const newCols: Record<string, ColumnInfo[]> = {};
+    for (const r of results) {
+      if (r.status === "fulfilled" && r.value) {
+        newCols[r.value.key] = r.value.columns;
+      }
+    }
+    if (Object.keys(newCols).length > 0) {
+      set((s) => ({ columns: { ...s.columns, ...newCols } }));
     }
   },
 

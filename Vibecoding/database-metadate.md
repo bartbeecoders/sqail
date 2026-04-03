@@ -31,3 +31,5 @@ When metadata exists for an object, show a green sparkles icon next to the objec
 When no metadata exists for an object, show a gray sparkles icon next to the object name. 
 Clicking on the sparkles icon generates or re-generated the metadata.
 Clicking on the sparkle icon next to a schema, should start generating the metadata for all tables in that schema.
+
+

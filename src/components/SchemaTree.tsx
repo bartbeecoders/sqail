@@ -22,6 +22,8 @@ import { useEditorStore } from "../stores/editorStore";
 import { useMetadataStore } from "../stores/metadataStore";
 import type { TableInfo, ColumnInfo, RoutineInfo } from "../types/schema";
 import type { Driver } from "../types/connection";
+import type { ObjectMetadata } from "../types/metadata";
+import MetadataDetailModal from "./MetadataDetailModal";
 
 /** Quote an identifier for the given dialect. */
 function quoteId(name: string, driver: Driver): string {
@@ -111,7 +113,9 @@ export default function SchemaTree() {
     loadTables,
     loadColumns,
     loadRoutines,
+    loadAllColumns,
   } = useSchemaStore();
+  const metadataError = useMetadataStore((s) => s.error);
 
   // expanded state: top-level categories, schema nodes within a category, individual tables
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set());
@@ -121,6 +125,7 @@ export default function SchemaTree() {
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
   const contextRef = useRef<HTMLDivElement>(null);
   const prevConnectionId = useRef<string | null>(null);
+  const [metadataModalEntry, setMetadataModalEntry] = useState<ObjectMetadata | null>(null);
 
   const loadMetadata = useMetadataStore((s) => s.loadMetadata);
 
@@ -148,7 +153,9 @@ export default function SchemaTree() {
     ) {
       autoLoadedFor.current = activeConnectionId;
       for (const schema of schemas) {
-        loadTables(activeConnectionId, schema.name);
+        loadTables(activeConnectionId, schema.name).then(() => {
+          loadAllColumns(activeConnectionId!, schema.name);
+        });
         loadRoutines(activeConnectionId, schema.name);
       }
       // Auto-expand Tables category
@@ -237,6 +244,11 @@ export default function SchemaTree() {
     }
   };
 
+  const handleShowMetadata = useCallback((schemaName: string, objectName: string) => {
+    const entry = useMetadataStore.getState().getForObject(schemaName, objectName);
+    if (entry) setMetadataModalEntry(entry);
+  }, []);
+
   const filterLower = filter.toLowerCase();
 
   const getTablesOfType = (type: string): { schema: string; items: TableInfo[] }[] => {
@@ -312,6 +324,22 @@ export default function SchemaTree() {
         </div>
       )}
 
+      {/* Metadata generation error */}
+      {metadataError && (
+        <div className="mx-2 mb-1 flex items-start gap-1.5 rounded border border-destructive/30 bg-destructive/10 px-2 py-1.5 text-[11px] text-destructive">
+          <AlertCircle size={12} className="mt-0.5 shrink-0" />
+          <div className="min-w-0 flex-1">
+            <span className="break-all">{metadataError}</span>
+            <button
+              onClick={() => useMetadataStore.setState({ error: null })}
+              className="ml-1 text-[10px] underline opacity-70 hover:opacity-100"
+            >
+              dismiss
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Filter */}
       <div className="relative px-2 pb-1">
         <Search size={10} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
@@ -356,6 +384,7 @@ export default function SchemaTree() {
                   onDoubleClick={() => handleDoubleClick(schema, table.name)}
                   onContextMenu={(e) => handleContextMenu(e, schema, table.name, table.tableType)}
                   connectionId={activeConnectionId}
+                  onShowMetadata={handleShowMetadata}
                 />
               ))}
             </SchemaGroupNode>
@@ -393,6 +422,7 @@ export default function SchemaTree() {
                   onDoubleClick={() => handleDoubleClick(schema, view.name)}
                   onContextMenu={(e) => handleContextMenu(e, schema, view.name, view.tableType)}
                   connectionId={activeConnectionId}
+                  onShowMetadata={handleShowMetadata}
                 />
               ))}
             </SchemaGroupNode>
@@ -477,6 +507,14 @@ export default function SchemaTree() {
           </div>
         );
       })()}
+
+      {metadataModalEntry && activeConnectionId && (
+        <MetadataDetailModal
+          entry={metadataModalEntry}
+          connectionId={activeConnectionId}
+          onClose={() => setMetadataModalEntry(null)}
+        />
+      )}
     </div>
   );
 }
@@ -586,6 +624,7 @@ function TableNode({
   onDoubleClick,
   onContextMenu,
   connectionId,
+  onShowMetadata,
 }: {
   table: TableInfo;
   schemaName: string;
@@ -595,6 +634,7 @@ function TableNode({
   onDoubleClick: () => void;
   onContextMenu: (e: React.MouseEvent) => void;
   connectionId: string | null;
+  onShowMetadata: (schemaName: string, objectName: string) => void;
 }) {
   const Icon = table.tableType === "view" ? Eye : Table2;
   const isObjectGenerating = useMetadataStore((s) => s.isGenerating(schemaName, table.name));
@@ -602,7 +642,9 @@ function TableNode({
 
   const handleGenerateMetadata = (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (connectionId) {
+    if (hasMetadata) {
+      onShowMetadata(schemaName, table.name);
+    } else if (connectionId) {
       useMetadataStore.getState().generateSingle(
         connectionId,
         schemaName,
@@ -647,7 +689,7 @@ function TableNode({
                 ? "text-emerald-500 hover:text-emerald-400"
                 : "text-muted-foreground/40 hover:text-muted-foreground",
             )}
-            title={hasMetadata ? `Regenerate metadata for ${table.name}` : `Generate metadata for ${table.name}`}
+            title={hasMetadata ? `View metadata for ${table.name}` : `Generate metadata for ${table.name}`}
           >
             <Sparkles size={11} />
           </button>

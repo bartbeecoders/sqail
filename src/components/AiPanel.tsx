@@ -48,6 +48,8 @@ export default function AiPanel() {
     optimizeQuery,
     generateDocs,
     setPanel,
+    getDefaultProvider,
+    setDefaultProvider,
   } = useAiStore();
 
   const [selectedFlow, setSelectedFlow] = useState<AiFlow>("generate_sql");
@@ -258,6 +260,23 @@ export default function AiPanel() {
                 ))}
               </div>
             )}
+          </div>
+        )}
+
+        {/* Provider selector */}
+        {providers.length > 0 && !showSettings && (
+          <div className="border-b border-border px-3 py-1.5">
+            <select
+              value={getDefaultProvider()?.id ?? ""}
+              onChange={(e) => setDefaultProvider(e.target.value)}
+              className="w-full rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
+            >
+              {providers.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name} ({AI_PROVIDER_LABELS[p.provider]} — {p.model})
+                </option>
+              ))}
+            </select>
           </div>
         )}
 

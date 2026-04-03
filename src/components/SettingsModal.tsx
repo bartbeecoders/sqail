@@ -580,6 +580,86 @@ interface Release {
 
 const RELEASES: Release[] = [
   {
+    version: "0.2.3",
+    sections: [
+      {
+        title: "SQL Editor",
+        items: [
+          "Database-specific syntax highlighting: PostgreSQL (pgsql), MySQL, SQL Server, SQLite",
+          "Context-aware SQL autocomplete: suggests tables after FROM/JOIN, columns after SELECT/WHERE, functions, data types, and schema-qualified identifiers",
+          "Alias-aware column completion: typing alias. shows columns from the aliased table (e.g. SELECT t. FROM users t)",
+          "Dialect-specific SQL functions in autocomplete: PostgreSQL (STRING_AGG, DATE_TRUNC), MySQL (GROUP_CONCAT, IF), SQL Server (GETDATE, DATEADD)",
+          "Stored procedures and functions included in autocomplete suggestions",
+          "Autocomplete trigger on dot, comma, and opening parenthesis",
+        ],
+      },
+      {
+        title: "SQL Validation",
+        items: [
+          "Typo detection with 'did you mean?' suggestions using Levenshtein distance against SQL keyword dictionary",
+          "Dialect-specific error checks: LIMIT in SQL Server, TOP in PostgreSQL, ILIKE outside PostgreSQL, RETURNING in MySQL/MSSQL, backtick quoting in PostgreSQL/MSSQL",
+          "Trailing comma detection before clause keywords (FROM, WHERE, GROUP, etc.)",
+          "DELETE without FROM clause detection",
+          "Improved unclosed string/comment error positioning",
+          "Validation re-runs automatically when switching database connections",
+        ],
+      },
+      {
+        title: "Editor Tabs",
+        items: [
+          "Rename tabs by double-clicking on the tab title",
+          "New tab numbering: always increments from highest existing Query number, avoiding duplicates after closing tabs",
+        ],
+      },
+      {
+        title: "AI Integration",
+        items: [
+          "Default AI provider selector dropdown in the AI panel for quick switching",
+          "Default provider persisted and used automatically on application start",
+          "Metadata generation error messages now displayed in the schema tree sidebar",
+        ],
+      },
+      {
+        title: "Metadata",
+        items: [
+          "Click green sparkle button on a table to view existing metadata instead of regenerating",
+          "Metadata detail modal accessible directly from the schema tree",
+        ],
+      },
+    ],
+  },
+  {
+    version: "0.2.2",
+    sections: [
+      {
+        title: "AI-Powered Metadata Generation",
+        items: [
+          "Generate metadata documentation for individual tables, schemas, or all objects",
+          "Non-streaming AI calls for structured JSON metadata responses",
+          "Thinking block stripping for reasoning models",
+          "Enhanced JSON parsing with fallback extraction from AI responses",
+          "Schema-level metadata generation with progress tracking",
+          "Metadata UI with tabs and improved spacing",
+        ],
+      },
+      {
+        title: "Query History & Saved Queries",
+        items: [
+          "Query execution history with persistence",
+          "Saved queries with create, update, and delete support",
+          "Query history and saved queries accessible via commands",
+        ],
+      },
+      {
+        title: "Editor Enhancements",
+        items: [
+          "Mouse wheel zoom for editor font size (Shift + scroll)",
+          "Window state persistence (size, position) across restarts",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.2.1",
     sections: [
       {

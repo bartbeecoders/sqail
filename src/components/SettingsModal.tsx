@@ -1,9 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { X, RotateCcw, Settings, Keyboard, Info, Code2, Plus, Trash2, Pencil } from "lucide-react";
+import { X, RotateCcw, Settings, Keyboard, Info, Code2, Plus, Trash2, Pencil, Sparkles, Check } from "lucide-react";
 import { cn } from "../lib/utils";
 import { useShortcutStore } from "../stores/shortcutStore";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useSnippetStore, type SqlSnippet } from "../stores/snippetStore";
+import { useAiStore } from "../stores/aiStore";
+import { AI_PROVIDER_LABELS } from "../types/ai";
+import type { AiProviderConfig } from "../types/ai";
+import AiProviderForm from "./AiProviderForm";
 import {
   SHORTCUT_ACTIONS,
   CATEGORY_LABELS,
@@ -15,7 +19,7 @@ interface SettingsModalProps {
   initialTab?: SettingsTab;
 }
 
-type SettingsTab = "general" | "shortcuts" | "snippets" | "about";
+type SettingsTab = "general" | "ai" | "shortcuts" | "snippets" | "about";
 
 export default function SettingsModal({ onClose, initialTab = "general" }: SettingsModalProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
@@ -44,6 +48,12 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Setti
               onClick={() => setActiveTab("general")}
             />
             <TabButton
+              active={activeTab === "ai"}
+              icon={<Sparkles size={14} />}
+              label="AI Providers"
+              onClick={() => setActiveTab("ai")}
+            />
+            <TabButton
               active={activeTab === "shortcuts"}
               icon={<Keyboard size={14} />}
               label="Keyboard Shortcuts"
@@ -66,6 +76,7 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Setti
           {/* Content */}
           <div className="flex-1 overflow-y-auto p-5">
             {activeTab === "general" && <GeneralTab />}
+            {activeTab === "ai" && <AiProvidersTab />}
             {activeTab === "shortcuts" && <ShortcutsTab />}
             {activeTab === "snippets" && <SnippetsTab />}
             {activeTab === "about" && <AboutTab />}
@@ -257,6 +268,112 @@ function ToggleSwitch({ checked, onChange }: { checked: boolean; onChange: (v: b
         )}
       />
     </button>
+  );
+}
+
+// ── AI Providers Tab ──────────────────────────────────────
+
+function AiProvidersTab() {
+  const { providers, loadProviders, deleteProvider, setDefaultProvider } = useAiStore();
+  const [editingProvider, setEditingProvider] = useState<AiProviderConfig | undefined>();
+  const [showForm, setShowForm] = useState(false);
+
+  useEffect(() => {
+    loadProviders();
+  }, [loadProviders]);
+
+  return (
+    <>
+      <div className="space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-semibold">AI Providers</h3>
+            <p className="text-[11px] text-muted-foreground">
+              Configure LLM providers for AI-powered SQL features.
+            </p>
+          </div>
+          <button
+            onClick={() => {
+              setEditingProvider(undefined);
+              setShowForm(true);
+            }}
+            className="flex items-center gap-1 rounded-md bg-primary px-2 py-1 text-[11px] font-medium text-primary-foreground hover:bg-primary/90"
+          >
+            <Plus size={12} />
+            Add Provider
+          </button>
+        </div>
+
+        {providers.length === 0 ? (
+          <div className="rounded-md border border-dashed border-border py-8 text-center text-xs text-muted-foreground">
+            No providers configured. Add one to enable AI features.
+          </div>
+        ) : (
+          <div className="space-y-1">
+            {providers.map((p) => (
+              <div
+                key={p.id}
+                className="group flex items-center gap-3 rounded-md border border-border px-3 py-2"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className={cn("text-xs font-medium", p.isDefault && "text-primary")}>
+                      {p.name}
+                    </span>
+                    {p.isDefault && (
+                      <span className="rounded bg-primary/10 px-1 py-0.5 text-[9px] font-medium text-primary">
+                        default
+                      </span>
+                    )}
+                  </div>
+                  <span className="block text-[10px] text-muted-foreground">
+                    {AI_PROVIDER_LABELS[p.provider]} — {p.model}
+                  </span>
+                </div>
+                <div className="flex shrink-0 gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                  {!p.isDefault && (
+                    <button
+                      onClick={() => setDefaultProvider(p.id)}
+                      className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+                      title="Set as default"
+                    >
+                      <Check size={12} />
+                    </button>
+                  )}
+                  <button
+                    onClick={() => {
+                      setEditingProvider(p);
+                      setShowForm(true);
+                    }}
+                    className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+                    title="Edit"
+                  >
+                    <Pencil size={12} />
+                  </button>
+                  <button
+                    onClick={() => deleteProvider(p.id)}
+                    className="rounded p-1 text-destructive/70 hover:bg-accent hover:text-destructive"
+                    title="Delete"
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {showForm && (
+        <AiProviderForm
+          initial={editingProvider}
+          onClose={() => {
+            setShowForm(false);
+            setEditingProvider(undefined);
+          }}
+        />
+      )}
+    </>
   );
 }
 

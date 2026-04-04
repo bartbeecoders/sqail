@@ -41,6 +41,9 @@ pub async fn stream_ai_response(
         AiProviderType::OpenAi | AiProviderType::OpenAiCompatible => {
             stream_openai(&app_handle, &request_id, config, &system_prompt, user_message).await
         }
+        AiProviderType::OpenRouter => {
+            stream_openrouter(&app_handle, &request_id, config, &system_prompt, user_message).await
+        }
         AiProviderType::Minimax => {
             stream_minimax(&app_handle, &request_id, config, &system_prompt, user_message).await
         }
@@ -83,6 +86,9 @@ pub async fn call_ai_response(
         }
         AiProviderType::OpenAi | AiProviderType::OpenAiCompatible => {
             call_openai(config, &system_prompt, user_message, "https://api.openai.com/v1").await
+        }
+        AiProviderType::OpenRouter => {
+            call_openai(config, &system_prompt, user_message, "https://openrouter.ai/api/v1").await
         }
         AiProviderType::Minimax => {
             call_openai(config, &system_prompt, user_message, "https://api.minimax.io/v1").await
@@ -216,6 +222,7 @@ pub async fn test_ai_provider(config: &AiProviderConfig) -> Result<String, Strin
     match config.provider {
         AiProviderType::Claude => test_claude(config).await,
         AiProviderType::OpenAi | AiProviderType::OpenAiCompatible => test_openai(config).await,
+        AiProviderType::OpenRouter => test_openrouter(config).await,
         AiProviderType::Minimax => test_minimax(config).await,
         AiProviderType::Zai => test_zai(config).await,
         AiProviderType::ClaudeCodeCli => test_claude_code_cli().await,
@@ -674,6 +681,99 @@ async fn test_lm_studio(config: &AiProviderConfig) -> Result<String, String> {
         let text = resp.text().await.unwrap_or_default();
         Err(format!("LM Studio API error ({status}): {text}"))
     }
+}
+
+// ── OpenRouter ─────────────────────────────────────────────
+// OpenAI-compatible API at https://openrouter.ai/api/v1
+
+async fn stream_openrouter(
+    app_handle: &AppHandle,
+    request_id: &str,
+    config: &AiProviderConfig,
+    system_prompt: &str,
+    user_message: &str,
+) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let url = "https://openrouter.ai/api/v1/chat/completions";
+    let body = build_openai_body(config, system_prompt, user_message, true);
+
+    let resp = client
+        .post(url)
+        .header("authorization", format!("Bearer {}", config.api_key))
+        .header("content-type", "application/json")
+        .header("x-openrouter-title", "sqail")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("OpenRouter API error ({status}): {text}"));
+    }
+
+    stream_sse_events(app_handle, request_id, resp, extract_openai_delta).await
+}
+
+async fn test_openrouter(config: &AiProviderConfig) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    // Use the /models endpoint to verify the API key without consuming tokens
+    let resp = client
+        .get("https://openrouter.ai/api/v1/models")
+        .header("authorization", format!("Bearer {}", config.api_key))
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    if resp.status().is_success() {
+        Ok(format!("Connected to OpenRouter (model: {})", config.model))
+    } else {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        Err(format!("OpenRouter API error ({status}): {text}"))
+    }
+}
+
+/// Fetch the list of available models from OpenRouter.
+pub async fn list_openrouter_models(api_key: &str) -> Result<Vec<serde_json::Value>, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://openrouter.ai/api/v1/models")
+        .header("authorization", format!("Bearer {}", api_key))
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("OpenRouter API error ({status}): {text}"));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse response: {e}"))?;
+
+    let models = json
+        .get("data")
+        .and_then(|d| d.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    // Return a slim representation: just id and name
+    let slim: Vec<serde_json::Value> = models
+        .into_iter()
+        .map(|m| {
+            json!({
+                "id": m.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                "name": m.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+            })
+        })
+        .collect();
+
+    Ok(slim)
 }
 
 // ── Shared SSE streaming helper ────────────────────────────

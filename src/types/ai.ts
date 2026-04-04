@@ -1,6 +1,7 @@
 export type AiProviderType =
   | "claude"
   | "openAi"
+  | "openRouter"
   | "openAiCompatible"
   | "minimax"
   | "zai"
@@ -42,6 +43,7 @@ export interface AiStreamError {
 export const AI_PROVIDER_LABELS: Record<AiProviderType, string> = {
   claude: "Claude",
   openAi: "OpenAI",
+  openRouter: "OpenRouter",
   openAiCompatible: "OpenAI Compatible",
   minimax: "Minimax",
   zai: "Z.ai",
@@ -71,6 +73,7 @@ export function providerHasBaseUrl(provider: AiProviderType): boolean {
 const DEFAULT_MODELS: Record<AiProviderType, string> = {
   claude: "claude-sonnet-4-20250514",
   openAi: "gpt-4o",
+  openRouter: "anthropic/claude-sonnet-4",
   openAiCompatible: "model-name",
   minimax: "MiniMax-Text-01",
   zai: "deepseek-chat",
@@ -102,4 +105,9 @@ export function getDefaultModel(provider: AiProviderType): string {
 
 export function getDefaultBaseUrl(provider: AiProviderType): string | undefined {
   return DEFAULT_BASE_URLS[provider];
+}
+
+export interface OpenRouterModel {
+  id: string;
+  name: string;
 }

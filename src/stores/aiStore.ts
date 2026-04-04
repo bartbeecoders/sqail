@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
-import type { AiProviderConfig, AiFlow, AiHistoryEntry } from "../types/ai";
+import type { AiProviderConfig, AiFlow, AiHistoryEntry, OpenRouterModel } from "../types/ai";
 
 /** Strip <think>...</think> blocks emitted by reasoning models. */
 function stripThinkingBlocks(text: string): string {
@@ -42,6 +42,7 @@ interface AiState {
   getDefaultProvider: () => AiProviderConfig | undefined;
 
   testProvider: (config: AiProviderConfig) => Promise<string>;
+  fetchOpenRouterModels: (apiKey: string) => Promise<OpenRouterModel[]>;
 
   togglePanel: () => void;
   setPanel: (open: boolean) => void;
@@ -114,6 +115,10 @@ export const useAiStore = create<AiState>((set, get) => ({
 
   testProvider: async (config) => {
     return invoke<string>("test_ai_provider", { config });
+  },
+
+  fetchOpenRouterModels: async (apiKey) => {
+    return invoke<OpenRouterModel[]>("list_openrouter_models", { apiKey });
   },
 
   togglePanel: () => set((s) => ({ panelOpen: !s.panelOpen })),

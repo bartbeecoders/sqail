@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub enum AiProviderType {
     Claude,
     OpenAi,
+    OpenRouter,
     OpenAiCompatible,
     Minimax,
     Zai,
@@ -17,6 +18,7 @@ impl std::fmt::Display for AiProviderType {
         match self {
             AiProviderType::Claude => write!(f, "claude"),
             AiProviderType::OpenAi => write!(f, "openAi"),
+            AiProviderType::OpenRouter => write!(f, "openRouter"),
             AiProviderType::OpenAiCompatible => write!(f, "openAiCompatible"),
             AiProviderType::Minimax => write!(f, "minimax"),
             AiProviderType::Zai => write!(f, "zai"),

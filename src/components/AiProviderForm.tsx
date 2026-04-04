@@ -1,10 +1,11 @@
-import { useState } from "react";
-import { X, Loader2, CheckCircle2, XCircle } from "lucide-react";
+import { useState, useEffect, useRef } from "react";
+import { X, Loader2, CheckCircle2, XCircle, ChevronDown, Search } from "lucide-react";
 import { cn } from "../lib/utils";
 import { useAiStore } from "../stores/aiStore";
 import {
   type AiProviderConfig,
   type AiProviderType,
+  type OpenRouterModel,
   defaultProvider,
   AI_PROVIDER_LABELS,
   providerNeedsApiKey,
@@ -20,9 +21,9 @@ interface AiProviderFormProps {
 
 type TestStatus = "idle" | "testing" | "success" | "error";
 
-// Two rows of provider buttons to avoid cramming 7 into one line
-const PROVIDER_ROW_1: AiProviderType[] = ["claude", "openAi", "minimax", "zai"];
-const PROVIDER_ROW_2: AiProviderType[] = ["claudeCodeCli", "lmStudio", "openAiCompatible"];
+// Two rows of provider buttons
+const PROVIDER_ROW_1: AiProviderType[] = ["claude", "openAi", "openRouter", "minimax"];
+const PROVIDER_ROW_2: AiProviderType[] = ["zai", "claudeCodeCli", "lmStudio", "openAiCompatible"];
 
 export default function AiProviderForm({ initial, onClose }: AiProviderFormProps) {
   const [form, setForm] = useState<AiProviderConfig>(initial ?? defaultProvider());
@@ -31,8 +32,46 @@ export default function AiProviderForm({ initial, onClose }: AiProviderFormProps
   const [testStatus, setTestStatus] = useState<TestStatus>("idle");
   const [testMessage, setTestMessage] = useState("");
 
-  const { createProvider, updateProvider, testProvider } = useAiStore();
+  const [orModels, setOrModels] = useState<OpenRouterModel[]>([]);
+  const [orLoading, setOrLoading] = useState(false);
+  const [orSearch, setOrSearch] = useState("");
+  const [orOpen, setOrOpen] = useState(false);
+  const orDropdownRef = useRef<HTMLDivElement>(null);
+
+  const { createProvider, updateProvider, testProvider, fetchOpenRouterModels } = useAiStore();
   const isEdit = !!initial;
+
+  // Fetch OpenRouter models when provider is openRouter and API key is set
+  useEffect(() => {
+    if (form.provider !== "openRouter" || !form.apiKey) {
+      setOrModels([]);
+      return;
+    }
+    let cancelled = false;
+    setOrLoading(true);
+    fetchOpenRouterModels(form.apiKey)
+      .then((models) => {
+        if (!cancelled) setOrModels(models);
+      })
+      .catch(() => {
+        if (!cancelled) setOrModels([]);
+      })
+      .finally(() => {
+        if (!cancelled) setOrLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [form.provider, form.apiKey, fetchOpenRouterModels]);
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (orDropdownRef.current && !orDropdownRef.current.contains(e.target as Node)) {
+        setOrOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
 
   const set = <K extends keyof AiProviderConfig>(key: K, value: AiProviderConfig[K]) =>
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -165,7 +204,72 @@ export default function AiProviderForm({ initial, onClose }: AiProviderFormProps
           )}
 
           {/* Model */}
-          {needsModel && (
+          {needsModel && form.provider === "openRouter" ? (
+            <Field label="Model">
+              <div className="relative" ref={orDropdownRef}>
+                <button
+                  type="button"
+                  onClick={() => setOrOpen(!orOpen)}
+                  className="input flex w-full items-center justify-between gap-2 text-left"
+                >
+                  <span className={cn("truncate", !form.model && "text-muted-foreground")}>
+                    {form.model || "Select a model..."}
+                  </span>
+                  {orLoading ? (
+                    <Loader2 size={14} className="shrink-0 animate-spin text-muted-foreground" />
+                  ) : (
+                    <ChevronDown size={14} className="shrink-0 text-muted-foreground" />
+                  )}
+                </button>
+                {orOpen && (
+                  <div className="absolute z-50 mt-1 max-h-60 w-full overflow-hidden rounded-md border border-border bg-background shadow-lg">
+                    <div className="flex items-center gap-1 border-b border-border px-2 py-1.5">
+                      <Search size={12} className="text-muted-foreground" />
+                      <input
+                        value={orSearch}
+                        onChange={(e) => setOrSearch(e.target.value)}
+                        placeholder="Search models..."
+                        className="flex-1 bg-transparent text-xs outline-none"
+                        autoFocus
+                      />
+                    </div>
+                    <div className="max-h-48 overflow-y-auto">
+                      {orModels.length === 0 && !orLoading && (
+                        <div className="px-2 py-3 text-center text-xs text-muted-foreground">
+                          {form.apiKey ? "No models found. Check your API key." : "Enter an API key to load models."}
+                        </div>
+                      )}
+                      {orModels
+                        .filter(
+                          (m) =>
+                            !orSearch ||
+                            m.id.toLowerCase().includes(orSearch.toLowerCase()) ||
+                            m.name.toLowerCase().includes(orSearch.toLowerCase()),
+                        )
+                        .map((m) => (
+                          <button
+                            key={m.id}
+                            type="button"
+                            onClick={() => {
+                              set("model", m.id);
+                              setOrOpen(false);
+                              setOrSearch("");
+                            }}
+                            className={cn(
+                              "flex w-full flex-col px-2 py-1.5 text-left text-xs hover:bg-accent",
+                              form.model === m.id && "bg-accent",
+                            )}
+                          >
+                            <span className="font-medium">{m.name}</span>
+                            <span className="text-[10px] text-muted-foreground">{m.id}</span>
+                          </button>
+                        ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </Field>
+          ) : needsModel ? (
             <Field label="Model">
               <input
                 value={form.model}
@@ -174,7 +278,7 @@ export default function AiProviderForm({ initial, onClose }: AiProviderFormProps
                 className="input"
               />
             </Field>
-          )}
+          ) : null}
 
           {/* Base URL */}
           {hasBaseUrl && (

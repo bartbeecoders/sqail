@@ -78,6 +78,7 @@ pub fn run() {
             commands::delete_ai_provider,
             commands::set_default_ai_provider,
             commands::test_ai_provider,
+            commands::list_openrouter_models,
             commands::ai_generate_sql,
             commands::ai_explain_query,
             commands::ai_optimize_query,

@@ -467,6 +467,11 @@ pub async fn test_ai_provider(config: AiProviderConfig) -> Result<String, String
     client::test_ai_provider(&config).await
 }
 
+#[tauri::command]
+pub async fn list_openrouter_models(api_key: String) -> Result<Vec<serde_json::Value>, String> {
+    client::list_openrouter_models(&api_key).await
+}
+
 // ── AI flow commands ───────────────────────────────────────
 
 async fn get_default_provider(state: &State<'_, AppState>) -> Result<AiProviderConfig, String> {

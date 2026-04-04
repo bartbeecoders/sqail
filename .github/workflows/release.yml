@@ -271,6 +271,16 @@ jobs:
       - name: List artifacts
         run: ls -lhR artifacts/
 
+      - name: Prepare target directory on VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            sudo mkdir -p /opt/sqail-releases
+            sudo chown $USER:$USER /opt/sqail-releases
+
       - name: Upload to VPS
         uses: appleboy/scp-action@v0.1.7
         with:

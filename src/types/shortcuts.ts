@@ -22,7 +22,8 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
   { id: "new-connection", label: "New Connection", defaultKey: "Ctrl+Shift+N", category: "connections" },
 
   // AI
-  { id: "toggle-ai-panel", label: "Toggle AI Panel", defaultKey: "Ctrl+Shift+A", category: "ai" },
+  { id: "open-ai-palette", label: "AI Command Palette", defaultKey: "Ctrl+K", category: "ai" },
+  { id: "toggle-ai-panel", label: "Toggle AI Settings", defaultKey: "Ctrl+Shift+A", category: "ai" },
 
   // App
   { id: "open-settings", label: "Open Settings", defaultKey: "Ctrl+,", category: "app" },

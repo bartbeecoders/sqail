@@ -2,6 +2,23 @@ import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import type { AiProviderConfig, AiFlow, AiHistoryEntry } from "../types/ai";
 
+/** Strip <think>...</think> blocks emitted by reasoning models. */
+function stripThinkingBlocks(text: string): string {
+  // Remove complete <think>...</think> blocks (greedy across newlines)
+  let result = text.replace(/<think>[\s\S]*?<\/think>/g, "");
+  // If there's an unclosed <think> tag (still streaming), hide everything from it onward
+  const openIdx = result.indexOf("<think>");
+  if (openIdx !== -1) {
+    result = result.slice(0, openIdx);
+  }
+  return result.trimStart();
+}
+
+interface PaletteOptions {
+  flow?: AiFlow;
+  sql?: string;
+}
+
 interface AiState {
   providers: AiProviderConfig[];
   history: AiHistoryEntry[];
@@ -11,6 +28,11 @@ interface AiState {
   currentResponse: string;
   currentFlow: AiFlow | null;
   error: string | null;
+
+  // Command palette state
+  paletteOpen: boolean;
+  paletteFlow: AiFlow | null;
+  paletteSql: string;
 
   loadProviders: () => Promise<void>;
   createProvider: (config: AiProviderConfig) => Promise<void>;
@@ -24,10 +46,15 @@ interface AiState {
   togglePanel: () => void;
   setPanel: (open: boolean) => void;
 
+  openPalette: (options?: PaletteOptions) => void;
+  closePalette: () => void;
+
   generateSql: (prompt: string, schemaContext: string, driver: string) => Promise<void>;
   explainQuery: (sql: string, schemaContext: string, driver: string) => Promise<void>;
   optimizeQuery: (sql: string, schemaContext: string, driver: string) => Promise<void>;
   generateDocs: (schemaContext: string, driver: string) => Promise<void>;
+  formatSql: (sql: string, schemaContext: string, driver: string) => Promise<void>;
+  commentSql: (sql: string, schemaContext: string, driver: string) => Promise<void>;
 
   appendChunk: (requestId: string, chunk: string) => void;
   finishStream: (requestId: string, fullText: string) => void;
@@ -46,6 +73,10 @@ export const useAiStore = create<AiState>((set, get) => ({
   currentResponse: "",
   currentFlow: null,
   error: null,
+
+  paletteOpen: false,
+  paletteFlow: null,
+  paletteSql: "",
 
   loadProviders: async () => {
     try {
@@ -88,6 +119,17 @@ export const useAiStore = create<AiState>((set, get) => ({
   togglePanel: () => set((s) => ({ panelOpen: !s.panelOpen })),
   setPanel: (open) => set({ panelOpen: open }),
 
+  openPalette: (options) =>
+    set({
+      paletteOpen: true,
+      paletteFlow: options?.flow ?? null,
+      paletteSql: options?.sql ?? "",
+      currentResponse: "",
+      error: null,
+    }),
+  closePalette: () =>
+    set({ paletteOpen: false, paletteFlow: null, paletteSql: "" }),
+
   generateSql: async (prompt, schemaContext, driver) => {
     set({ streaming: true, currentResponse: "", error: null, currentFlow: "generate_sql" });
     try {
@@ -128,17 +170,38 @@ export const useAiStore = create<AiState>((set, get) => ({
     }
   },
 
+  formatSql: async (sql, schemaContext, driver) => {
+    set({ streaming: true, currentResponse: "", error: null, currentFlow: "format_sql" });
+    try {
+      const requestId = await invoke<string>("ai_format_sql", { sql, schemaContext, driver });
+      set({ currentRequestId: requestId });
+    } catch (e) {
+      set({ streaming: false, error: String(e) });
+    }
+  },
+
+  commentSql: async (sql, schemaContext, driver) => {
+    set({ streaming: true, currentResponse: "", error: null, currentFlow: "comment_sql" });
+    try {
+      const requestId = await invoke<string>("ai_comment_sql", { sql, schemaContext, driver });
+      set({ currentRequestId: requestId });
+    } catch (e) {
+      set({ streaming: false, error: String(e) });
+    }
+  },
+
   appendChunk: (requestId, chunk) => {
     const state = get();
     if (state.currentRequestId === requestId) {
-      set({ currentResponse: state.currentResponse + chunk });
+      const raw = state.currentResponse + chunk;
+      set({ currentResponse: stripThinkingBlocks(raw) });
     }
   },
 
   finishStream: (requestId, fullText) => {
     const state = get();
     if (state.currentRequestId === requestId) {
-      set({ streaming: false, currentResponse: fullText, currentRequestId: null });
+      set({ streaming: false, currentResponse: stripThinkingBlocks(fullText), currentRequestId: null });
     }
   },
 

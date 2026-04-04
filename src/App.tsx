@@ -8,6 +8,7 @@ import EditorArea from "./components/EditorArea";
 import ResultsPane from "./components/ResultsPane";
 import ResizablePanel from "./components/ResizablePanel";
 import AiPanel from "./components/AiPanel";
+import AiCommandPalette from "./components/AiCommandPalette";
 import SettingsModal from "./components/SettingsModal";
 import { useEditorStore } from "./stores/editorStore";
 import { useConnectionStore } from "./stores/connectionStore";
@@ -104,6 +105,7 @@ export default function App() {
       "open-query": () => { openQuery().catch(console.error); },
       "save-query-as": () => { saveQueryAs().catch(console.error); },
       "new-connection": () => setConnectionFormOpen(true),
+      "open-ai-palette": () => useAiStore.getState().openPalette(),
       "toggle-ai-panel": () => useAiStore.getState().togglePanel(),
       "open-settings": () => setSettingsOpen(true),
     }),
@@ -136,6 +138,7 @@ export default function App() {
         />
       </div>
       {aiPanelOpen && <AiPanel />}
+      <AiCommandPalette />
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
     </div>
   );

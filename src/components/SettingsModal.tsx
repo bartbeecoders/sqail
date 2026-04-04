@@ -580,7 +580,7 @@ interface Release {
 
 const RELEASES: Release[] = [
   {
-    version: "0.2.3",
+    version: "0.3.0",
     sections: [
       {
         title: "SQL Editor",
@@ -779,6 +779,15 @@ const RELEASES: Release[] = [
 function AboutTab() {
   return (
     <div className="space-y-6">
+      {/* Hero image */}
+      <div className="overflow-hidden rounded-lg">
+        <img
+          src={new URL("../assets/about-hero.jpg", import.meta.url).href}
+          alt="SQaiL – database tables and queries flowing in a spiral"
+          className="w-full h-auto object-cover"
+        />
+      </div>
+
       {/* App header */}
       <div className="flex items-baseline gap-3">
         <h3 className="text-lg font-bold text-foreground">SQaiL</h3>

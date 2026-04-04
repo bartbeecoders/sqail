@@ -8,7 +8,6 @@ import { useConnectionStore } from "../stores/connectionStore";
 import { useSchemaStore } from "../stores/schemaStore";
 import { useAiStore } from "../stores/aiStore";
 import { useSettingsStore } from "../stores/settingsStore";
-import { buildSchemaContext } from "../lib/schemaContext";
 import { sqlaiDark, sqlaiLight } from "../lib/monacoThemes";
 import { createSqlCompletionProvider } from "../lib/sqlCompletions";
 import { buildSelectStatement } from "../lib/sqlGenerate";
@@ -137,26 +136,27 @@ export default function SqlEditor({ onExecute, onFormat, overrideTabId }: SqlEdi
         },
       });
 
-      // AI context menu actions
+      // AI context menu actions — open command palette with pre-set flow
+      const getEditorSql = (ed: import("monaco-editor").editor.ICodeEditor) => {
+        const selection = ed.getSelection();
+        const model = ed.getModel();
+        if (!model) return "";
+        return (
+          selection && !selection.isEmpty()
+            ? model.getValueInRange(selection)
+            : model.getValue()
+        ).trim();
+      };
+
       editor.addAction({
         id: "ai-explain-query",
         label: "AI: Explain Query",
         contextMenuGroupId: "ai",
         contextMenuOrder: 1,
         run: (ed) => {
-          const selection = ed.getSelection();
-          const model = ed.getModel();
-          if (!model) return;
-          const sql =
-            selection && !selection.isEmpty() ? model.getValueInRange(selection) : model.getValue();
-          if (!sql.trim()) return;
-          const connStore = useConnectionStore.getState();
-          const conn = connStore.connections.find((c) => c.id === connStore.activeConnectionId);
-          const driver = conn?.driver ?? "";
-          const schemaContext = buildSchemaContext();
-          const ai = useAiStore.getState();
-          ai.setPanel(true);
-          ai.explainQuery(sql.trim(), schemaContext, driver);
+          const sql = getEditorSql(ed);
+          if (!sql) return;
+          useAiStore.getState().openPalette({ flow: "explain", sql });
         },
       });
 
@@ -166,19 +166,33 @@ export default function SqlEditor({ onExecute, onFormat, overrideTabId }: SqlEdi
         contextMenuGroupId: "ai",
         contextMenuOrder: 2,
         run: (ed) => {
-          const selection = ed.getSelection();
-          const model = ed.getModel();
-          if (!model) return;
-          const sql =
-            selection && !selection.isEmpty() ? model.getValueInRange(selection) : model.getValue();
-          if (!sql.trim()) return;
-          const connStore = useConnectionStore.getState();
-          const conn = connStore.connections.find((c) => c.id === connStore.activeConnectionId);
-          const driver = conn?.driver ?? "";
-          const schemaContext = buildSchemaContext();
-          const ai = useAiStore.getState();
-          ai.setPanel(true);
-          ai.optimizeQuery(sql.trim(), schemaContext, driver);
+          const sql = getEditorSql(ed);
+          if (!sql) return;
+          useAiStore.getState().openPalette({ flow: "optimize", sql });
+        },
+      });
+
+      editor.addAction({
+        id: "ai-format-query",
+        label: "AI: Format Query",
+        contextMenuGroupId: "ai",
+        contextMenuOrder: 3,
+        run: (ed) => {
+          const sql = getEditorSql(ed);
+          if (!sql) return;
+          useAiStore.getState().openPalette({ flow: "format_sql", sql });
+        },
+      });
+
+      editor.addAction({
+        id: "ai-comment-query",
+        label: "AI: Add Comments",
+        contextMenuGroupId: "ai",
+        contextMenuOrder: 4,
+        run: (ed) => {
+          const sql = getEditorSql(ed);
+          if (!sql) return;
+          useAiStore.getState().openPalette({ flow: "comment_sql", sql });
         },
       });
 

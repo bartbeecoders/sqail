@@ -590,6 +590,62 @@ pub async fn ai_generate_docs(
     Ok(request_id)
 }
 
+#[tauri::command]
+pub async fn ai_format_sql(
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+    sql: String,
+    schema_context: String,
+    driver: String,
+) -> Result<String, String> {
+    let config = get_default_provider(&state).await?;
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let rid = request_id.clone();
+
+    tokio::spawn(async move {
+        client::stream_ai_response(
+            app_handle,
+            rid,
+            &config,
+            &sql,
+            "format_sql",
+            Some(&driver),
+            Some(&schema_context),
+        )
+        .await;
+    });
+
+    Ok(request_id)
+}
+
+#[tauri::command]
+pub async fn ai_comment_sql(
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+    sql: String,
+    schema_context: String,
+    driver: String,
+) -> Result<String, String> {
+    let config = get_default_provider(&state).await?;
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let rid = request_id.clone();
+
+    tokio::spawn(async move {
+        client::stream_ai_response(
+            app_handle,
+            rid,
+            &config,
+            &sql,
+            "comment_sql",
+            Some(&driver),
+            Some(&schema_context),
+        )
+        .await;
+    });
+
+    Ok(request_id)
+}
+
 // ── AI history commands ────────────────────────────────────
 
 #[tauri::command]

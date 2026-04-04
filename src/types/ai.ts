@@ -17,7 +17,7 @@ export interface AiProviderConfig {
   isDefault?: boolean;
 }
 
-export type AiFlow = "generate_sql" | "explain" | "optimize" | "document";
+export type AiFlow = "generate_sql" | "explain" | "optimize" | "document" | "format_sql" | "comment_sql";
 
 export interface AiHistoryEntry {
   id: string;
@@ -54,6 +54,8 @@ export const AI_FLOW_LABELS: Record<AiFlow, string> = {
   explain: "Explain Query",
   optimize: "Optimize Query",
   document: "Generate Docs",
+  format_sql: "Format SQL",
+  comment_sql: "Add Comments",
 };
 
 /** Whether a provider type requires an API key */

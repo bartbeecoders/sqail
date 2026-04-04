@@ -47,8 +47,7 @@ function ToolbarButton({
 }
 
 export default function Toolbar({ onRun, onFormat, onClear, hasConnection, loading, onOpenSettings }: ToolbarProps) {
-  const aiPanelOpen = useAiStore((s) => s.panelOpen);
-  const toggleAiPanel = useAiStore((s) => s.togglePanel);
+  const openPalette = useAiStore((s) => s.openPalette);
 
   return (
     <div className="flex h-10 items-center gap-1 border-b border-border bg-muted/30 px-2">
@@ -73,14 +72,9 @@ export default function Toolbar({ onRun, onFormat, onClear, hasConnection, loadi
       />
       <div className="mx-1 h-4 w-px bg-border" />
       <button
-        onClick={toggleAiPanel}
-        className={cn(
-          "flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors",
-          aiPanelOpen
-            ? "bg-primary text-primary-foreground"
-            : "text-foreground hover:bg-accent",
-        )}
-        title="Toggle AI Assistant (Ctrl+Shift+A)"
+        onClick={() => openPalette()}
+        className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent"
+        title="AI Command Palette (Ctrl+K)"
       >
         <Sparkles size={14} />
         <span>AI</span>

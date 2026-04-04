@@ -35,6 +35,16 @@ pub fn build_system_prompt(flow: &str, driver: Option<&str>, schema_context: Opt
                          documentation describing the tables, their columns, relationships, and purpose. \
                          Infer likely purpose from naming conventions.".to_string());
         }
+        "format_sql" => {
+            parts.push("The user will provide a SQL query. Reformat it with proper indentation, \
+                         line breaks, and consistent casing for keywords. Return ONLY the formatted SQL, \
+                         no explanation or markdown code fences.".to_string());
+        }
+        "comment_sql" => {
+            parts.push("The user will provide a SQL query. Add clear, concise inline SQL comments \
+                         (using -- syntax) explaining what each significant section does. \
+                         Return ONLY the commented SQL, no additional explanation or markdown code fences.".to_string());
+        }
         "generate_metadata" => {
             parts.push("The user will provide the structure of a single database object (table, view, function, or procedure). \
                          Generate documentation metadata as a JSON object with these exact fields:\n\

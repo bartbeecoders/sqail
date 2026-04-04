@@ -17,7 +17,23 @@
       "Bash(grep -E '\\\\.\\(ts|tsx\\)$')",
       "Bash(xargs ls:*)",
       "Bash(grep -r \"pgsql\\\\|mssql\\\\|mysql\\\\|redshift\\\\|plsql\" /run/media/bart/Development/dev/codeberg/sqail/node_modules/monaco-editor/esm/vs/basic-languages/ --include=*.js -l)",
-      "Bash(cargo generate-lockfile:*)"
+      "Bash(cargo generate-lockfile:*)",
+      "Bash(node:*)",
+      "mcp__xai-image__generate_image",
+      "Read(//home/**)",
+      "Read(//home/bart/**)",
+      "Read(//tmp/**)",
+      "Bash(mkdir -p /run/media/bart/Development/dev/codeberg/sqail/src/assets)",
+      "Bash(curl -sL \"https://imgen.x.ai/xai-imgen/xai-tmp-imgen-a04bdc16-5351-4138-89ef-28c1e83b7543.jpeg\" -o /run/media/bart/Development/dev/codeberg/sqail/src/assets/about-hero.jpg)",
+      "Bash(pnpm install:*)",
+      "Bash(curl -sL \"https://imgen.x.ai/xai-imgen/xai-tmp-imgen-a04bdc16-5351-4138-89ef-28c1e83b7543.jpeg\" -o hero.jpg)",
+      "Bash(curl -sL \"https://imgen.x.ai/xai-imgen/xai-tmp-imgen-f7050b6e-37c5-4baa-8070-e12a7f717a3b.jpeg\" -o ai-feature.jpg)",
+      "Bash(pnpm build:*)",
+      "Bash(pnpm dev:*)",
+      "Bash(curl -s http://localhost:5173)",
+      "Bash(kill %1)",
+      "Bash(pkill -f \"vite.*sqail.portal\")",
+      "Bash(chmod +x:*)"
     ]
   }
 }

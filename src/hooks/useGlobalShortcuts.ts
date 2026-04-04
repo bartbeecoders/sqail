@@ -28,6 +28,7 @@ export function useGlobalShortcuts(handlers: ShortcutHandlers) {
             "open-query",
             "open-settings",
             "run-query",
+            "open-ai-palette",
           ].includes(actionId);
 
           if (isInput && !allowInInput) continue;

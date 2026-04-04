@@ -309,12 +309,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Update portal constants with build number
+      - name: Update portal constants and copy releases.json
         run: |
           VERSION="${{ needs.prepare.outputs.app_version }}"
           BUILD="${{ needs.prepare.outputs.build_number }}"
           sed -i "s/export const VERSION = \".*\"/export const VERSION = \"$VERSION\"/" sqail.portal/src/lib/constants.ts
           sed -i "s/export const BUILD_NUMBER = \".*\"/export const BUILD_NUMBER = \"$BUILD\"/" sqail.portal/src/lib/constants.ts
+          cp releases.json sqail.portal/releases.json
           echo "Updated constants.ts:"
           head -2 sqail.portal/src/lib/constants.ts
 

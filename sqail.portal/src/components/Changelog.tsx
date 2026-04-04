@@ -1,4 +1,4 @@
-import RELEASES from "../../../releases.json";
+import RELEASES from "../../releases.json";
 import { VERSION } from "../lib/constants";
 
 export default function Changelog() {

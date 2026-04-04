@@ -53,6 +53,7 @@ check_deps() {
 
 build_image() {
   echo "Building sqail-portal image v$APP_VERSION..."
+  cp "$ROOT_DIR/releases.json" "$ROOT_DIR/sqail.portal/releases.json"
   podman build \
     -t "$IMAGE:latest" \
     -t "$IMAGE:$APP_VERSION" \

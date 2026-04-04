@@ -87,18 +87,15 @@ jobs:
       - name: Build frontend
         run: pnpm build
 
-      - name: Write CI tauri config override
-        run: echo '{"build":{"beforeBuildCommand":""}}' > src-tauri/tauri.ci.json
-
       - name: Build deb
-        run: pnpm tauri build --bundles deb --config tauri.ci.json
+        run: pnpm tauri build --bundles deb --config src-tauri/tauri.ci.json
 
       - name: Build AppImage
-        run: pnpm tauri build --bundles appimage --config tauri.ci.json
+        run: pnpm tauri build --bundles appimage --config src-tauri/tauri.ci.json
         continue-on-error: true
 
       - name: Build rpm
-        run: pnpm tauri build --bundles rpm --config tauri.ci.json
+        run: pnpm tauri build --bundles rpm --config src-tauri/tauri.ci.json
         continue-on-error: true
 
       - name: Collect artifacts
@@ -168,12 +165,8 @@ jobs:
       - name: Build frontend
         run: pnpm build
 
-      - name: Write CI tauri config override
-        shell: bash
-        run: echo '{"build":{"beforeBuildCommand":""}}' > src-tauri/tauri.ci.json
-
       - name: Build NSIS + MSI
-        run: pnpm tauri build --config tauri.ci.json
+        run: pnpm tauri build --config src-tauri/tauri.ci.json
 
       - name: Collect artifacts
         shell: bash
@@ -238,11 +231,8 @@ jobs:
       - name: Build frontend
         run: pnpm build
 
-      - name: Write CI tauri config override
-        run: echo '{"build":{"beforeBuildCommand":""}}' > src-tauri/tauri.ci.json
-
       - name: Build DMG
-        run: pnpm tauri build --config tauri.ci.json
+        run: pnpm tauri build --config src-tauri/tauri.ci.json
 
       - name: Collect artifacts
         run: |

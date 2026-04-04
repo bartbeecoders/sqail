@@ -142,30 +142,12 @@ impl ConnectionConfig {
                 config.authentication(tiberius::AuthMethod::aad_token(token));
             }
             MssqlAuthMethod::Windows => {
-                #[cfg(any(
-                    all(windows, feature = "winauth"),
-                    all(unix, feature = "integrated-auth-gssapi")
-                ))]
                 config.authentication(tiberius::AuthMethod::Integrated);
-                #[cfg(not(any(
-                    all(windows, feature = "winauth"),
-                    all(unix, feature = "integrated-auth-gssapi")
-                )))]
-                return Err("Windows/Integrated authentication is not supported in this build. Enable the 'integrated-auth-gssapi' feature for tiberius.".to_string());
             }
             MssqlAuthMethod::SqlServer => {
                 // Backward compat: also check legacy integrated_security flag
                 if self.integrated_security {
-                    #[cfg(any(
-                        all(windows, feature = "winauth"),
-                        all(unix, feature = "integrated-auth-gssapi")
-                    ))]
                     config.authentication(tiberius::AuthMethod::Integrated);
-                    #[cfg(not(any(
-                        all(windows, feature = "winauth"),
-                        all(unix, feature = "integrated-auth-gssapi")
-                    )))]
-                    return Err("Integrated authentication is not supported in this build. Enable the 'integrated-auth-gssapi' feature for tiberius.".to_string());
                 } else {
                     config.authentication(tiberius::AuthMethod::sql_server(&self.user, &self.password));
                 }

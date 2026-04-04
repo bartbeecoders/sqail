@@ -52,7 +52,8 @@ jobs:
             libappindicator3-dev \
             librsvg2-dev \
             patchelf \
-            libssl-dev
+            libssl-dev \
+            libkrb5-dev
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable

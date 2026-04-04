@@ -42,7 +42,7 @@ interface AiState {
   getDefaultProvider: () => AiProviderConfig | undefined;
 
   testProvider: (config: AiProviderConfig) => Promise<string>;
-  fetchOpenRouterModels: (apiKey: string) => Promise<OpenRouterModel[]>;
+  fetchOpenRouterModels: (apiKey: string, acceptInvalidCerts: boolean) => Promise<OpenRouterModel[]>;
 
   togglePanel: () => void;
   setPanel: (open: boolean) => void;
@@ -117,8 +117,8 @@ export const useAiStore = create<AiState>((set, get) => ({
     return invoke<string>("test_ai_provider", { config });
   },
 
-  fetchOpenRouterModels: async (apiKey) => {
-    return invoke<OpenRouterModel[]>("list_openrouter_models", { apiKey });
+  fetchOpenRouterModels: async (apiKey, acceptInvalidCerts) => {
+    return invoke<OpenRouterModel[]>("list_openrouter_models", { apiKey, acceptInvalidCerts });
   },
 
   togglePanel: () => set((s) => ({ panelOpen: !s.panelOpen })),

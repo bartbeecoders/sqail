@@ -1,5 +1,24 @@
 [
   {
+    "version": "0.3.1",
+    "sections": [
+      {
+        "title": "AI Providers",
+        "items": [
+          "OpenRouter model browser: fetches the full list of available models from openrouter.ai and shows a searchable dropdown in the AI provider settings",
+          "Disable SSL certificate verification per AI provider — resolves CRYPT_E_NO_REVOCATION_CHECK errors on corporate networks with TLS inspection",
+          "Warning shown in the provider form when SSL verification is disabled"
+        ]
+      },
+      {
+        "title": "Database Connections",
+        "items": [
+          "Windows / Integrated authentication for SQL Server connections via the integrated-auth-gssapi feature flag"
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.3.0",
     "sections": [
       {

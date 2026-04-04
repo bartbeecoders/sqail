@@ -40,6 +40,8 @@ pub struct AiProviderConfig {
     pub base_url: Option<String>,
     #[serde(default)]
     pub is_default: bool,
+    #[serde(default)]
+    pub accept_invalid_certs: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

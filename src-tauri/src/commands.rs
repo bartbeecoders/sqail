@@ -468,8 +468,8 @@ pub async fn test_ai_provider(config: AiProviderConfig) -> Result<String, String
 }
 
 #[tauri::command]
-pub async fn list_openrouter_models(api_key: String) -> Result<Vec<serde_json::Value>, String> {
-    client::list_openrouter_models(&api_key).await
+pub async fn list_openrouter_models(api_key: String, accept_invalid_certs: bool) -> Result<Vec<serde_json::Value>, String> {
+    client::list_openrouter_models(&api_key, accept_invalid_certs).await
 }
 
 // ── AI flow commands ───────────────────────────────────────

@@ -50,3 +50,9 @@ Provider management (add/edit/delete providers, set default) and history of past
 
 The AI assistant generates the thinking process as well as the final answer. We need to filter out the thinking process and only show the final answer.
 
+Add openrouter.ai as LLM provider. Use https://openrouter.ai/docs/api/reference/overview as documentation on how to do that.
+openrouter has an endpoint (curl https://openrouter.ai/api/v1/models \
+     -H "Authorization: Bearer <token>") to list all the available models.
+Show that list in the AI settings sidebar, so the user can select one of them.
+
+On a corporate network, the user might encounter a CRYPT_E_NO_REVOCATION_CHECK error when trying to connect to the internet. Add a setting to disable SSL certificate verification for the AI provider.

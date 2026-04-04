@@ -1,5 +1,5 @@
-export const VERSION = "0.3.0";
-export const BUILD_NUMBER = "20260404-1";
+export const VERSION = "0.3.1";
+export const BUILD_NUMBER = "20260404-2";
 export const GITHUB_URL = "https://github.com/bartbeecoders/sqail";
 
 export type Platform = "windows" | "macos" | "linux";

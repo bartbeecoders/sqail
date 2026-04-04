@@ -49,7 +49,7 @@ export default function AiProviderForm({ initial, onClose }: AiProviderFormProps
     }
     let cancelled = false;
     setOrLoading(true);
-    fetchOpenRouterModels(form.apiKey)
+    fetchOpenRouterModels(form.apiKey, form.acceptInvalidCerts ?? false)
       .then((models) => {
         if (!cancelled) setOrModels(models);
       })
@@ -60,7 +60,7 @@ export default function AiProviderForm({ initial, onClose }: AiProviderFormProps
         if (!cancelled) setOrLoading(false);
       });
     return () => { cancelled = true; };
-  }, [form.provider, form.apiKey, fetchOpenRouterModels]);
+  }, [form.provider, form.apiKey, form.acceptInvalidCerts, fetchOpenRouterModels]);
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -299,6 +299,24 @@ export default function AiProviderForm({ initial, onClose }: AiProviderFormProps
               No API key needed — it uses your existing Claude Code authentication.
             </div>
           )}
+
+          {/* Accept invalid certs */}
+          <Field label="">
+            <label className="flex items-center gap-2 text-xs">
+              <input
+                type="checkbox"
+                checked={form.acceptInvalidCerts ?? false}
+                onChange={(e) => set("acceptInvalidCerts", e.target.checked)}
+                className="rounded border-border"
+              />
+              Disable SSL certificate verification
+            </label>
+            {(form.acceptInvalidCerts) && (
+              <p className="mt-1 text-[11px] text-amber-500">
+                Warning: disabling certificate verification makes the connection insecure. Only use this on trusted corporate networks.
+              </p>
+            )}
+          </Field>
 
           {/* Default checkbox */}
           <Field label="">

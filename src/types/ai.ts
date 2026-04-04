@@ -16,6 +16,7 @@ export interface AiProviderConfig {
   model: string;
   baseUrl?: string;
   isDefault?: boolean;
+  acceptInvalidCerts?: boolean;
 }
 
 export type AiFlow = "generate_sql" | "explain" | "optimize" | "document" | "format_sql" | "comment_sql";
@@ -96,6 +97,7 @@ export function defaultProvider(provider: AiProviderType = "claude"): AiProvider
     model: DEFAULT_MODELS[provider],
     baseUrl: DEFAULT_BASE_URLS[provider],
     isDefault: false,
+    acceptInvalidCerts: false,
   };
 }
 

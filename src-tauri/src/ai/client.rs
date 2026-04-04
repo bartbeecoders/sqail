@@ -7,6 +7,13 @@ use tokio::process::Command;
 use crate::ai::prompt::build_system_prompt;
 use crate::ai::provider::{AiProviderConfig, AiProviderType};
 
+fn build_http_client(accept_invalid_certs: bool) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .danger_accept_invalid_certs(accept_invalid_certs)
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))
+}
+
 #[derive(serde::Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct StreamChunkPayload {
@@ -110,7 +117,7 @@ async fn call_claude(
     system_prompt: &str,
     user_message: &str,
 ) -> Result<String, String> {
-    let client = reqwest::Client::new();
+    let client = build_http_client(config.accept_invalid_certs)?;
     let url = config
         .base_url
         .as_deref()
@@ -158,7 +165,7 @@ async fn call_openai(
     user_message: &str,
     default_base: &str,
 ) -> Result<String, String> {
-    let client = reqwest::Client::new();
+    let client = build_http_client(config.accept_invalid_certs)?;
     let url = resolve_openai_url(config.base_url.as_deref(), default_base);
     let body = build_openai_body(config, system_prompt, user_message, false);
 
@@ -239,7 +246,7 @@ async fn stream_claude(
     system_prompt: &str,
     user_message: &str,
 ) -> Result<(), String> {
-    let client = reqwest::Client::new();
+    let client = build_http_client(config.accept_invalid_certs)?;
     let url = config
         .base_url
         .as_deref()
@@ -275,7 +282,7 @@ async fn stream_claude(
 }
 
 async fn test_claude(config: &AiProviderConfig) -> Result<String, String> {
-    let client = reqwest::Client::new();
+    let client = build_http_client(config.accept_invalid_certs)?;
     let url = config
         .base_url
         .as_deref()
@@ -340,7 +347,7 @@ async fn stream_openai(
     system_prompt: &str,
     user_message: &str,
 ) -> Result<(), String> {
-    let client = reqwest::Client::new();
+    let client = build_http_client(config.accept_invalid_certs)?;
     let url = resolve_openai_url(config.base_url.as_deref(), "https://api.openai.com/v1");
     let body = build_openai_body(config, system_prompt, user_message, true);
 
@@ -363,7 +370,7 @@ async fn stream_openai(
 }
 
 async fn test_openai(config: &AiProviderConfig) -> Result<String, String> {
-    let client = reqwest::Client::new();
+    let client = build_http_client(config.accept_invalid_certs)?;
     let url = resolve_openai_url(config.base_url.as_deref(), "https://api.openai.com/v1");
     let body = json!({
         "model": config.model,
@@ -399,7 +406,7 @@ async fn stream_minimax(
     system_prompt: &str,
     user_message: &str,
 ) -> Result<(), String> {
-    let client = reqwest::Client::new();
+    let client = build_http_client(config.accept_invalid_certs)?;
     let url = resolve_openai_url(config.base_url.as_deref(), "https://api.minimax.io/v1");
     let body = build_openai_body(config, system_prompt, user_message, true);
 
@@ -422,7 +429,7 @@ async fn stream_minimax(
 }
 
 async fn test_minimax(config: &AiProviderConfig) -> Result<String, String> {
-    let client = reqwest::Client::new();
+    let client = build_http_client(config.accept_invalid_certs)?;
     let url = resolve_openai_url(config.base_url.as_deref(), "https://api.minimax.io/v1");
     let body = json!({
         "model": config.model,
@@ -458,7 +465,7 @@ async fn stream_zai(
     system_prompt: &str,
     user_message: &str,
 ) -> Result<(), String> {
-    let client = reqwest::Client::new();
+    let client = build_http_client(config.accept_invalid_certs)?;
     let url = resolve_openai_url(config.base_url.as_deref(), "https://api.z.ai/api/paas/v4");
     let body = build_openai_body(config, system_prompt, user_message, true);
 
@@ -481,7 +488,7 @@ async fn stream_zai(
 }
 
 async fn test_zai(config: &AiProviderConfig) -> Result<String, String> {
-    let client = reqwest::Client::new();
+    let client = build_http_client(config.accept_invalid_certs)?;
     let url = resolve_openai_url(config.base_url.as_deref(), "https://api.z.ai/api/paas/v4");
     let body = json!({
         "model": config.model,
@@ -618,7 +625,7 @@ async fn stream_lm_studio(
     system_prompt: &str,
     user_message: &str,
 ) -> Result<(), String> {
-    let client = reqwest::Client::new();
+    let client = build_http_client(config.accept_invalid_certs)?;
     let url = resolve_openai_url(config.base_url.as_deref(), "https://llm.hideterms.com/v1");
     let body = build_openai_body(config, system_prompt, user_message, true);
 
@@ -647,7 +654,7 @@ async fn stream_lm_studio(
 }
 
 async fn test_lm_studio(config: &AiProviderConfig) -> Result<String, String> {
-    let client = reqwest::Client::new();
+    let client = build_http_client(config.accept_invalid_certs)?;
     // Hit the /models endpoint to verify connectivity
     let base = config
         .base_url
@@ -693,7 +700,7 @@ async fn stream_openrouter(
     system_prompt: &str,
     user_message: &str,
 ) -> Result<(), String> {
-    let client = reqwest::Client::new();
+    let client = build_http_client(config.accept_invalid_certs)?;
     let url = "https://openrouter.ai/api/v1/chat/completions";
     let body = build_openai_body(config, system_prompt, user_message, true);
 
@@ -717,7 +724,7 @@ async fn stream_openrouter(
 }
 
 async fn test_openrouter(config: &AiProviderConfig) -> Result<String, String> {
-    let client = reqwest::Client::new();
+    let client = build_http_client(config.accept_invalid_certs)?;
     // Use the /models endpoint to verify the API key without consuming tokens
     let resp = client
         .get("https://openrouter.ai/api/v1/models")
@@ -736,8 +743,8 @@ async fn test_openrouter(config: &AiProviderConfig) -> Result<String, String> {
 }
 
 /// Fetch the list of available models from OpenRouter.
-pub async fn list_openrouter_models(api_key: &str) -> Result<Vec<serde_json::Value>, String> {
-    let client = reqwest::Client::new();
+pub async fn list_openrouter_models(api_key: &str, accept_invalid_certs: bool) -> Result<Vec<serde_json::Value>, String> {
+    let client = build_http_client(accept_invalid_certs)?;
     let resp = client
         .get("https://openrouter.ai/api/v1/models")
         .header("authorization", format!("Bearer {}", api_key))

@@ -27,6 +27,15 @@ spec:
             limits:
               memory: "64Mi"
               cpu: "100m"
+          volumeMounts:
+            - name: releases
+              mountPath: /data/releases
+              readOnly: true
+      volumes:
+        - name: releases
+          hostPath:
+            path: /opt/sqail-releases
+            type: DirectoryOrCreate
       imagePullSecrets:
         - name: acr-secret
 ---
@@ -39,7 +48,8 @@ spec:
   selector:
     app: sqail-portal
   ports:
-    - port: 80
+    - name: http
+      port: 80
       targetPort: 80
       nodePort: 32080
   type: NodePort

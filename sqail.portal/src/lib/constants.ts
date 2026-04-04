@@ -1,6 +1,6 @@
 export const VERSION = "0.3.0";
+export const BUILD_NUMBER = "20260404-1";
 export const CODEBERG_URL = "https://codeberg.org/nicokosi/sqail";
-export const RELEASES_URL = `${CODEBERG_URL}/releases`;
 
 export type Platform = "windows" | "macos" | "linux";
 
@@ -9,26 +9,32 @@ export interface DownloadInfo {
   label: string;
   fileName: string;
   icon: string;
+  ext: string;
 }
+
+const FILE_PREFIX = `sqail_${VERSION}_${BUILD_NUMBER}`;
 
 export const DOWNLOADS: DownloadInfo[] = [
   {
     platform: "windows",
     label: "Windows",
-    fileName: `sqail_${VERSION}_x64-setup.msi`,
+    fileName: `${FILE_PREFIX}_x64-setup.exe`,
     icon: "Monitor",
+    ext: ".exe",
   },
   {
     platform: "macos",
     label: "macOS",
-    fileName: `sqail_${VERSION}_x64.dmg`,
+    fileName: `${FILE_PREFIX}_x64.dmg`,
     icon: "Apple",
+    ext: ".dmg",
   },
   {
     platform: "linux",
-    label: "Linux",
-    fileName: `sqail_${VERSION}_amd64.AppImage`,
+    label: "Linux (.deb)",
+    fileName: `${FILE_PREFIX}_amd64.deb`,
     icon: "Terminal",
+    ext: ".deb",
   },
 ];
 
@@ -40,7 +46,7 @@ export function detectPlatform(): Platform {
 }
 
 export function getDownloadUrl(fileName: string): string {
-  return `${RELEASES_URL}/download/v${VERSION}/${fileName}`;
+  return `/releases/${fileName}`;
 }
 
 export const FEATURES = [
@@ -124,4 +130,5 @@ export const NAV_ITEMS = [
   { label: "AI", href: "#ai" },
   { label: "Databases", href: "#databases" },
   { label: "Download", href: "#download" },
+  { label: "Changelog", href: "#changelog" },
 ] as const;

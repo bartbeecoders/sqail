@@ -4,6 +4,7 @@ import Features from "./components/Features";
 import AiSection from "./components/AiSection";
 import DatabaseSupport from "./components/DatabaseSupport";
 import Downloads from "./components/Downloads";
+import Changelog from "./components/Changelog";
 import Footer from "./components/Footer";
 
 export default function App() {
@@ -15,6 +16,7 @@ export default function App() {
       <AiSection />
       <DatabaseSupport />
       <Downloads />
+      <Changelog />
       <Footer />
     </div>
   );

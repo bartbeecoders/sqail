@@ -1,4 +1,4 @@
-import { CODEBERG_URL, RELEASES_URL } from "../lib/constants";
+import { CODEBERG_URL } from "../lib/constants";
 
 export default function Footer() {
   return (
@@ -35,12 +35,10 @@ export default function Footer() {
               </li>
               <li>
                 <a
-                  href={RELEASES_URL}
-                  target="_blank"
-                  rel="noopener noreferrer"
+                  href="#changelog"
                   className="transition-colors hover:text-brand-cyan"
                 >
-                  Releases
+                  Changelog
                 </a>
               </li>
               <li>

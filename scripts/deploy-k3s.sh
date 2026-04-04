@@ -10,7 +10,7 @@ set -euo pipefail
 # Registry:  beecodersregistry.azurecr.io
 #
 # Usage:
-#   ./scripts/deploy-k3s.sh [all|build|push|deploy|status]
+#   ./scripts/deploy-k3s.sh [all|build|push|deploy|status|upload-releases]
 #
 # Required tools locally:
 #   podman, ssh, scp
@@ -92,7 +92,6 @@ deploy_manifests() {
   fi
 
   kubectl_vps "apply -f $VPS_K8S_DIR/portal/deployment.yaml"
-  kubectl_vps "apply -f $VPS_K8S_DIR/portal/ingress.yaml"
 
   # Restart to pick up new image
   kubectl_vps "-n $NAMESPACE rollout restart deployment sqail-portal"
@@ -101,7 +100,14 @@ deploy_manifests() {
   echo ""
   echo "Deployed sqail-portal v$APP_VERSION"
   echo "  • NodePort:  http://$VPS_IP:32080"
-  echo "  • Ingress:   https://sqail.ai"
+  echo "  • Ingress:   https://www.sqail.dev"
+  echo ""
+  echo "NOTE: To serve download binaries, upload them separately:"
+  echo "  ./scripts/upload-release.sh"
+}
+
+upload_releases() {
+  "$ROOT_DIR/scripts/upload-release.sh"
 }
 
 status() {
@@ -131,9 +137,12 @@ main() {
     status)
       status
       ;;
+    upload-releases)
+      upload_releases
+      ;;
     *)
       echo "Unknown command: $COMMAND"
-      echo "Usage: $0 [all|build|push|deploy|status]"
+      echo "Usage: $0 [all|build|push|deploy|status|upload-releases]"
       exit 1
       ;;
   esac

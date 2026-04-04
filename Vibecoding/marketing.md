@@ -16,3 +16,10 @@ For illustration use the xAI-image mcp server to generate professional looking i
 
 
 I added a deploy-k3s.sh script (copy from another project), analyse it and adjust it so it deploys the web portal to the VPS k3s server.
+
+So now the sqail.portal is deployed on the VPS k3s server. It works.
+Can you make a script that builds the binaries for windows, linux and macos? 
+And deploy these binaries on the same portal, so that the users can download them fro the website (not from codeberg.org)
+Only the sourcecode will be on codeberg.org.
+Also add a changelog to the portal. This is the same releases info as in the about page.
+The binaries names should have the release nr and a build date nr in the filename. We are probably hgoing to release a lot of incremental updates.

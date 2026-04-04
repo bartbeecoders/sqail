@@ -1,5 +1,5 @@
-import { Download, Monitor, Terminal, ExternalLink } from "lucide-react";
-import { VERSION, DOWNLOADS, RELEASES_URL, detectPlatform, getDownloadUrl } from "../lib/constants";
+import { Download, Monitor, Terminal } from "lucide-react";
+import { VERSION, BUILD_NUMBER, DOWNLOADS, detectPlatform, getDownloadUrl } from "../lib/constants";
 
 const ICON_MAP: Record<string, React.ReactNode> = {
   Monitor: <Monitor size={20} />,
@@ -62,14 +62,13 @@ export default function Downloads() {
         <div className="mt-8 flex items-center justify-center gap-6 text-sm text-text-dim">
           <span>v{VERSION}</span>
           <span className="text-border">|</span>
+          <span>Build {BUILD_NUMBER}</span>
+          <span className="text-border">|</span>
           <a
-            href={RELEASES_URL}
-            target="_blank"
-            rel="noopener noreferrer"
+            href="#changelog"
             className="inline-flex items-center gap-1 transition-colors hover:text-brand-cyan"
           >
-            <ExternalLink size={12} />
-            All releases
+            Changelog
           </a>
         </div>
       </div>

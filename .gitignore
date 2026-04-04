@@ -10,6 +10,23 @@ src-tauri/target/
 .env.*
 !.env.example
 
+# Secrets and credentials
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.kdbx
+*.pkcs12
+*.cer
+*.crt
+*.der
+*.csr
+secrets.*
+*.secret
+*.secrets
+
 # IDE
 .vscode/
 .idea/

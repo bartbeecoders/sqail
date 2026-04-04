@@ -1,0 +1,341 @@
+name: Build & Deploy Release
+
+# Trigger on version tags (v0.3.0, v0.4.0, etc.) or manual dispatch
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      deploy_portal:
+        description: "Also rebuild and deploy the portal"
+        type: boolean
+        default: true
+
+env:
+  REGISTRY: beecodersregistry.azurecr.io
+  IMAGE_NAME: sqail-portal
+
+jobs:
+  # ── Prepare: extract version + build number ────────────────────────────
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      app_version: ${{ steps.meta.outputs.app_version }}
+      build_number: ${{ steps.meta.outputs.build_number }}
+      file_prefix: ${{ steps.meta.outputs.file_prefix }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract version and build number
+        id: meta
+        run: |
+          APP_VERSION=$(grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' package.json | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+          BUILD_NUMBER=$(date -u +"%Y%m%d")-${{ github.run_number }}
+          FILE_PREFIX="sqail_${APP_VERSION}_${BUILD_NUMBER}"
+          echo "app_version=$APP_VERSION" >> "$GITHUB_OUTPUT"
+          echo "build_number=$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "file_prefix=$FILE_PREFIX" >> "$GITHUB_OUTPUT"
+          echo "Version: $APP_VERSION, Build: $BUILD_NUMBER"
+
+  # ── Build for each platform ────────────────────────────────────────────
+  build-linux:
+    needs: prepare
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Setup Node + pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Write build number
+        run: |
+          cat > build-number.json <<'EOF'
+          {
+            "date": "${{ needs.prepare.outputs.build_number }}",
+            "revision": ${{ github.run_number }},
+            "buildNumber": "${{ needs.prepare.outputs.build_number }}"
+          }
+          EOF
+
+      - name: Build deb
+        run: pnpm tauri build --bundles deb
+
+      - name: Build AppImage
+        run: pnpm tauri build --bundles appimage
+        continue-on-error: true
+
+      - name: Build rpm
+        run: pnpm tauri build --bundles rpm
+        continue-on-error: true
+
+      - name: Collect artifacts
+        run: |
+          PREFIX="${{ needs.prepare.outputs.file_prefix }}"
+          BUNDLE="src-tauri/target/release/bundle"
+          mkdir -p dist/releases
+
+          # deb
+          for f in "$BUNDLE/deb/"*.deb; do
+            [ -f "$f" ] && cp "$f" "dist/releases/${PREFIX}_amd64.deb"
+          done
+          # AppImage
+          for f in "$BUNDLE/appimage/"*.AppImage; do
+            [ -f "$f" ] && cp "$f" "dist/releases/${PREFIX}_amd64.AppImage"
+          done
+          # rpm
+          for f in "$BUNDLE/rpm/"*.rpm; do
+            [ -f "$f" ] && cp "$f" "dist/releases/${PREFIX}_amd64.rpm"
+          done
+
+          ls -lh dist/releases/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-binaries
+          path: dist/releases/sqail_*
+          retention-days: 30
+
+  build-windows:
+    needs: prepare
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Setup Node + pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Write build number
+        shell: bash
+        run: |
+          cat > build-number.json <<'EOF'
+          {
+            "date": "${{ needs.prepare.outputs.build_number }}",
+            "revision": ${{ github.run_number }},
+            "buildNumber": "${{ needs.prepare.outputs.build_number }}"
+          }
+          EOF
+
+      - name: Build NSIS + MSI
+        run: pnpm tauri build
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          PREFIX="${{ needs.prepare.outputs.file_prefix }}"
+          BUNDLE="src-tauri/target/release/bundle"
+          mkdir -p dist/releases
+
+          # NSIS
+          for f in "$BUNDLE/nsis/"*.exe; do
+            [ -f "$f" ] && cp "$f" "dist/releases/${PREFIX}_x64-setup.exe"
+          done
+          # MSI
+          for f in "$BUNDLE/msi/"*.msi; do
+            [ -f "$f" ] && cp "$f" "dist/releases/${PREFIX}_x64-setup.msi"
+          done
+
+          ls -lh dist/releases/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-binaries
+          path: dist/releases/sqail_*
+          retention-days: 30
+
+  build-macos:
+    needs: prepare
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Setup Node + pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Write build number
+        run: |
+          cat > build-number.json <<'EOF'
+          {
+            "date": "${{ needs.prepare.outputs.build_number }}",
+            "revision": ${{ github.run_number }},
+            "buildNumber": "${{ needs.prepare.outputs.build_number }}"
+          }
+          EOF
+
+      - name: Build DMG
+        run: pnpm tauri build
+
+      - name: Collect artifacts
+        run: |
+          PREFIX="${{ needs.prepare.outputs.file_prefix }}"
+          BUNDLE="src-tauri/target/release/bundle"
+          mkdir -p dist/releases
+
+          # DMG
+          for f in "$BUNDLE/dmg/"*.dmg; do
+            [ -f "$f" ] && cp "$f" "dist/releases/${PREFIX}_x64.dmg"
+          done
+          # App bundle as tar.gz
+          for f in "$BUNDLE/macos/"*.app; do
+            [ -d "$f" ] && tar -czf "dist/releases/${PREFIX}_x64.app.tar.gz" -C "$BUNDLE/macos" "$(basename "$f")"
+          done
+
+          ls -lh dist/releases/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-binaries
+          path: dist/releases/sqail_*
+          retention-days: 30
+
+  # ── Upload binaries to VPS ─────────────────────────────────────────────
+  deploy-binaries:
+    needs: [prepare, build-linux, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lhR artifacts/
+
+      - name: Upload to VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          source: "artifacts/*"
+          target: /opt/sqail-releases
+          strip_components: 1
+
+      - name: Generate manifest on VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /opt/sqail-releases
+            FILES=$(ls -1 sqail_* 2>/dev/null | jq -R -s 'split("\n") | map(select(length > 0))')
+            cat > manifest.json <<EOF
+            {
+              "version": "${{ needs.prepare.outputs.app_version }}",
+              "buildNumber": "${{ needs.prepare.outputs.build_number }}",
+              "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+              "files": $FILES
+            }
+            EOF
+            echo "Manifest:"
+            cat manifest.json
+
+  # ── Rebuild & deploy portal with updated download links ────────────────
+  deploy-portal:
+    needs: [prepare, deploy-binaries]
+    if: ${{ github.event_name == 'push' || inputs.deploy_portal }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Update portal constants with build number
+        run: |
+          VERSION="${{ needs.prepare.outputs.app_version }}"
+          BUILD="${{ needs.prepare.outputs.build_number }}"
+          sed -i "s/export const VERSION = \".*\"/export const VERSION = \"$VERSION\"/" sqail.portal/src/lib/constants.ts
+          sed -i "s/export const BUILD_NUMBER = \".*\"/export const BUILD_NUMBER = \"$BUILD\"/" sqail.portal/src/lib/constants.ts
+          echo "Updated constants.ts:"
+          head -2 sqail.portal/src/lib/constants.ts
+
+      - name: Login to ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build and push portal image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./sqail.portal
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.prepare.outputs.app_version }}
+
+      - name: Deploy to K3S
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            if command -v kubectl >/dev/null 2>&1; then
+              KUBECTL="kubectl"
+            else
+              KUBECTL="sudo k3s kubectl"
+            fi
+            $KUBECTL -n sqail rollout restart deployment sqail-portal
+            $KUBECTL -n sqail rollout status deployment sqail-portal --timeout=120s

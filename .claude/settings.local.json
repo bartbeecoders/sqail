@@ -33,7 +33,10 @@
       "Bash(curl -s http://localhost:5173)",
       "Bash(kill %1)",
       "Bash(pkill -f \"vite.*sqail.portal\")",
-      "Bash(chmod +x:*)"
+      "Bash(chmod +x:*)",
+      "Bash(python3 -c \"import yaml; yaml.safe_load\\(open\\('/run/media/bart/Development/dev/codeberg/sqail/.github/workflows/release.yml'\\)\\)\")",
+      "Bash(gh auth:*)",
+      "Bash(gh api:*)"
     ]
   }
 }

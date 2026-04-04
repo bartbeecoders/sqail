@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Menu, X } from "lucide-react";
-import { NAV_ITEMS, CODEBERG_URL } from "../lib/constants";
+import { NAV_ITEMS, GITHUB_URL } from "../lib/constants";
 
 export default function Navbar() {
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -26,12 +26,12 @@ export default function Navbar() {
             </a>
           ))}
           <a
-            href={CODEBERG_URL}
+            href={GITHUB_URL}
             target="_blank"
             rel="noopener noreferrer"
             className="text-sm text-text-muted transition-colors hover:text-brand-cyan"
           >
-            Codeberg
+            GitHub
           </a>
           <a
             href="#download"
@@ -64,12 +64,12 @@ export default function Navbar() {
             </a>
           ))}
           <a
-            href={CODEBERG_URL}
+            href={GITHUB_URL}
             target="_blank"
             rel="noopener noreferrer"
             className="block py-2 text-sm text-text-muted transition-colors hover:text-brand-cyan"
           >
-            Codeberg
+            GitHub
           </a>
           <a
             href="#download"

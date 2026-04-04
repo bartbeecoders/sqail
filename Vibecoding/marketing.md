@@ -23,3 +23,8 @@ And deploy these binaries on the same portal, so that the users can download the
 Only the sourcecode will be on codeberg.org.
 Also add a changelog to the portal. This is the same releases info as in the about page.
 The binaries names should have the release nr and a build date nr in the filename. We are probably hgoing to release a lot of incremental updates.
+
+So now that we have the files in github ()https://github.com/bartbeecoders/sqail), can you setup a github action that builds the binaries for windows, linux and macos? 
+And deploy these binaries on the same portal, so that the users can download them from the website. The sourcecode is now also on github.
+Also add a changelog to the portal. This is the same releases info as in the about page.
+The binaries names should have the release nr and a build date nr in the filename. We are probably hgoing to release a lot of incremental updates.

@@ -1,5 +1,5 @@
 import { Download, ExternalLink } from "lucide-react";
-import { VERSION, DOWNLOADS, CODEBERG_URL, detectPlatform, getDownloadUrl } from "../lib/constants";
+import { VERSION, DOWNLOADS, GITHUB_URL, detectPlatform, getDownloadUrl } from "../lib/constants";
 
 export default function Hero() {
   const platform = detectPlatform();
@@ -41,13 +41,13 @@ export default function Hero() {
               Download for {primaryDownload.label}
             </a>
             <a
-              href={CODEBERG_URL}
+              href={GITHUB_URL}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-2 rounded-lg border border-border px-6 py-3 font-semibold text-text-primary transition-colors hover:border-text-muted hover:bg-bg-section"
             >
               <ExternalLink size={18} />
-              View on Codeberg
+              View on GitHub
             </a>
           </div>
         </div>

@@ -1,6 +1,6 @@
 export const VERSION = "0.3.0";
 export const BUILD_NUMBER = "20260404-1";
-export const CODEBERG_URL = "https://codeberg.org/nicokosi/sqail";
+export const GITHUB_URL = "https://github.com/bartbeecoders/sqail";
 
 export type Platform = "windows" | "macos" | "linux";
 
@@ -88,7 +88,7 @@ export const FEATURES = [
   {
     icon: "GitBranch",
     title: "Open Source",
-    description: "Free forever. Hosted on Codeberg. Community-driven development.",
+    description: "Free forever. Hosted on GitHub. Community-driven development.",
   },
 ] as const;
 

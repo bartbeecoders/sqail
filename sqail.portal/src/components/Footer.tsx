@@ -1,4 +1,4 @@
-import { CODEBERG_URL } from "../lib/constants";
+import { GITHUB_URL } from "../lib/constants";
 
 export default function Footer() {
   return (
@@ -25,7 +25,7 @@ export default function Footer() {
             <ul className="space-y-2 text-sm text-text-muted">
               <li>
                 <a
-                  href={CODEBERG_URL}
+                  href={GITHUB_URL}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="transition-colors hover:text-brand-cyan"
@@ -43,7 +43,7 @@ export default function Footer() {
               </li>
               <li>
                 <a
-                  href={`${CODEBERG_URL}/issues`}
+                  href={`${GITHUB_URL}/issues`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="transition-colors hover:text-brand-cyan"

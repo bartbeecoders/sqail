@@ -26,7 +26,10 @@ export default function EditorTabs() {
     closeAllTabs,
     setActiveTab,
     renameTab,
+    setConnectionId,
   } = useEditorStore();
+  const connections = useConnectionStore((s) => s.connections);
+  const globalConnectionId = useConnectionStore((s) => s.activeConnectionId);
   const [editingTabId, setEditingTabId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
@@ -108,8 +111,13 @@ export default function EditorTabs() {
 
       const sql = buildSelectStatement(schemaName, tableName, cols, conn.driver);
       addTabWithContent(tableName, sql);
+      // Link the new tab to the current connection
+      const newTab = useEditorStore.getState().getActiveTab();
+      if (newTab && conn.id) {
+        setConnectionId(newTab.id, conn.id);
+      }
     },
-    [addTabWithContent],
+    [addTabWithContent, setConnectionId],
   );
 
   const tabIdx = contextMenu
@@ -130,6 +138,9 @@ export default function EditorTabs() {
       {tabs.map((tab) => {
         const isActive = tab.id === activeTabId;
         const isEditing = editingTabId === tab.id;
+        const conn = tab.connectionId
+          ? connections.find((c) => c.id === tab.connectionId)
+          : undefined;
         return (
           <div
             key={tab.id}
@@ -150,6 +161,13 @@ export default function EditorTabs() {
               setContextMenu({ x: e.clientX, y: e.clientY, tabId: tab.id });
             }}
           >
+            {conn && (
+              <span
+                className="h-2 w-2 shrink-0 rounded-full"
+                style={{ backgroundColor: conn.color || "#6366f1" }}
+                title={conn.name}
+              />
+            )}
             {isEditing ? (
               <input
                 ref={inputRef}
@@ -183,7 +201,14 @@ export default function EditorTabs() {
         );
       })}
       <button
-        onClick={addTab}
+        onClick={() => {
+          addTab();
+          // Assign current connection to the new tab
+          if (globalConnectionId) {
+            const newTab = useEditorStore.getState().getActiveTab();
+            if (newTab) setConnectionId(newTab.id, globalConnectionId);
+          }
+        }}
         className="mb-0.5 ml-1 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
         title="New tab (Ctrl+N)"
       >

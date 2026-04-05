@@ -38,14 +38,14 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
   connectionId: null,
 
   loadSchemas: async (connectionId) => {
-    set({ loading: true, connectionId, error: null });
+    set({ loading: true, error: null, schemas: [], tables: {}, columns: {}, indexes: {}, routines: {}, connectionId: null });
     try {
       const schemas = await invoke<SchemaInfo[]>("list_schemas", { connectionId });
-      set({ schemas, tables: {}, columns: {}, indexes: {}, routines: {} });
+      set({ schemas, connectionId });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error("Failed to load schemas:", msg);
-      set({ error: msg, schemas: [] });
+      set({ error: msg, schemas: [], connectionId: null });
     } finally {
       set({ loading: false });
     }

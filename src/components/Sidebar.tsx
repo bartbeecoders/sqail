@@ -42,7 +42,7 @@ const DRIVER_ICONS: Record<string, string> = {
 };
 
 export default function Sidebar({ collapsed, onToggle, externalFormOpen, onExternalFormClose }: SidebarProps) {
-  const { connections, activeConnectionId, loading, loadConnections, connect, disconnect, deleteConnection } =
+  const { connections, activeConnectionId, connectedIds, loading, loadConnections, connect, disconnect, deleteConnection } =
     useConnectionStore();
   const [formOpen, setFormOpen] = useState(false);
   const [editingConn, setEditingConn] = useState<ConnectionConfig | undefined>();
@@ -73,7 +73,7 @@ export default function Sidebar({ collapsed, onToggle, externalFormOpen, onExter
   const handleConnect = async (id: string) => {
     setConnectingId(id);
     try {
-      if (activeConnectionId === id) {
+      if (connectedIds.has(id)) {
         await disconnect(id);
       } else {
         await connect(id);
@@ -82,6 +82,13 @@ export default function Sidebar({ collapsed, onToggle, externalFormOpen, onExter
       console.error("Connection error:", e);
     } finally {
       setConnectingId(null);
+    }
+  };
+
+  // Click connection name/row to set it as active (without connecting/disconnecting)
+  const handleSetActive = (id: string) => {
+    if (connectedIds.has(id)) {
+      connect(id); // Already connected, just switches active pointer
     }
   };
 
@@ -138,22 +145,27 @@ export default function Sidebar({ collapsed, onToggle, externalFormOpen, onExter
               >
                 <Plus size={16} />
               </button>
-              {connections.map((conn) => (
-                <button
-                  key={conn.id}
-                  onClick={() => handleConnect(conn.id)}
-                  className={cn(
-                    "rounded p-1.5 text-[10px] font-bold",
-                    activeConnectionId === conn.id
-                      ? "bg-primary/15 text-primary"
-                      : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
-                  )}
-                  title={`${conn.name} (${DRIVER_LABELS[conn.driver]})`}
-                  style={conn.color ? { borderLeft: `2px solid ${conn.color}` } : undefined}
-                >
-                  {DRIVER_ICONS[conn.driver] ?? "DB"}
-                </button>
-              ))}
+              {connections.map((conn) => {
+                const isConn = connectedIds.has(conn.id);
+                return (
+                  <button
+                    key={conn.id}
+                    onClick={() => isConn ? handleSetActive(conn.id) : handleConnect(conn.id)}
+                    className={cn(
+                      "rounded p-1.5 text-[10px] font-bold",
+                      activeConnectionId === conn.id
+                        ? "bg-primary/15 text-primary"
+                        : isConn
+                          ? "bg-success/10 text-success"
+                          : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                    )}
+                    title={`${conn.name} (${DRIVER_LABELS[conn.driver]})${isConn ? " — connected" : ""}`}
+                    style={conn.color ? { borderLeft: `2px solid ${conn.color}` } : undefined}
+                  >
+                    {DRIVER_ICONS[conn.driver] ?? "DB"}
+                  </button>
+                );
+              })}
             </div>
           ) : (
             <div className="space-y-1">
@@ -180,16 +192,20 @@ export default function Sidebar({ collapsed, onToggle, externalFormOpen, onExter
 
               {connections.map((conn) => {
                 const isActive = activeConnectionId === conn.id;
+                const isConnectedConn = connectedIds.has(conn.id);
                 const isConnecting = connectingId === conn.id;
 
                 return (
                   <div
                     key={conn.id}
+                    onClick={() => handleSetActive(conn.id)}
                     className={cn(
-                      "group flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
+                      "group flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors cursor-pointer",
                       isActive
                         ? "bg-primary/10 text-foreground"
-                        : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                        : isConnectedConn
+                          ? "bg-success/5 text-foreground hover:bg-success/10"
+                          : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
                     )}
                     style={conn.color ? { borderLeft: `3px solid ${conn.color}` } : undefined}
                   >
@@ -197,7 +213,7 @@ export default function Sidebar({ collapsed, onToggle, externalFormOpen, onExter
                     <span
                       className={cn(
                         "h-2 w-2 shrink-0 rounded-full",
-                        isActive ? "bg-success" : "bg-muted-foreground/30",
+                        isConnectedConn ? "bg-success" : "bg-muted-foreground/30",
                       )}
                     />
 
@@ -213,27 +229,36 @@ export default function Sidebar({ collapsed, onToggle, externalFormOpen, onExter
                     {/* Actions (show on hover) */}
                     <div className="flex shrink-0 gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
                       <button
-                        onClick={() => handleConnect(conn.id)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleConnect(conn.id);
+                        }}
                         className="rounded p-1 hover:bg-background/80"
-                        title={isActive ? "Disconnect" : "Connect"}
+                        title={isConnectedConn ? "Disconnect" : "Connect"}
                       >
                         {isConnecting ? (
                           <Loader2 size={12} className="animate-spin" />
-                        ) : isActive ? (
+                        ) : isConnectedConn ? (
                           <Unplug size={12} />
                         ) : (
                           <Plug size={12} />
                         )}
                       </button>
                       <button
-                        onClick={() => openEdit(conn)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openEdit(conn);
+                        }}
                         className="rounded p-1 hover:bg-background/80"
                         title="Edit"
                       >
                         <Pencil size={12} />
                       </button>
                       <button
-                        onClick={() => handleDelete(conn.id)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDelete(conn.id);
+                        }}
                         className="rounded p-1 text-destructive hover:bg-background/80"
                         title="Delete"
                       >

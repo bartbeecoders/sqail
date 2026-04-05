@@ -39,6 +39,9 @@ interface EditorState {
   renameTab: (id: string, title: string) => void;
   setContent: (id: string, content: string) => void;
   setFilePath: (id: string, filePath: string) => void;
+  setConnectionId: (id: string, connectionId: string | undefined) => void;
+  setSavedQueryId: (id: string, savedQueryId: string) => void;
+  findTabBySavedQueryId: (savedQueryId: string) => EditorTab | undefined;
   getActiveTab: () => EditorTab | undefined;
   clearActiveTab: () => void;
 }
@@ -131,6 +134,24 @@ export const useEditorStore = create<EditorState>((set, get) => {
         tabs: s.tabs.map((t) => (t.id === id ? { ...t, filePath } : t)),
       }));
       persist();
+    },
+
+    setConnectionId: (id, connectionId) => {
+      set((s) => ({
+        tabs: s.tabs.map((t) => (t.id === id ? { ...t, connectionId } : t)),
+      }));
+      persist();
+    },
+
+    setSavedQueryId: (id, savedQueryId) => {
+      set((s) => ({
+        tabs: s.tabs.map((t) => (t.id === id ? { ...t, savedQueryId } : t)),
+      }));
+      persist();
+    },
+
+    findTabBySavedQueryId: (savedQueryId) => {
+      return get().tabs.find((t) => t.savedQueryId === savedQueryId);
     },
 
     getActiveTab: () => {

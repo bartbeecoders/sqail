@@ -17,6 +17,7 @@ import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
 import { cn } from "../lib/utils";
 import { useQueryHistoryStore } from "../stores/queryHistoryStore";
 import { useEditorStore } from "../stores/editorStore";
+import { useConnectionStore } from "../stores/connectionStore";
 import type { SavedQuery } from "../types/queryHistory";
 
 const SQL_FILTER = { name: "SQL Files", extensions: ["sql"] };
@@ -71,10 +72,25 @@ export default function SavedQueriesPanel() {
   }, [savedQueries, search, selectedFolder]);
 
   const loadIntoEditor = useCallback((query: SavedQuery) => {
-    const state = useEditorStore.getState();
-    const tab = state.getActiveTab();
-    if (tab) {
-      state.setContent(tab.id, query.query);
+    const editorState = useEditorStore.getState();
+
+    // If there's already a tab linked to this saved query, switch to it
+    const existing = editorState.findTabBySavedQueryId(query.id);
+    if (existing) {
+      editorState.setActiveTab(existing.id);
+      // Update content in case it was changed externally
+      editorState.setContent(existing.id, query.query);
+      return;
+    }
+
+    // Open a new tab with the query content
+    editorState.addTabWithContent(query.name, query.query);
+    const newTab = editorState.getActiveTab();
+    if (newTab) {
+      editorState.setSavedQueryId(newTab.id, query.id);
+      // Link the tab to the saved query's connection, or fall back to current
+      const connId = query.connectionId ?? useConnectionStore.getState().activeConnectionId ?? undefined;
+      if (connId) editorState.setConnectionId(newTab.id, connId);
     }
   }, []);
 
@@ -95,7 +111,6 @@ export default function SavedQueriesPanel() {
     const filePath = await open({ filters: [SQL_FILTER], multiple: false });
     if (!filePath) return;
     const content = await readTextFile(filePath as string);
-    // Extract filename as name
     const name = (filePath as string).split(/[/\\]/).pop()?.replace(/\.sql$/i, "") ?? "Imported Query";
     const now = new Date().toISOString();
     createSavedQuery({
@@ -107,6 +122,45 @@ export default function SavedQueriesPanel() {
       updatedAt: now,
     });
   }, [createSavedQuery]);
+
+  const handleSave = useCallback(
+    (query: SavedQuery, isEdit: boolean) => {
+      if (isEdit) {
+        updateSavedQuery(query);
+      } else {
+        // Check for duplicate name
+        const duplicate = savedQueries.find(
+          (q) => q.name.toLowerCase() === query.name.toLowerCase() && q.id !== query.id,
+        );
+        if (duplicate) {
+          const overwrite = window.confirm(
+            `A saved query named "${duplicate.name}" already exists.\n\nDo you want to overwrite it?`,
+          );
+          if (!overwrite) return;
+          // Overwrite: use the existing query's id, keep original createdAt
+          query = { ...query, id: duplicate.id, createdAt: duplicate.createdAt };
+          updateSavedQuery(query);
+        } else {
+          createSavedQuery(query);
+        }
+      }
+
+      // Sync the tab: link it and rename it to the saved query name
+      const editorState = useEditorStore.getState();
+      const tab = editorState.getActiveTab();
+      if (tab && tab.content === query.query) {
+        editorState.setSavedQueryId(tab.id, query.id);
+        // If the tab still has a default "Query N" name, rename to the saved query name
+        if (/^Query \d+$/.test(tab.title)) {
+          editorState.renameTab(tab.id, query.name);
+        }
+      }
+
+      setShowNewForm(false);
+      setEditingId(null);
+    },
+    [savedQueries, createSavedQuery, updateSavedQuery],
+  );
 
   return (
     <div className="flex h-full flex-col">
@@ -192,15 +246,7 @@ export default function SavedQueriesPanel() {
           initialSql={!editingId ? initialSql : undefined}
           existingTags={allTags}
           existingFolders={folders}
-          onSave={(query) => {
-            if (editingId) {
-              updateSavedQuery(query);
-            } else {
-              createSavedQuery(query);
-            }
-            setShowNewForm(false);
-            setEditingId(null);
-          }}
+          onSave={(query) => handleSave(query, !!editingId)}
           onCancel={() => {
             setShowNewForm(false);
             setEditingId(null);
@@ -330,11 +376,21 @@ function SaveQueryForm({
   onSave: (query: SavedQuery) => void;
   onCancel: () => void;
 }) {
-  const [name, setName] = useState(initial?.name ?? "");
+  const activeTab = useEditorStore.getState().getActiveTab();
+  const activeConnectionId = useConnectionStore((s) => s.activeConnectionId);
+
+  // Default the name: use the tab title if it's not a default "Query N" name
+  const defaultName = () => {
+    if (initial?.name) return initial.name;
+    if (activeTab && !/^Query \d+$/.test(activeTab.title)) return activeTab.title;
+    return "";
+  };
+
+  const [name, setName] = useState(defaultName);
   const [description, setDescription] = useState(initial?.description ?? "");
   const [folder, setFolder] = useState(initial?.folder ?? "");
   const [tagsInput, setTagsInput] = useState(initial?.tags.join(", ") ?? "");
-  const sql = initial?.query ?? initialSql ?? useEditorStore.getState().getActiveTab()?.content ?? "";
+  const sql = initial?.query ?? initialSql ?? activeTab?.content ?? "";
 
   const handleSubmit = () => {
     if (!name.trim()) return;
@@ -348,6 +404,7 @@ function SaveQueryForm({
       name: name.trim(),
       description: description.trim() || undefined,
       query: sql,
+      connectionId: initial?.connectionId ?? activeConnectionId ?? undefined,
       tags,
       folder: folder.trim() || undefined,
       createdAt: initial?.createdAt ?? now,

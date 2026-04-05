@@ -104,3 +104,16 @@ Add a tab for the keyboard shortcuts configuration.
 Clicking on a cell in the results table should select the whole row.
 Allow for the selection of multiple rows.
 Add a context menu to the results table with options to copy.
+
+### saved queries
+Loading a saved query should open a new tab with the query content. If the query is already open, then switch to that tab.
+When saving a query, if a query with the same name already exists, ask the user if they want to overwrite it.
+When saving a query, replace the tab name with the new query name, unless the tab has already a updated name, then use that name as the saved query name.
+The save query should also remember the connection that was used for the query.
+
+### multi connections issues.
+A query in a tab is always linked to a connection. 
+Multiple open tabs can be linked to different connections.
+
+It should be possible to connect to multiple connections at the same time.
+When switching from one query to another query that is linked to a different connection, the connection should be switched to the new connection. And the object tree should show the objects of that connection.

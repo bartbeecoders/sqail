@@ -5,6 +5,7 @@ import type { ConnectionConfig } from "../types/connection";
 interface ConnectionState {
   connections: ConnectionConfig[];
   activeConnectionId: string | null;
+  connectedIds: Set<string>;
   loading: boolean;
 
   loadConnections: () => Promise<void>;
@@ -14,11 +15,14 @@ interface ConnectionState {
   testConnection: (config: ConnectionConfig) => Promise<string>;
   connect: (id: string) => Promise<void>;
   disconnect: (id: string) => Promise<void>;
+  setActive: (id: string) => void;
+  isConnected: (id: string) => boolean;
 }
 
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
   connections: [],
   activeConnectionId: null,
+  connectedIds: new Set(),
   loading: false,
 
   loadConnections: async () => {
@@ -26,7 +30,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     try {
       const connections = await invoke<ConnectionConfig[]>("list_connections");
       const activeConnectionId = await invoke<string | null>("get_active_connection");
-      set({ connections, activeConnectionId });
+      // If backend reports an active connection, it's connected
+      const connectedIds = new Set(get().connectedIds);
+      if (activeConnectionId) connectedIds.add(activeConnectionId);
+      set({ connections, activeConnectionId, connectedIds });
     } finally {
       set({ loading: false });
     }
@@ -45,6 +52,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   deleteConnection: async (id) => {
     await invoke<void>("delete_connection", { id });
+    const connectedIds = new Set(get().connectedIds);
+    connectedIds.delete(id);
+    set({ connectedIds });
     await get().loadConnections();
   },
 
@@ -53,15 +63,32 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   connect: async (id) => {
+    const { connectedIds } = get();
+    if (connectedIds.has(id)) {
+      // Already connected — just switch the active pointer
+      set({ activeConnectionId: id });
+      return;
+    }
     await invoke<void>("connect", { id });
-    set({ activeConnectionId: id });
+    const newConnected = new Set(get().connectedIds);
+    newConnected.add(id);
+    set({ activeConnectionId: id, connectedIds: newConnected });
   },
 
   disconnect: async (id) => {
     await invoke<void>("disconnect", { id });
+    const newConnected = new Set(get().connectedIds);
+    newConnected.delete(id);
     const state = get();
-    if (state.activeConnectionId === id) {
-      set({ activeConnectionId: null });
-    }
+    const newActive = state.activeConnectionId === id ? null : state.activeConnectionId;
+    set({ connectedIds: newConnected, activeConnectionId: newActive });
+  },
+
+  setActive: (id) => {
+    set({ activeConnectionId: id });
+  },
+
+  isConnected: (id) => {
+    return get().connectedIds.has(id);
   },
 }));

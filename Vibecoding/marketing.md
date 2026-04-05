@@ -28,3 +28,8 @@ So now that we have the files in github ()https://github.com/bartbeecoders/sqail
 And deploy these binaries on the same portal, so that the users can download them from the website. The sourcecode is now also on github.
 Also add a changelog to the portal. This is the same releases info as in the about page.
 The binaries names should have the release nr and a build date nr in the filename. We are probably hgoing to release a lot of incremental updates.
+
+
+Add a loading dialog when starting the application. Add a progress bar to show the progress of the application loading.
+Add a splash screen with the sqail logo and a progress bar to show the progress of the application loading.
+Make it look professional and modern. Use the image-gen plugin to generate the splash screen.

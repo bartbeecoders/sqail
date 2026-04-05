@@ -177,50 +177,52 @@ export default function SchemaTree() {
   const [filter, setFilter] = useState("");
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
   const contextRef = useRef<HTMLDivElement>(null);
-  const prevConnectionId = useRef<string | null>(null);
   const [metadataModalEntry, setMetadataModalEntry] = useState<ObjectMetadata | null>(null);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const exportRef = useRef<HTMLDivElement>(null);
 
   const loadMetadata = useMetadataStore((s) => s.loadMetadata);
 
-  // Load schemas + all tables/routines when connection changes
+  // Track which connection's schemas have been requested (to avoid duplicate fetches)
+  const schemaRequestedFor = useRef<string | null>(null);
+  const storeConnectionId = useSchemaStore((s) => s.connectionId);
+
+  // Load schemas when the active connection changes
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
-    if (activeConnectionId && activeConnectionId !== prevConnectionId.current) {
-      prevConnectionId.current = activeConnectionId;
-      setExpandedCategories(new Set());
-      setExpandedSchemaNodes(new Set());
-      setExpandedTables(new Set());
-      loadSchemas(activeConnectionId);
-      loadMetadata(activeConnectionId);
-    }
+    if (!activeConnectionId) return;
+    if (schemaRequestedFor.current === activeConnectionId) return;
+
+    schemaRequestedFor.current = activeConnectionId;
+    setExpandedCategories(new Set());
+    setExpandedSchemaNodes(new Set());
+    setExpandedTables(new Set());
+    loadSchemas(activeConnectionId);
+    loadMetadata(activeConnectionId);
   }, [activeConnectionId, loadSchemas, loadMetadata]);
 
-  // When schemas load, eagerly fetch tables + routines for all schemas
-  // and auto-expand "Tables" category
-  const autoLoadedFor = useRef<string | null>(null);
+  // When schemas arrive for the current connection, eagerly fetch tables + routines
+  const tablesLoadedFor = useRef<string | null>(null);
   useEffect(() => {
     if (
       schemas.length > 0 &&
       activeConnectionId &&
-      autoLoadedFor.current !== activeConnectionId
+      storeConnectionId === activeConnectionId &&
+      tablesLoadedFor.current !== activeConnectionId
     ) {
-      autoLoadedFor.current = activeConnectionId;
+      tablesLoadedFor.current = activeConnectionId;
       for (const schema of schemas) {
         loadTables(activeConnectionId, schema.name).then(() => {
           loadAllColumns(activeConnectionId!, schema.name);
         });
         loadRoutines(activeConnectionId, schema.name);
       }
-      // Auto-expand Tables category
       setExpandedCategories(new Set(["tables"]));
-      // If single schema, auto-expand it under Tables
       if (schemas.length === 1) {
         setExpandedSchemaNodes(new Set([`tables:${schemas[0].name}`]));
       }
     }
-  }, [schemas, activeConnectionId, loadTables, loadRoutines]);
+  }, [schemas, activeConnectionId, storeConnectionId, loadTables, loadRoutines, loadAllColumns]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // Close context menu / export menu on click outside
@@ -316,7 +318,8 @@ export default function SchemaTree() {
 
   const handleRefresh = () => {
     if (activeConnectionId) {
-      autoLoadedFor.current = null;
+      schemaRequestedFor.current = null;
+      tablesLoadedFor.current = null;
       loadSchemas(activeConnectionId);
     }
   };

@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useMemo } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { formatSqlAligned } from "./lib/sqlFormat";
 import { saveQuery, saveQueryAs, openQuery } from "./lib/fileOps";
+import SplashScreen from "./components/SplashScreen";
 import Sidebar from "./components/Sidebar";
 import Toolbar from "./components/Toolbar";
 import EditorArea from "./components/EditorArea";
@@ -27,6 +28,7 @@ function loadUiState<T>(key: string, fallback: T): T {
 }
 
 export default function App() {
+  const [splashDone, setSplashDone] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => loadUiState("sqail_sidebar_collapsed", false));
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [connectionFormOpen, setConnectionFormOpen] = useState(false);
@@ -57,13 +59,44 @@ export default function App() {
     );
   }, []);
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId);
+  const activeTabId = useEditorStore((s) => s.activeTabId);
   const loading = useQueryStore((s) => s.loading);
   const executeQuery = useQueryStore((s) => s.executeQuery);
 
+  // When the active tab changes, sync the global active connection to match the tab's connection
+  useEffect(() => {
+    const tab = useEditorStore.getState().getActiveTab();
+    if (!tab?.connectionId) return;
+    const connStore = useConnectionStore.getState();
+    if (tab.connectionId === connStore.activeConnectionId) return;
+
+    if (connStore.connectedIds.has(tab.connectionId)) {
+      // Already connected — just switch the active pointer (no backend call)
+      connStore.setActive(tab.connectionId);
+    } else {
+      // Not connected yet — establish the connection
+      connStore.connect(tab.connectionId).catch(() => {
+        // Connection config may have been deleted — ignore
+      });
+    }
+  }, [activeTabId]);
+
+  // When the user connects to a new connection, assign it to the active tab if it has none
+  useEffect(() => {
+    if (!activeConnectionId) return;
+    const tab = useEditorStore.getState().getActiveTab();
+    if (tab && !tab.connectionId) {
+      useEditorStore.getState().setConnectionId(tab.id, activeConnectionId);
+    }
+  }, [activeConnectionId]);
+
   const handleExecute = useCallback(
     (sql: string) => {
-      if (!activeConnectionId || !sql.trim()) return;
-      executeQuery(activeConnectionId, sql);
+      // Use the active tab's connectionId for execution
+      const tab = useEditorStore.getState().getActiveTab();
+      const connId = tab?.connectionId ?? activeConnectionId;
+      if (!connId || !sql.trim()) return;
+      executeQuery(connId, sql);
     },
     [activeConnectionId, executeQuery],
   );
@@ -96,7 +129,14 @@ export default function App() {
     () => ({
       "run-query": handleRunFromToolbar,
       "format-query": handleFormat,
-      "new-tab": () => useEditorStore.getState().addTab(),
+      "new-tab": () => {
+        const connId = useConnectionStore.getState().activeConnectionId;
+        useEditorStore.getState().addTab();
+        if (connId) {
+          const tab = useEditorStore.getState().getActiveTab();
+          if (tab) useEditorStore.getState().setConnectionId(tab.id, connId);
+        }
+      },
       "close-tab": () => {
         const state = useEditorStore.getState();
         state.closeTab(state.activeTabId);
@@ -116,6 +156,7 @@ export default function App() {
 
   return (
     <div className="flex h-full">
+      {!splashDone && <SplashScreen onComplete={() => setSplashDone(true)} />}
       <Sidebar
         collapsed={sidebarCollapsed}
         onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
@@ -127,7 +168,7 @@ export default function App() {
           onRun={handleRunFromToolbar}
           onFormat={handleFormat}
           onClear={handleClear}
-          hasConnection={!!activeConnectionId}
+          hasConnection={!!(useEditorStore.getState().getActiveTab()?.connectionId ?? activeConnectionId)}
           loading={loading}
           onOpenSettings={() => setSettingsOpen(true)}
         />

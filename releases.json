@@ -1,5 +1,43 @@
 [
   {
+    "version": "0.3.3",
+    "sections": [
+      {
+        "title": "Multi-Connection Support",
+        "items": [
+          "Connect to multiple databases simultaneously — each connection maintains its own pool",
+          "Tabs are linked to connections: each tab remembers which connection it uses",
+          "Switching tabs automatically switches the active connection and reloads the schema tree",
+          "Connection color dot shown on each tab to indicate which database it belongs to",
+          "New tabs inherit the current active connection",
+          "Sidebar shows green dot for all connected databases, not just the active one"
+        ]
+      },
+      {
+        "title": "Saved Queries",
+        "items": [
+          "Loading a saved query opens a new tab (or switches to it if already open)",
+          "Duplicate name detection when saving — prompts to overwrite existing query",
+          "Tab name syncs with saved query name; custom tab names become the default save name",
+          "Saved queries remember the connection they were created with"
+        ]
+      },
+      {
+        "title": "Database Connections",
+        "items": [
+          "Database name dropdown for PostgreSQL and MySQL: fetches available databases when host, port, and user are set",
+          "Searchable combobox with type-ahead filtering for database selection"
+        ]
+      },
+      {
+        "title": "UI / UX",
+        "items": [
+          "Splash screen with animated logo, progress bar, and loading status on app startup"
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.3.2",
     "sections": [
       {

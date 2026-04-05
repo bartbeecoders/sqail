@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { X, Loader2, CheckCircle2, XCircle, ExternalLink } from "lucide-react";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { X, Loader2, CheckCircle2, XCircle, ExternalLink, ChevronDown } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { cn } from "../lib/utils";
 import { useConnectionStore } from "../stores/connectionStore";
@@ -121,6 +121,7 @@ export default function ConnectionForm({ initial, onClose }: ConnectionFormProps
   };
 
   const isNetwork = form.driver !== "sqlite";
+  const supportsDbList = form.driver === "postgres" || form.driver === "mysql";
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
@@ -190,14 +191,73 @@ export default function ConnectionForm({ initial, onClose }: ConnectionFormProps
                   />
                 </Field>
               </div>
+
+              {/* User/Password — render before Database so credentials are available for DB listing */}
+              {form.driver !== "mssql" && (
+                <div className="flex gap-2">
+                  <Field label="User" className="flex-1">
+                    <input
+                      value={form.user}
+                      onChange={(e) => set("user", e.target.value)}
+                      placeholder={form.driver === "postgres" ? "postgres" : "root"}
+                      className="input"
+                    />
+                  </Field>
+                  <Field label="Password" className="flex-1">
+                    <input
+                      type="password"
+                      value={form.password}
+                      onChange={(e) => set("password", e.target.value)}
+                      className="input"
+                    />
+                  </Field>
+                </div>
+              )}
+              {form.driver === "mssql" && form.mssqlAuthMethod === "sql_server" && (
+                <div className="flex gap-2">
+                  <Field label="User" className="flex-1">
+                    <input
+                      value={form.user}
+                      onChange={(e) => set("user", e.target.value)}
+                      placeholder="sa"
+                      className="input"
+                    />
+                  </Field>
+                  <Field label="Password" className="flex-1">
+                    <input
+                      type="password"
+                      value={form.password}
+                      onChange={(e) => set("password", e.target.value)}
+                      className="input"
+                    />
+                  </Field>
+                </div>
+              )}
+
+              {/* Database — combobox for PG/MySQL, plain input for others */}
               <Field label="Database">
-                <input
-                  value={form.database}
-                  onChange={(e) => set("database", e.target.value)}
-                  placeholder="mydb"
-                  className="input"
-                />
+                {supportsDbList ? (
+                  <DatabaseCombobox
+                    value={form.database}
+                    onChange={(v) => set("database", v)}
+                    driver={form.driver}
+                    host={form.host}
+                    port={form.port}
+                    user={form.user}
+                    password={form.password}
+                    sslMode={form.sslMode}
+                    placeholder={form.driver === "postgres" ? "postgres" : "mydb"}
+                  />
+                ) : (
+                  <input
+                    value={form.database}
+                    onChange={(e) => set("database", e.target.value)}
+                    placeholder="mydb"
+                    className="input"
+                  />
+                )}
               </Field>
+
               {form.driver === "mssql" && (
                 <>
                   <Field label="Authentication">
@@ -277,46 +337,6 @@ export default function ConnectionForm({ initial, onClose }: ConnectionFormProps
                   )}
                 </>
               )}
-              {form.driver !== "mssql" && (
-                <div className="flex gap-2">
-                  <Field label="User" className="flex-1">
-                    <input
-                      value={form.user}
-                      onChange={(e) => set("user", e.target.value)}
-                      placeholder="postgres"
-                      className="input"
-                    />
-                  </Field>
-                  <Field label="Password" className="flex-1">
-                    <input
-                      type="password"
-                      value={form.password}
-                      onChange={(e) => set("password", e.target.value)}
-                      className="input"
-                    />
-                  </Field>
-                </div>
-              )}
-              {form.driver === "mssql" && form.mssqlAuthMethod === "sql_server" && (
-                <div className="flex gap-2">
-                  <Field label="User" className="flex-1">
-                    <input
-                      value={form.user}
-                      onChange={(e) => set("user", e.target.value)}
-                      placeholder="sa"
-                      className="input"
-                    />
-                  </Field>
-                  <Field label="Password" className="flex-1">
-                    <input
-                      type="password"
-                      value={form.password}
-                      onChange={(e) => set("password", e.target.value)}
-                      className="input"
-                    />
-                  </Field>
-                </div>
-              )}
             </>
           )}
 
@@ -380,6 +400,158 @@ export default function ConnectionForm({ initial, onClose }: ConnectionFormProps
     </div>
   );
 }
+
+// ── Database combobox ─────────────────────────────────────
+
+interface DatabaseComboboxProps {
+  value: string;
+  onChange: (value: string) => void;
+  driver: Driver;
+  host: string;
+  port: number;
+  user: string;
+  password: string;
+  sslMode: string;
+  placeholder?: string;
+}
+
+function DatabaseCombobox({
+  value,
+  onChange,
+  driver,
+  host,
+  port,
+  user,
+  password,
+  sslMode,
+  placeholder,
+}: DatabaseComboboxProps) {
+  const [databases, setDatabases] = useState<string[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [fetched, setFetched] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // Can we fetch? Need at least host, port, user
+  const canFetch = !!(host && port && user);
+
+  const fetchDatabases = useCallback(async () => {
+    if (!canFetch || loading) return;
+    setLoading(true);
+    try {
+      const dbs = await invoke<string[]>("list_databases", {
+        host,
+        port,
+        user,
+        password,
+        driver,
+        sslMode,
+      });
+      setDatabases(dbs);
+      setFetched(true);
+    } catch {
+      setDatabases([]);
+      setFetched(true);
+    } finally {
+      setLoading(false);
+    }
+  }, [canFetch, host, port, user, password, driver, sslMode, loading]);
+
+  // Reset fetched state when connection params change
+  useEffect(() => {
+    setFetched(false);
+    setDatabases([]);
+  }, [host, port, user, password, driver, sslMode]);
+
+  const handleOpen = () => {
+    if (!canFetch) return;
+    if (!fetched) {
+      fetchDatabases();
+    }
+    setOpen(true);
+  };
+
+  // Close on outside click
+  useEffect(() => {
+    if (!open) return;
+    const onMouseDown = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    return () => document.removeEventListener("mousedown", onMouseDown);
+  }, [open]);
+
+  // Filter databases by current input
+  const filtered = value
+    ? databases.filter((db) => db.toLowerCase().includes(value.toLowerCase()))
+    : databases;
+
+  return (
+    <div ref={containerRef} className="relative">
+      <div className="relative">
+        <input
+          value={value}
+          onChange={(e) => {
+            onChange(e.target.value);
+            if (!open && fetched && databases.length > 0) setOpen(true);
+          }}
+          onFocus={() => {
+            if (fetched && databases.length > 0) setOpen(true);
+          }}
+          placeholder={placeholder}
+          className="input pr-8"
+        />
+        <button
+          type="button"
+          onClick={handleOpen}
+          disabled={!canFetch}
+          className={cn(
+            "absolute right-0 top-0 flex h-full items-center px-2 text-muted-foreground",
+            canFetch ? "hover:text-foreground" : "opacity-30",
+          )}
+          title={canFetch ? "Browse databases" : "Enter host, port, and user first"}
+        >
+          {loading ? (
+            <Loader2 size={12} className="animate-spin" />
+          ) : (
+            <ChevronDown size={12} />
+          )}
+        </button>
+      </div>
+
+      {open && filtered.length > 0 && (
+        <div className="absolute z-50 mt-1 w-full max-h-48 overflow-y-auto rounded-md border border-border bg-background py-1 shadow-lg">
+          {filtered.map((db) => (
+            <button
+              key={db}
+              type="button"
+              onClick={() => {
+                onChange(db);
+                setOpen(false);
+              }}
+              className={cn(
+                "flex w-full items-center px-3 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground",
+                db === value && "bg-primary/10 text-primary font-medium",
+              )}
+            >
+              {db}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {open && fetched && filtered.length === 0 && !loading && (
+        <div className="absolute z-50 mt-1 w-full rounded-md border border-border bg-background py-2 px-3 shadow-lg text-xs text-muted-foreground">
+          {databases.length === 0 ? "Could not retrieve databases" : "No matches"}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Field helper ──────────────────────────────────────────
 
 function Field({
   label,

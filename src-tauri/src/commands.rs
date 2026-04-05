@@ -200,6 +200,65 @@ pub async fn test_connection(
 }
 
 #[tauri::command]
+pub async fn list_databases(
+    host: String,
+    port: u16,
+    user: String,
+    password: String,
+    driver: Driver,
+    ssl_mode: String,
+) -> Result<Vec<String>, String> {
+    match driver {
+        Driver::Postgres => {
+            let ssl = if ssl_mode.is_empty() { "prefer" } else { &ssl_mode };
+            let url = format!(
+                "postgres://{}:{}@{}:{}/postgres?sslmode={}",
+                user, password, host, port, ssl
+            );
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .acquire_timeout(Duration::from_secs(5))
+                .connect(&url)
+                .await
+                .map_err(|e| format!("Connection failed: {e}"))?;
+            let rows = sqlx::query_scalar::<_, String>(
+                "SELECT datname FROM pg_database \
+                 WHERE datistemplate = false AND datallowconn = true \
+                 ORDER BY datname",
+            )
+            .fetch_all(&pool)
+            .await
+            .map_err(|e| format!("Query failed: {e}"))?;
+            pool.close().await;
+            Ok(rows)
+        }
+        Driver::Mysql => {
+            let url = format!(
+                "mysql://{}:{}@{}:{}/information_schema",
+                user, password, host, port
+            );
+            let pool = MySqlPoolOptions::new()
+                .max_connections(1)
+                .acquire_timeout(Duration::from_secs(5))
+                .connect(&url)
+                .await
+                .map_err(|e| format!("Connection failed: {e}"))?;
+            let rows = sqlx::query_scalar::<_, String>(
+                "SELECT schema_name FROM information_schema.schemata \
+                 WHERE schema_name NOT IN ('mysql','information_schema','performance_schema','sys') \
+                 ORDER BY schema_name",
+            )
+            .fetch_all(&pool)
+            .await
+            .map_err(|e| format!("Query failed: {e}"))?;
+            pool.close().await;
+            Ok(rows)
+        }
+        _ => Err("Database listing not supported for this driver".to_string()),
+    }
+}
+
+#[tauri::command]
 pub async fn connect(
     state: State<'_, AppState>,
     id: String,

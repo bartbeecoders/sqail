@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -70,33 +69,6 @@ pub struct ConnectionConfig {
 }
 
 impl ConnectionConfig {
-    pub fn new(name: String, driver: Driver) -> Self {
-        let port = match driver {
-            Driver::Postgres => 5432,
-            Driver::Mysql => 3306,
-            Driver::Sqlite => 0,
-            Driver::Mssql => 1433,
-        };
-        Self {
-            id: Uuid::new_v4().to_string(),
-            name,
-            driver,
-            host: String::new(),
-            port,
-            database: String::new(),
-            user: String::new(),
-            password: String::new(),
-            file_path: String::new(),
-            ssl_mode: String::new(),
-            integrated_security: false,
-            trust_server_certificate: false,
-            mssql_auth_method: MssqlAuthMethod::SqlServer,
-            tenant_id: String::new(),
-            azure_client_id: String::new(),
-            color: String::new(),
-        }
-    }
-
     /// Connection string for sqlx (Postgres, MySQL, SQLite only)
     pub fn connection_string(&self) -> String {
         match self.driver {

@@ -7,7 +7,7 @@ For dev purposes set the following connection details:
 - Password: report
 
 
-[ ] Format document feature
+[x] Format document feature
 Implement the document format feature (Format tool in the menu or Ctrl+Shift+F)
 Formatting a select statement should align the columns and keywords in a readable way.
 Example:
@@ -51,9 +51,9 @@ Add a search bar to filter the results table.
 Create build scripts for each platform: 
 Try to create  single executable files for each platform, with instructions on how to run them.
 Add a README file with instructions on how to build and run the application.
-- [ ] Windows
-- [ ] macOS
-- [ ] Linux
+- [x] Windows
+- [x] macOS
+- [x] Linux
 
 [x] App Versioning
 Set the main version to 0.1.0. ANd set a build nr (yyyymmdd-revision)
@@ -95,3 +95,12 @@ Add a tab for the keyboard shortcuts configuration.
 [x] Save the applicactions state when closing the app, and restore it when opening the app. (maximazed, window size, etc.)
 
 [x] Use mouse wheel scroll + shift to zoom in and out the query editor (larger/smaller font size)
+
+[x] On the editor tabs, implement a context menu with Close all tabs, Close other tabs, etc.
+
+[x] Allow to drag sql object to the tab level, this should open a new tab with the sql object as the content.
+
+### results table improvements
+Clicking on a cell in the results table should select the whole row.
+Allow for the selection of multiple rows.
+Add a context menu to the results table with options to copy.

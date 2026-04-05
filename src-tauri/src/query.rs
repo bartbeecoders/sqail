@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use sqlx::{Column, Row, TypeInfo};
+use sqlx::{Column, Row, TypeInfo, ValueRef};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -32,50 +32,249 @@ pub struct QueryResponse {
     pub error: Option<String>,
 }
 
-fn decode_sqlx_value(row: &sqlx::any::AnyRow, idx: usize) -> serde_json::Value {
-    if let Ok(v) = row.try_get::<Option<bool>, _>(idx) {
-        return match v {
-            Some(b) => serde_json::Value::Bool(b),
-            None => serde_json::Value::Null,
-        };
+// ── PostgreSQL value decoder ───────────────────────────────
+
+fn decode_pg_value(row: &sqlx::postgres::PgRow, idx: usize) -> serde_json::Value {
+    if let Ok(raw) = row.try_get_raw(idx) {
+        if raw.is_null() {
+            return serde_json::Value::Null;
+        }
     }
-    if let Ok(v) = row.try_get::<Option<i64>, _>(idx) {
-        return match v {
-            Some(n) => serde_json::json!(n),
-            None => serde_json::Value::Null,
-        };
+
+    let type_name = row.column(idx).type_info().name();
+
+    let result = match type_name {
+        "BOOL" => row.try_get::<bool, _>(idx).ok().map(|v| serde_json::json!(v)),
+        "INT2" => row.try_get::<i16, _>(idx).ok().map(|v| serde_json::json!(v)),
+        "INT4" | "OID" => row.try_get::<i32, _>(idx).ok().map(|v| serde_json::json!(v)),
+        "INT8" => row.try_get::<i64, _>(idx).ok().map(|v| serde_json::json!(v)),
+        "FLOAT4" => row.try_get::<f32, _>(idx).ok().map(|v| serde_json::json!(v)),
+        "FLOAT8" => row.try_get::<f64, _>(idx).ok().map(|v| serde_json::json!(v)),
+        "NUMERIC" => row
+            .try_get::<sqlx::types::BigDecimal, _>(idx)
+            .ok()
+            .map(|v| {
+                let s = v.to_string();
+                s.parse::<f64>()
+                    .map(|f| serde_json::json!(f))
+                    .unwrap_or(serde_json::Value::String(s))
+            }),
+        "TEXT" | "VARCHAR" | "CHAR" | "BPCHAR" | "NAME" | "CITEXT" | "UNKNOWN" | "XML" => row
+            .try_get::<String, _>(idx)
+            .ok()
+            .map(serde_json::Value::String),
+        "UUID" => row
+            .try_get::<sqlx::types::Uuid, _>(idx)
+            .ok()
+            .map(|v| serde_json::Value::String(v.to_string())),
+        "JSON" | "JSONB" => row.try_get::<serde_json::Value, _>(idx).ok(),
+        "TIMESTAMP" => row
+            .try_get::<chrono::NaiveDateTime, _>(idx)
+            .ok()
+            .map(|v| serde_json::Value::String(v.to_string())),
+        "TIMESTAMPTZ" => row
+            .try_get::<chrono::DateTime<chrono::Utc>, _>(idx)
+            .ok()
+            .map(|v| serde_json::Value::String(v.to_rfc3339())),
+        "DATE" => row
+            .try_get::<chrono::NaiveDate, _>(idx)
+            .ok()
+            .map(|v| serde_json::Value::String(v.to_string())),
+        "TIME" => row
+            .try_get::<chrono::NaiveTime, _>(idx)
+            .ok()
+            .map(|v| serde_json::Value::String(v.to_string())),
+        "INTERVAL" => row
+            .try_get::<sqlx::postgres::types::PgInterval, _>(idx)
+            .ok()
+            .map(|iv| {
+                let mut parts = Vec::new();
+                if iv.months != 0 {
+                    let years = iv.months / 12;
+                    let mos = iv.months % 12;
+                    if years != 0 {
+                        parts.push(format!("{years} year(s)"));
+                    }
+                    if mos != 0 {
+                        parts.push(format!("{mos} mon(s)"));
+                    }
+                }
+                if iv.days != 0 {
+                    parts.push(format!("{} day(s)", iv.days));
+                }
+                if iv.microseconds != 0 {
+                    let total_secs = iv.microseconds / 1_000_000;
+                    let us = iv.microseconds % 1_000_000;
+                    let h = total_secs / 3600;
+                    let m = (total_secs % 3600) / 60;
+                    let s = total_secs % 60;
+                    if us == 0 {
+                        parts.push(format!("{h:02}:{m:02}:{s:02}"));
+                    } else {
+                        parts.push(format!("{h:02}:{m:02}:{s:02}.{us:06}"));
+                    }
+                }
+                serde_json::Value::String(if parts.is_empty() {
+                    "00:00:00".to_string()
+                } else {
+                    parts.join(" ")
+                })
+            }),
+        "BYTEA" => row
+            .try_get::<Vec<u8>, _>(idx)
+            .ok()
+            .map(|v| serde_json::Value::String(format!("0x{}", hex::encode(v)))),
+        t if t.ends_with("[]") => {
+            // Try common array types
+            if let Ok(v) = row.try_get::<Vec<bool>, _>(idx) {
+                return serde_json::json!(v);
+            }
+            if let Ok(v) = row.try_get::<Vec<i32>, _>(idx) {
+                return serde_json::json!(v);
+            }
+            if let Ok(v) = row.try_get::<Vec<i64>, _>(idx) {
+                return serde_json::json!(v);
+            }
+            if let Ok(v) = row.try_get::<Vec<f64>, _>(idx) {
+                return serde_json::json!(v);
+            }
+            if let Ok(v) = row.try_get::<Vec<String>, _>(idx) {
+                return serde_json::json!(v);
+            }
+            Some(serde_json::Value::String(format!("<{type_name}>")))
+        }
+        _ => {
+            // Fallback: try String
+            row.try_get::<String, _>(idx)
+                .ok()
+                .map(serde_json::Value::String)
+        }
+    };
+
+    result.unwrap_or(serde_json::Value::Null)
+}
+
+// ── MySQL value decoder ────────────────────────────────────
+
+fn decode_mysql_value(row: &sqlx::mysql::MySqlRow, idx: usize) -> serde_json::Value {
+    if let Ok(raw) = row.try_get_raw(idx) {
+        if raw.is_null() {
+            return serde_json::Value::Null;
+        }
     }
-    if let Ok(v) = row.try_get::<Option<i32>, _>(idx) {
-        return match v {
-            Some(n) => serde_json::json!(n),
-            None => serde_json::Value::Null,
-        };
+
+    let type_name = row.column(idx).type_info().name();
+
+    let result = match type_name {
+        "BOOLEAN" => row.try_get::<bool, _>(idx).ok().map(|v| serde_json::json!(v)),
+        "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT" => {
+            row.try_get::<i32, _>(idx).ok().map(|v| serde_json::json!(v))
+        }
+        "BIGINT" => row.try_get::<i64, _>(idx).ok().map(|v| serde_json::json!(v)),
+        "TINYINT UNSIGNED" | "SMALLINT UNSIGNED" | "MEDIUMINT UNSIGNED" | "INT UNSIGNED" => {
+            row.try_get::<u32, _>(idx).ok().map(|v| serde_json::json!(v))
+        }
+        "BIGINT UNSIGNED" => row.try_get::<u64, _>(idx).ok().map(|v| serde_json::json!(v)),
+        "FLOAT" => row.try_get::<f32, _>(idx).ok().map(|v| serde_json::json!(v)),
+        "DOUBLE" => row.try_get::<f64, _>(idx).ok().map(|v| serde_json::json!(v)),
+        "DECIMAL" => row
+            .try_get::<sqlx::types::BigDecimal, _>(idx)
+            .ok()
+            .map(|v| {
+                let s = v.to_string();
+                s.parse::<f64>()
+                    .map(|f| serde_json::json!(f))
+                    .unwrap_or(serde_json::Value::String(s))
+            }),
+        "DATE" => row
+            .try_get::<chrono::NaiveDate, _>(idx)
+            .ok()
+            .map(|v| serde_json::Value::String(v.to_string())),
+        "TIME" => row
+            .try_get::<chrono::NaiveTime, _>(idx)
+            .ok()
+            .map(|v| serde_json::Value::String(v.to_string())),
+        "DATETIME" | "TIMESTAMP" => row
+            .try_get::<chrono::NaiveDateTime, _>(idx)
+            .ok()
+            .map(|v| serde_json::Value::String(v.to_string())),
+        "JSON" => row.try_get::<serde_json::Value, _>(idx).ok(),
+        "BLOB" | "BINARY" | "VARBINARY" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB" => row
+            .try_get::<Vec<u8>, _>(idx)
+            .ok()
+            .map(|v| serde_json::Value::String(format!("0x{}", hex::encode(v)))),
+        _ => {
+            // Most other types (TEXT, VARCHAR, CHAR, ENUM, SET, etc.) decode as String
+            row.try_get::<String, _>(idx)
+                .ok()
+                .map(serde_json::Value::String)
+        }
+    };
+
+    result.unwrap_or(serde_json::Value::Null)
+}
+
+// ── SQLite value decoder ───────────────────────────────────
+
+fn decode_sqlite_value(row: &sqlx::sqlite::SqliteRow, idx: usize) -> serde_json::Value {
+    if let Ok(raw) = row.try_get_raw(idx) {
+        if raw.is_null() {
+            return serde_json::Value::Null;
+        }
     }
-    if let Ok(v) = row.try_get::<Option<f64>, _>(idx) {
-        return match v {
-            Some(n) => serde_json::json!(n),
-            None => serde_json::Value::Null,
-        };
+
+    let type_name = row.column(idx).type_info().name();
+
+    // Use declared type to guide decoding
+    match type_name {
+        "BOOLEAN" => {
+            if let Ok(v) = row.try_get::<bool, _>(idx) {
+                return serde_json::json!(v);
+            }
+        }
+        "INTEGER" | "INT" | "BIGINT" | "SMALLINT" | "TINYINT" | "MEDIUMINT" => {
+            if let Ok(v) = row.try_get::<i64, _>(idx) {
+                return serde_json::json!(v);
+            }
+        }
+        "REAL" | "FLOAT" | "DOUBLE" => {
+            if let Ok(v) = row.try_get::<f64, _>(idx) {
+                return serde_json::json!(v);
+            }
+        }
+        "TEXT" | "VARCHAR" | "CHAR" | "CLOB" => {
+            if let Ok(v) = row.try_get::<String, _>(idx) {
+                return serde_json::Value::String(v);
+            }
+        }
+        "BLOB" => {
+            if let Ok(v) = row.try_get::<Vec<u8>, _>(idx) {
+                return serde_json::Value::String(format!("0x{}", hex::encode(v)));
+            }
+        }
+        _ => {}
     }
-    if let Ok(v) = row.try_get::<Option<String>, _>(idx) {
-        return match v {
-            Some(s) => serde_json::Value::String(s),
-            None => serde_json::Value::Null,
-        };
+
+    // Fallback cascade for untyped or ambiguous columns
+    if let Ok(v) = row.try_get::<i64, _>(idx) {
+        return serde_json::json!(v);
     }
-    if let Ok(v) = row.try_get::<Option<Vec<u8>>, _>(idx) {
-        return match v {
-            Some(bytes) => serde_json::Value::String(format!("0x{}", hex::encode(bytes))),
-            None => serde_json::Value::Null,
-        };
+    if let Ok(v) = row.try_get::<f64, _>(idx) {
+        return serde_json::json!(v);
+    }
+    if let Ok(v) = row.try_get::<String, _>(idx) {
+        return serde_json::Value::String(v);
+    }
+    if let Ok(v) = row.try_get::<Vec<u8>, _>(idx) {
+        return serde_json::Value::String(format!("0x{}", hex::encode(v)));
     }
     serde_json::Value::Null
 }
 
+// ── Tiberius (MSSQL) value decoder ─────────────────────────
+
 /// Convert days since an epoch year-01-01 into (year, month, day).
 fn days_to_ymd(days: i64, epoch_year: i32) -> (i32, u32, u32) {
-    // Convert to a civil date using a simple algorithm.
-    // Shift to epoch 0000-03-01 for easier leap year math.
     let epoch_jdn = jdn(epoch_year, 1, 1);
     let target_jdn = epoch_jdn + days;
     jdn_to_ymd(target_jdn)
@@ -115,14 +314,16 @@ fn format_time(total_secs: u64, nanos: u64) -> String {
     if nanos == 0 {
         format!("{h:02}:{m:02}:{s:02}")
     } else {
-        // Trim trailing zeros from fractional part
         let frac = format!("{:09}", nanos);
         let trimmed = frac.trim_end_matches('0');
         format!("{h:02}:{m:02}:{s:02}.{trimmed}")
     }
 }
 
-fn decode_tiberius_value(col: &tiberius::Column, data: &tiberius::ColumnData<'_>) -> serde_json::Value {
+fn decode_tiberius_value(
+    col: &tiberius::Column,
+    data: &tiberius::ColumnData<'_>,
+) -> serde_json::Value {
     use tiberius::ColumnData;
     let _ = col;
     match data {
@@ -181,7 +382,6 @@ fn decode_tiberius_value(col: &tiberius::Column, data: &tiberius::ColumnData<'_>
             Some(xml) => serde_json::Value::String(xml.to_string()),
             None => serde_json::Value::Null,
         },
-        // datetime: days since 1900-01-01, seconds_fragments in 1/300ths of a second
         ColumnData::DateTime(v) => match v {
             Some(dt) => {
                 let (y, mo, d) = days_to_ymd(dt.days() as i64, 1900);
@@ -193,7 +393,6 @@ fn decode_tiberius_value(col: &tiberius::Column, data: &tiberius::ColumnData<'_>
             }
             None => serde_json::Value::Null,
         },
-        // smalldatetime: days since 1900-01-01, seconds_fragments = minutes since midnight
         ColumnData::SmallDateTime(v) => match v {
             Some(dt) => {
                 let (y, mo, d) = days_to_ymd(dt.days() as i64, 1900);
@@ -204,7 +403,6 @@ fn decode_tiberius_value(col: &tiberius::Column, data: &tiberius::ColumnData<'_>
             }
             None => serde_json::Value::Null,
         },
-        // date (tds73): days since 0001-01-01
         ColumnData::Date(v) => match v {
             Some(dt) => {
                 let (y, mo, d) = days_to_ymd(dt.days() as i64, 1);
@@ -212,7 +410,6 @@ fn decode_tiberius_value(col: &tiberius::Column, data: &tiberius::ColumnData<'_>
             }
             None => serde_json::Value::Null,
         },
-        // time (tds73): increments of 10^-scale seconds
         ColumnData::Time(v) => match v {
             Some(t) => {
                 let divisor = 10u64.pow(t.scale() as u32);
@@ -223,7 +420,6 @@ fn decode_tiberius_value(col: &tiberius::Column, data: &tiberius::ColumnData<'_>
             }
             None => serde_json::Value::Null,
         },
-        // datetime2 (tds73): Date + Time
         ColumnData::DateTime2(v) => match v {
             Some(dt2) => {
                 let (y, mo, d) = days_to_ymd(dt2.date().days() as i64, 1);
@@ -237,7 +433,6 @@ fn decode_tiberius_value(col: &tiberius::Column, data: &tiberius::ColumnData<'_>
             }
             None => serde_json::Value::Null,
         },
-        // datetimeoffset (tds73): DateTime2 + offset in minutes
         ColumnData::DateTimeOffset(v) => match v {
             Some(dto) => {
                 let dt2 = dto.datetime2();
@@ -253,12 +448,16 @@ fn decode_tiberius_value(col: &tiberius::Column, data: &tiberius::ColumnData<'_>
                 let abs_off = off.unsigned_abs() as u32;
                 let oh = abs_off / 60;
                 let om = abs_off % 60;
-                serde_json::Value::String(format!("{y:04}-{mo:02}-{d:02} {time} {sign}{oh:02}:{om:02}"))
+                serde_json::Value::String(format!(
+                    "{y:04}-{mo:02}-{d:02} {time} {sign}{oh:02}:{om:02}"
+                ))
             }
             None => serde_json::Value::Null,
         },
     }
 }
+
+// ── Statement helpers ──────────────────────────────────────
 
 fn is_mutation(sql: &str) -> bool {
     let trimmed = sql.trim_start().to_uppercase();
@@ -351,85 +550,98 @@ fn split_statements(sql: &str) -> Vec<String> {
     stmts
 }
 
-// ── sqlx execution ──────────────────────────────────────────
+// ── Native execution functions ─────────────────────────────
 
-async fn run_sqlx(pool: Arc<sqlx::AnyPool>, sql: &str) -> QueryResponse {
-    let total_start = Instant::now();
-    let statements = split_statements(sql);
-    let mut results = Vec::new();
-    let mut error = None;
+macro_rules! impl_run_native {
+    ($fn_name:ident, $pool_type:ty, $decode_fn:ident) => {
+        async fn $fn_name(pool: Arc<$pool_type>, sql: &str) -> QueryResponse {
+            let total_start = Instant::now();
+            let statements = split_statements(sql);
+            let mut results = Vec::new();
+            let mut error = None;
 
-    for (idx, stmt) in statements.iter().enumerate() {
-        let start = Instant::now();
+            for (idx, stmt) in statements.iter().enumerate() {
+                let start = Instant::now();
 
-        if is_mutation(stmt) {
-            match sqlx::query(stmt).execute(pool.as_ref()).await {
-                Ok(result) => {
-                    results.push(QueryResult {
-                        columns: Vec::new(),
-                        rows: Vec::new(),
-                        row_count: 0,
-                        affected_rows: Some(result.rows_affected()),
-                        execution_time_ms: start.elapsed().as_millis() as u64,
-                        is_mutation: true,
-                        statement_index: idx,
-                    });
-                }
-                Err(e) => {
-                    error = Some(format!("Statement {}: {e}", idx + 1));
-                    break;
+                if is_mutation(stmt) {
+                    match sqlx::query(stmt).execute(pool.as_ref()).await {
+                        Ok(result) => {
+                            results.push(QueryResult {
+                                columns: Vec::new(),
+                                rows: Vec::new(),
+                                row_count: 0,
+                                affected_rows: Some(result.rows_affected()),
+                                execution_time_ms: start.elapsed().as_millis() as u64,
+                                is_mutation: true,
+                                statement_index: idx,
+                            });
+                        }
+                        Err(e) => {
+                            error = Some(format!("Statement {}: {e}", idx + 1));
+                            break;
+                        }
+                    }
+                } else {
+                    match sqlx::query(stmt).fetch_all(pool.as_ref()).await {
+                        Ok(rows) => {
+                            let elapsed = start.elapsed().as_millis() as u64;
+                            let columns: Vec<QueryColumn> = if !rows.is_empty() {
+                                rows[0]
+                                    .columns()
+                                    .iter()
+                                    .map(|col| QueryColumn {
+                                        name: col.name().to_string(),
+                                        type_name: col.type_info().name().to_string(),
+                                    })
+                                    .collect()
+                            } else {
+                                Vec::new()
+                            };
+                            let col_count = columns.len();
+                            let data: Vec<Vec<serde_json::Value>> = rows
+                                .iter()
+                                .map(|row| {
+                                    (0..col_count).map(|i| $decode_fn(row, i)).collect()
+                                })
+                                .collect();
+                            let row_count = data.len();
+                            results.push(QueryResult {
+                                columns,
+                                rows: data,
+                                row_count,
+                                affected_rows: None,
+                                execution_time_ms: elapsed,
+                                is_mutation: false,
+                                statement_index: idx,
+                            });
+                        }
+                        Err(e) => {
+                            error = Some(format!("Statement {}: {e}", idx + 1));
+                            break;
+                        }
+                    }
                 }
             }
-        } else {
-            match sqlx::query(stmt).fetch_all(pool.as_ref()).await {
-                Ok(rows) => {
-                    let elapsed = start.elapsed().as_millis() as u64;
-                    let columns: Vec<QueryColumn> = if !rows.is_empty() {
-                        rows[0]
-                            .columns()
-                            .iter()
-                            .map(|col| QueryColumn {
-                                name: col.name().to_string(),
-                                type_name: col.type_info().name().to_string(),
-                            })
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
-                    let col_count = columns.len();
-                    let data: Vec<Vec<serde_json::Value>> = rows
-                        .iter()
-                        .map(|row| (0..col_count).map(|i| decode_sqlx_value(row, i)).collect())
-                        .collect();
-                    let row_count = data.len();
-                    results.push(QueryResult {
-                        columns,
-                        rows: data,
-                        row_count,
-                        affected_rows: None,
-                        execution_time_ms: elapsed,
-                        is_mutation: false,
-                        statement_index: idx,
-                    });
-                }
-                Err(e) => {
-                    error = Some(format!("Statement {}: {e}", idx + 1));
-                    break;
-                }
+
+            QueryResponse {
+                results,
+                total_time_ms: total_start.elapsed().as_millis() as u64,
+                error,
             }
         }
-    }
-
-    QueryResponse {
-        results,
-        total_time_ms: total_start.elapsed().as_millis() as u64,
-        error,
-    }
+    };
 }
+
+impl_run_native!(run_pg, sqlx::PgPool, decode_pg_value);
+impl_run_native!(run_mysql, sqlx::MySqlPool, decode_mysql_value);
+impl_run_native!(run_sqlite, sqlx::SqlitePool, decode_sqlite_value);
 
 // ── tiberius (MSSQL) execution ──────────────────────────────
 
-async fn run_mssql(pool: Arc<bb8::Pool<bb8_tiberius::ConnectionManager>>, sql: &str) -> QueryResponse {
+async fn run_mssql(
+    pool: Arc<bb8::Pool<bb8_tiberius::ConnectionManager>>,
+    sql: &str,
+) -> QueryResponse {
     let total_start = Instant::now();
     let statements = split_statements(sql);
     let mut results = Vec::new();
@@ -470,48 +682,45 @@ async fn run_mssql(pool: Arc<bb8::Pool<bb8_tiberius::ConnectionManager>>, sql: &
             }
         } else {
             match conn.simple_query(stmt.as_str()).await {
-                Ok(stream) => {
-                    match stream.into_first_result().await {
-                        Ok(rows) => {
-                            let elapsed = start.elapsed().as_millis() as u64;
-                            let columns: Vec<QueryColumn> = if !rows.is_empty() {
-                                rows[0]
-                                    .columns()
-                                    .iter()
-                                    .map(|col| QueryColumn {
-                                        name: col.name().to_string(),
-                                        type_name: format!("{:?}", col.column_type()),
-                                    })
-                                    .collect()
-                            } else {
-                                Vec::new()
-                            };
-                            let _col_count = columns.len();
-                            let data: Vec<Vec<serde_json::Value>> = rows
+                Ok(stream) => match stream.into_first_result().await {
+                    Ok(rows) => {
+                        let elapsed = start.elapsed().as_millis() as u64;
+                        let columns: Vec<QueryColumn> = if !rows.is_empty() {
+                            rows[0]
+                                .columns()
                                 .iter()
-                                .map(|row| {
-                                    row.cells()
-                                        .map(|(col, cell)| decode_tiberius_value(col, cell))
-                                        .collect()
+                                .map(|col| QueryColumn {
+                                    name: col.name().to_string(),
+                                    type_name: format!("{:?}", col.column_type()),
                                 })
-                                .collect();
-                            let row_count = data.len();
-                            results.push(QueryResult {
-                                columns,
-                                rows: data,
-                                row_count,
-                                affected_rows: None,
-                                execution_time_ms: elapsed,
-                                is_mutation: false,
-                                statement_index: idx,
-                            });
-                        }
-                        Err(e) => {
-                            error = Some(format!("Statement {}: {e}", idx + 1));
-                            break;
-                        }
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
+                        let data: Vec<Vec<serde_json::Value>> = rows
+                            .iter()
+                            .map(|row| {
+                                row.cells()
+                                    .map(|(col, cell)| decode_tiberius_value(col, cell))
+                                    .collect()
+                            })
+                            .collect();
+                        let row_count = data.len();
+                        results.push(QueryResult {
+                            columns,
+                            rows: data,
+                            row_count,
+                            affected_rows: None,
+                            execution_time_ms: elapsed,
+                            is_mutation: false,
+                            statement_index: idx,
+                        });
                     }
-                }
+                    Err(e) => {
+                        error = Some(format!("Statement {}: {e}", idx + 1));
+                        break;
+                    }
+                },
                 Err(e) => {
                     error = Some(format!("Statement {}: {e}", idx + 1));
                     break;
@@ -531,7 +740,9 @@ async fn run_mssql(pool: Arc<bb8::Pool<bb8_tiberius::ConnectionManager>>, sql: &
 
 pub async fn run_query(pool: DbPool, sql: &str) -> QueryResponse {
     match pool {
-        DbPool::Sqlx(p) => run_sqlx(p, sql).await,
+        DbPool::Postgres(p) => run_pg(p, sql).await,
+        DbPool::Mysql(p) => run_mysql(p, sql).await,
+        DbPool::Sqlite(p) => run_sqlite(p, sql).await,
         DbPool::Mssql(p) => run_mssql(p, sql).await,
     }
 }

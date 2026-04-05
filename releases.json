@@ -1,5 +1,34 @@
 [
   {
+    "version": "0.3.2",
+    "sections": [
+      {
+        "title": "Database Connections",
+        "items": [
+          "Full native PostgreSQL support: replaced sqlx Any driver with native PgPool, MySqlPool, and SqlitePool for correct handling of all PostgreSQL types (uuid, jsonb, timestamp, numeric, interval, arrays, etc.)",
+          "Fixed schema introspection failing on PostgreSQL with 'Any driver does not support the Postgres type PgTypeInfo(Name)' error",
+          "Fixed swapped primary key / ordinal position columns in PostgreSQL column listing"
+        ]
+      },
+      {
+        "title": "Editor Tabs",
+        "items": [
+          "Right-click context menu on tabs: Close, Close other tabs, Close tabs to the right, Close all tabs, Rename",
+          "Drag a table from the schema tree onto the tab bar to open a new tab with a SELECT statement"
+        ]
+      },
+      {
+        "title": "Query Results",
+        "items": [
+          "Click a row to select it, Ctrl/Cmd+click for multi-select, Shift+click for range select",
+          "Selected row count shown in the toolbar",
+          "Right-click context menu: Copy (tab-separated), Copy as CSV, Copy as JSON, Copy as Markdown",
+          "Keyboard shortcuts: Ctrl+C to copy selected rows, Ctrl+A to select all"
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.3.1",
     "sections": [
       {

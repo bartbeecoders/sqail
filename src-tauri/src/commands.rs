@@ -1,7 +1,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use sqlx::any::AnyPoolOptions;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::mysql::MySqlPoolOptions;
+use sqlx::sqlite::SqlitePoolOptions;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::net::TcpStream;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
@@ -137,10 +139,47 @@ pub async fn test_connection(
                 Err("No result from test query".to_string())
             }
         }
-        _ => {
-            sqlx::any::install_default_drivers();
+        Driver::Postgres => {
             let url = config.connection_string();
-            let pool = AnyPoolOptions::new()
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .acquire_timeout(Duration::from_secs(5))
+                .connect(&url)
+                .await
+                .map_err(|e| format!("Connection failed: {e}"))?;
+            let row: (i32,) = sqlx::query_as("SELECT 1")
+                .fetch_one(&pool)
+                .await
+                .map_err(|e| format!("Query failed: {e}"))?;
+            pool.close().await;
+            if row.0 == 1 {
+                Ok("Connection successful".to_string())
+            } else {
+                Err("Unexpected result from test query".to_string())
+            }
+        }
+        Driver::Mysql => {
+            let url = config.connection_string();
+            let pool = MySqlPoolOptions::new()
+                .max_connections(1)
+                .acquire_timeout(Duration::from_secs(5))
+                .connect(&url)
+                .await
+                .map_err(|e| format!("Connection failed: {e}"))?;
+            let row: (i32,) = sqlx::query_as("SELECT 1")
+                .fetch_one(&pool)
+                .await
+                .map_err(|e| format!("Query failed: {e}"))?;
+            pool.close().await;
+            if row.0 == 1 {
+                Ok("Connection successful".to_string())
+            } else {
+                Err("Unexpected result from test query".to_string())
+            }
+        }
+        Driver::Sqlite => {
+            let url = config.connection_string();
+            let pool = SqlitePoolOptions::new()
                 .max_connections(1)
                 .acquire_timeout(Duration::from_secs(5))
                 .connect(&url)
@@ -193,16 +232,35 @@ pub async fn connect(
                 .map_err(|e| format!("MSSQL pool creation failed: {e}"))?;
             DbPool::Mssql(Arc::new(pool))
         }
-        _ => {
-            sqlx::any::install_default_drivers();
+        Driver::Postgres => {
             let url = config.connection_string();
-            let pool = AnyPoolOptions::new()
+            let pool = PgPoolOptions::new()
                 .max_connections(5)
                 .acquire_timeout(Duration::from_secs(10))
                 .connect(&url)
                 .await
                 .map_err(|e| format!("Connection failed: {e}"))?;
-            DbPool::Sqlx(Arc::new(pool))
+            DbPool::Postgres(Arc::new(pool))
+        }
+        Driver::Mysql => {
+            let url = config.connection_string();
+            let pool = MySqlPoolOptions::new()
+                .max_connections(5)
+                .acquire_timeout(Duration::from_secs(10))
+                .connect(&url)
+                .await
+                .map_err(|e| format!("Connection failed: {e}"))?;
+            DbPool::Mysql(Arc::new(pool))
+        }
+        Driver::Sqlite => {
+            let url = config.connection_string();
+            let pool = SqlitePoolOptions::new()
+                .max_connections(5)
+                .acquire_timeout(Duration::from_secs(10))
+                .connect(&url)
+                .await
+                .map_err(|e| format!("Connection failed: {e}"))?;
+            DbPool::Sqlite(Arc::new(pool))
         }
     };
 
@@ -332,6 +390,29 @@ pub async fn list_routines(
 ) -> Result<Vec<RoutineInfo>, String> {
     let (pool, driver) = get_pool_and_driver(&state, &connection_id).await?;
     schema::list_routines(pool, &driver, &schema_name).await
+}
+
+#[tauri::command]
+pub async fn get_view_definition(
+    state: State<'_, AppState>,
+    connection_id: String,
+    schema_name: String,
+    view_name: String,
+) -> Result<String, String> {
+    let (pool, driver) = get_pool_and_driver(&state, &connection_id).await?;
+    schema::get_view_definition(pool, &driver, &schema_name, &view_name).await
+}
+
+#[tauri::command]
+pub async fn get_routine_definition(
+    state: State<'_, AppState>,
+    connection_id: String,
+    schema_name: String,
+    routine_name: String,
+    routine_type: String,
+) -> Result<String, String> {
+    let (pool, driver) = get_pool_and_driver(&state, &connection_id).await?;
+    schema::get_routine_definition(pool, &driver, &schema_name, &routine_name, &routine_type).await
 }
 
 // ── Entra ID auth commands ────────────────────────────────
@@ -790,13 +871,6 @@ struct MetadataProgressPayload {
 struct MetadataDonePayload {
     connection_id: String,
     total_generated: usize,
-}
-
-#[derive(serde::Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-struct MetadataErrorPayload {
-    connection_id: String,
-    error: String,
 }
 
 fn build_object_prompt(

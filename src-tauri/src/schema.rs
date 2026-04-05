@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use sqlx::{AnyPool, Row};
+use sqlx::Row;
 use std::sync::Arc;
 
 use crate::db::connections::Driver;
@@ -48,7 +48,7 @@ pub struct RoutineInfo {
 
 // ── PostgreSQL ──────────────────────────────────────────────
 
-async fn pg_schemas(pool: &AnyPool) -> Result<Vec<SchemaInfo>, String> {
+async fn pg_schemas(pool: &sqlx::PgPool) -> Result<Vec<SchemaInfo>, String> {
     let rows = sqlx::query(
         "SELECT schema_name FROM information_schema.schemata \
          WHERE schema_name NOT IN ('pg_catalog','information_schema','pg_toast') \
@@ -66,7 +66,7 @@ async fn pg_schemas(pool: &AnyPool) -> Result<Vec<SchemaInfo>, String> {
         .collect())
 }
 
-async fn pg_tables(pool: &AnyPool, schema: &str) -> Result<Vec<TableInfo>, String> {
+async fn pg_tables(pool: &sqlx::PgPool, schema: &str) -> Result<Vec<TableInfo>, String> {
     let rows = sqlx::query(
         "SELECT table_name, table_type FROM information_schema.tables \
          WHERE table_schema = $1 ORDER BY table_name",
@@ -93,7 +93,7 @@ async fn pg_tables(pool: &AnyPool, schema: &str) -> Result<Vec<TableInfo>, Strin
         .collect())
 }
 
-async fn pg_columns(pool: &AnyPool, schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
+async fn pg_columns(pool: &sqlx::PgPool, schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
     let rows = sqlx::query(
         "SELECT c.column_name, c.data_type, c.is_nullable, c.column_default, c.ordinal_position, \
          CASE WHEN tc.constraint_type = 'PRIMARY KEY' THEN true ELSE false END as is_pk \
@@ -118,13 +118,13 @@ async fn pg_columns(pool: &AnyPool, schema: &str, table: &str) -> Result<Vec<Col
             data_type: r.get(1),
             is_nullable: r.get::<String, _>(2) == "YES",
             column_default: r.get(3),
-            is_primary_key: r.get::<bool, _>(4),
-            ordinal_position: r.get::<i32, _>(5),
+            ordinal_position: r.get::<i32, _>(4),
+            is_primary_key: r.get::<bool, _>(5),
         })
         .collect())
 }
 
-async fn pg_indexes(pool: &AnyPool, schema: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
+async fn pg_indexes(pool: &sqlx::PgPool, schema: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
     let rows = sqlx::query(
         "SELECT i.relname, ix.indisunique, array_agg(a.attname ORDER BY k.n) \
          FROM pg_index ix \
@@ -146,13 +146,7 @@ async fn pg_indexes(pool: &AnyPool, schema: &str, table: &str) -> Result<Vec<Ind
     Ok(rows
         .iter()
         .map(|r| {
-            let cols_str: String = r.get(2);
-            let columns: Vec<String> = cols_str
-                .trim_start_matches('{')
-                .trim_end_matches('}')
-                .split(',')
-                .map(|s| s.to_string())
-                .collect();
+            let columns: Vec<String> = r.get(2);
             IndexInfo {
                 name: r.get(0),
                 is_unique: r.get(1),
@@ -162,7 +156,7 @@ async fn pg_indexes(pool: &AnyPool, schema: &str, table: &str) -> Result<Vec<Ind
         .collect())
 }
 
-async fn pg_routines(pool: &AnyPool, schema: &str) -> Result<Vec<RoutineInfo>, String> {
+async fn pg_routines(pool: &sqlx::PgPool, schema: &str) -> Result<Vec<RoutineInfo>, String> {
     let rows = sqlx::query(
         "SELECT routine_name, routine_type FROM information_schema.routines \
          WHERE routine_schema = $1 \
@@ -192,7 +186,7 @@ async fn pg_routines(pool: &AnyPool, schema: &str) -> Result<Vec<RoutineInfo>, S
 
 // ── MySQL ───────────────────────────────────────────────────
 
-async fn mysql_schemas(pool: &AnyPool) -> Result<Vec<SchemaInfo>, String> {
+async fn mysql_schemas(pool: &sqlx::MySqlPool) -> Result<Vec<SchemaInfo>, String> {
     let rows = sqlx::query(
         "SELECT schema_name FROM information_schema.schemata \
          WHERE schema_name NOT IN ('mysql','information_schema','performance_schema','sys') \
@@ -210,7 +204,7 @@ async fn mysql_schemas(pool: &AnyPool) -> Result<Vec<SchemaInfo>, String> {
         .collect())
 }
 
-async fn mysql_tables(pool: &AnyPool, schema: &str) -> Result<Vec<TableInfo>, String> {
+async fn mysql_tables(pool: &sqlx::MySqlPool, schema: &str) -> Result<Vec<TableInfo>, String> {
     let rows = sqlx::query(
         "SELECT table_name, table_type FROM information_schema.tables \
          WHERE table_schema = ? ORDER BY table_name",
@@ -238,7 +232,7 @@ async fn mysql_tables(pool: &AnyPool, schema: &str) -> Result<Vec<TableInfo>, St
 }
 
 async fn mysql_columns(
-    pool: &AnyPool,
+    pool: &sqlx::MySqlPool,
     schema: &str,
     table: &str,
 ) -> Result<Vec<ColumnInfo>, String> {
@@ -268,7 +262,7 @@ async fn mysql_columns(
 }
 
 async fn mysql_indexes(
-    pool: &AnyPool,
+    pool: &sqlx::MySqlPool,
     schema: &str,
     table: &str,
 ) -> Result<Vec<IndexInfo>, String> {
@@ -298,7 +292,7 @@ async fn mysql_indexes(
         .collect())
 }
 
-async fn mysql_routines(pool: &AnyPool, schema: &str) -> Result<Vec<RoutineInfo>, String> {
+async fn mysql_routines(pool: &sqlx::MySqlPool, schema: &str) -> Result<Vec<RoutineInfo>, String> {
     let rows = sqlx::query(
         "SELECT routine_name, routine_type FROM information_schema.routines \
          WHERE routine_schema = ? \
@@ -328,13 +322,13 @@ async fn mysql_routines(pool: &AnyPool, schema: &str) -> Result<Vec<RoutineInfo>
 
 // ── SQLite ──────────────────────────────────────────────────
 
-async fn sqlite_schemas(_pool: &AnyPool) -> Result<Vec<SchemaInfo>, String> {
+async fn sqlite_schemas(_pool: &sqlx::SqlitePool) -> Result<Vec<SchemaInfo>, String> {
     Ok(vec![SchemaInfo {
         name: "main".to_string(),
     }])
 }
 
-async fn sqlite_tables(pool: &AnyPool, _schema: &str) -> Result<Vec<TableInfo>, String> {
+async fn sqlite_tables(pool: &sqlx::SqlitePool, _schema: &str) -> Result<Vec<TableInfo>, String> {
     let rows = sqlx::query(
         "SELECT name, type FROM sqlite_master \
          WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' \
@@ -355,7 +349,7 @@ async fn sqlite_tables(pool: &AnyPool, _schema: &str) -> Result<Vec<TableInfo>, 
 }
 
 async fn sqlite_columns(
-    pool: &AnyPool,
+    pool: &sqlx::SqlitePool,
     _schema: &str,
     table: &str,
 ) -> Result<Vec<ColumnInfo>, String> {
@@ -380,7 +374,7 @@ async fn sqlite_columns(
 }
 
 async fn sqlite_indexes(
-    pool: &AnyPool,
+    pool: &sqlx::SqlitePool,
     _schema: &str,
     table: &str,
 ) -> Result<Vec<IndexInfo>, String> {
@@ -411,7 +405,7 @@ async fn sqlite_indexes(
     Ok(result)
 }
 
-async fn sqlite_routines(_pool: &AnyPool, _schema: &str) -> Result<Vec<RoutineInfo>, String> {
+async fn sqlite_routines(_pool: &sqlx::SqlitePool, _schema: &str) -> Result<Vec<RoutineInfo>, String> {
     Ok(vec![])
 }
 
@@ -614,17 +608,31 @@ async fn mssql_routines(
 
 // ── Public dispatch ─────────────────────────────────────────
 
-fn get_sqlx_pool(pool: &DbPool) -> Result<&Arc<AnyPool>, String> {
+fn get_pg_pool(pool: &DbPool) -> Result<&Arc<sqlx::PgPool>, String> {
     match pool {
-        DbPool::Sqlx(p) => Ok(p),
-        DbPool::Mssql(_) => Err("Expected sqlx pool, got MSSQL".to_string()),
+        DbPool::Postgres(p) => Ok(p),
+        _ => Err("Expected PostgreSQL pool".to_string()),
+    }
+}
+
+fn get_mysql_pool(pool: &DbPool) -> Result<&Arc<sqlx::MySqlPool>, String> {
+    match pool {
+        DbPool::Mysql(p) => Ok(p),
+        _ => Err("Expected MySQL pool".to_string()),
+    }
+}
+
+fn get_sqlite_pool(pool: &DbPool) -> Result<&Arc<sqlx::SqlitePool>, String> {
+    match pool {
+        DbPool::Sqlite(p) => Ok(p),
+        _ => Err("Expected SQLite pool".to_string()),
     }
 }
 
 fn get_mssql_pool(pool: &DbPool) -> Result<&Arc<bb8::Pool<bb8_tiberius::ConnectionManager>>, String> {
     match pool {
         DbPool::Mssql(p) => Ok(p),
-        DbPool::Sqlx(_) => Err("Expected MSSQL pool, got sqlx".to_string()),
+        _ => Err("Expected MSSQL pool".to_string()),
     }
 }
 
@@ -633,9 +641,9 @@ pub async fn list_schemas(
     driver: &Driver,
 ) -> Result<Vec<SchemaInfo>, String> {
     match driver {
-        Driver::Postgres => pg_schemas(get_sqlx_pool(&pool)?).await,
-        Driver::Mysql => mysql_schemas(get_sqlx_pool(&pool)?).await,
-        Driver::Sqlite => sqlite_schemas(get_sqlx_pool(&pool)?).await,
+        Driver::Postgres => pg_schemas(get_pg_pool(&pool)?).await,
+        Driver::Mysql => mysql_schemas(get_mysql_pool(&pool)?).await,
+        Driver::Sqlite => sqlite_schemas(get_sqlite_pool(&pool)?).await,
         Driver::Mssql => mssql_schemas(get_mssql_pool(&pool)?).await,
     }
 }
@@ -646,9 +654,9 @@ pub async fn list_tables(
     schema: &str,
 ) -> Result<Vec<TableInfo>, String> {
     match driver {
-        Driver::Postgres => pg_tables(get_sqlx_pool(&pool)?, schema).await,
-        Driver::Mysql => mysql_tables(get_sqlx_pool(&pool)?, schema).await,
-        Driver::Sqlite => sqlite_tables(get_sqlx_pool(&pool)?, schema).await,
+        Driver::Postgres => pg_tables(get_pg_pool(&pool)?, schema).await,
+        Driver::Mysql => mysql_tables(get_mysql_pool(&pool)?, schema).await,
+        Driver::Sqlite => sqlite_tables(get_sqlite_pool(&pool)?, schema).await,
         Driver::Mssql => mssql_tables(get_mssql_pool(&pool)?, schema).await,
     }
 }
@@ -660,9 +668,9 @@ pub async fn list_columns(
     table: &str,
 ) -> Result<Vec<ColumnInfo>, String> {
     match driver {
-        Driver::Postgres => pg_columns(get_sqlx_pool(&pool)?, schema, table).await,
-        Driver::Mysql => mysql_columns(get_sqlx_pool(&pool)?, schema, table).await,
-        Driver::Sqlite => sqlite_columns(get_sqlx_pool(&pool)?, schema, table).await,
+        Driver::Postgres => pg_columns(get_pg_pool(&pool)?, schema, table).await,
+        Driver::Mysql => mysql_columns(get_mysql_pool(&pool)?, schema, table).await,
+        Driver::Sqlite => sqlite_columns(get_sqlite_pool(&pool)?, schema, table).await,
         Driver::Mssql => mssql_columns(get_mssql_pool(&pool)?, schema, table).await,
     }
 }
@@ -674,9 +682,9 @@ pub async fn list_indexes(
     table: &str,
 ) -> Result<Vec<IndexInfo>, String> {
     match driver {
-        Driver::Postgres => pg_indexes(get_sqlx_pool(&pool)?, schema, table).await,
-        Driver::Mysql => mysql_indexes(get_sqlx_pool(&pool)?, schema, table).await,
-        Driver::Sqlite => sqlite_indexes(get_sqlx_pool(&pool)?, schema, table).await,
+        Driver::Postgres => pg_indexes(get_pg_pool(&pool)?, schema, table).await,
+        Driver::Mysql => mysql_indexes(get_mysql_pool(&pool)?, schema, table).await,
+        Driver::Sqlite => sqlite_indexes(get_sqlite_pool(&pool)?, schema, table).await,
         Driver::Mssql => mssql_indexes(get_mssql_pool(&pool)?, schema, table).await,
     }
 }
@@ -687,9 +695,256 @@ pub async fn list_routines(
     schema: &str,
 ) -> Result<Vec<RoutineInfo>, String> {
     match driver {
-        Driver::Postgres => pg_routines(get_sqlx_pool(&pool)?, schema).await,
-        Driver::Mysql => mysql_routines(get_sqlx_pool(&pool)?, schema).await,
-        Driver::Sqlite => sqlite_routines(get_sqlx_pool(&pool)?, schema).await,
+        Driver::Postgres => pg_routines(get_pg_pool(&pool)?, schema).await,
+        Driver::Mysql => mysql_routines(get_mysql_pool(&pool)?, schema).await,
+        Driver::Sqlite => sqlite_routines(get_sqlite_pool(&pool)?, schema).await,
         Driver::Mssql => mssql_routines(get_mssql_pool(&pool)?, schema).await,
+    }
+}
+
+// ── View definition ────────────────────────────────────────
+
+async fn pg_view_definition(
+    pool: &sqlx::PgPool,
+    schema: &str,
+    name: &str,
+) -> Result<String, String> {
+    let row = sqlx::query(
+        "SELECT pg_get_viewdef(c.oid, true) \
+         FROM pg_class c \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('v', 'm') \
+         LIMIT 1",
+    )
+    .bind(schema)
+    .bind(name)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    match row {
+        Some(r) => {
+            let body: String = r.get(0);
+            Ok(format!(
+                "CREATE OR REPLACE VIEW \"{}\".\"{}\" AS\n{}",
+                schema, name, body
+            ))
+        }
+        None => Err(format!("View {}.{} not found", schema, name)),
+    }
+}
+
+async fn mysql_view_definition(
+    pool: &sqlx::MySqlPool,
+    _schema: &str,
+    name: &str,
+) -> Result<String, String> {
+    let query = format!("SHOW CREATE VIEW `{}`", name);
+    let row = sqlx::query(&query)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    match row {
+        Some(r) => {
+            let def: String = r.try_get(1).unwrap_or_default();
+            Ok(def)
+        }
+        None => Err(format!("View {} not found", name)),
+    }
+}
+
+async fn sqlite_view_definition(
+    pool: &sqlx::SqlitePool,
+    _schema: &str,
+    name: &str,
+) -> Result<String, String> {
+    let row = sqlx::query(
+        "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = ?1",
+    )
+    .bind(name)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    match row {
+        Some(r) => {
+            let def: String = r.get(0);
+            Ok(def)
+        }
+        None => Err(format!("View {} not found", name)),
+    }
+}
+
+async fn mssql_view_definition(
+    pool: &bb8::Pool<bb8_tiberius::ConnectionManager>,
+    schema: &str,
+    name: &str,
+) -> Result<String, String> {
+    let mut conn = pool.get().await.map_err(|e| e.to_string())?;
+    let query = format!(
+        "SELECT OBJECT_DEFINITION(OBJECT_ID('{}.{}'))",
+        schema.replace('\'', "''"),
+        name.replace('\'', "''"),
+    );
+    let stream = conn.query(&*query, &[]).await.map_err(|e| e.to_string())?;
+    let row = stream
+        .into_first_result()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    match row.first() {
+        Some(r) => {
+            let def: Option<&str> = r.get(0);
+            match def {
+                Some(d) => Ok(d.to_string()),
+                None => Err(format!("View {}.{} not found", schema, name)),
+            }
+        }
+        None => Err(format!("View {}.{} not found", schema, name)),
+    }
+}
+
+pub async fn get_view_definition(
+    pool: DbPool,
+    driver: &Driver,
+    schema: &str,
+    name: &str,
+) -> Result<String, String> {
+    match driver {
+        Driver::Postgres => pg_view_definition(get_pg_pool(&pool)?, schema, name).await,
+        Driver::Mysql => mysql_view_definition(get_mysql_pool(&pool)?, schema, name).await,
+        Driver::Sqlite => sqlite_view_definition(get_sqlite_pool(&pool)?, schema, name).await,
+        Driver::Mssql => mssql_view_definition(get_mssql_pool(&pool)?, schema, name).await,
+    }
+}
+
+// ── Routine definition ─────────────────────────────────────
+
+async fn pg_routine_definition(
+    pool: &sqlx::PgPool,
+    schema: &str,
+    name: &str,
+) -> Result<String, String> {
+    let row = sqlx::query(
+        "SELECT pg_get_functiondef(p.oid) \
+         FROM pg_proc p \
+         JOIN pg_namespace n ON n.oid = p.pronamespace \
+         WHERE n.nspname = $1 AND p.proname = $2 \
+         LIMIT 1",
+    )
+    .bind(schema)
+    .bind(name)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    match row {
+        Some(r) => {
+            let def: String = r.get(0);
+            // pg_get_functiondef returns CREATE, replace with CREATE OR REPLACE
+            let alter = if def.starts_with("CREATE FUNCTION") {
+                def.replacen("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION", 1)
+            } else if def.starts_with("CREATE PROCEDURE") {
+                def.replacen("CREATE PROCEDURE", "CREATE OR REPLACE PROCEDURE", 1)
+            } else {
+                def
+            };
+            Ok(alter)
+        }
+        None => Err(format!("Routine {}.{} not found", schema, name)),
+    }
+}
+
+async fn mysql_routine_definition(
+    pool: &sqlx::MySqlPool,
+    _schema: &str,
+    name: &str,
+    routine_type: &str,
+) -> Result<String, String> {
+    // SHOW CREATE PROCEDURE/FUNCTION returns the full DDL
+    let query = if routine_type == "procedure" {
+        format!("SHOW CREATE PROCEDURE `{}`", name)
+    } else {
+        format!("SHOW CREATE FUNCTION `{}`", name)
+    };
+    let row = sqlx::query(&query)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    match row {
+        Some(r) => {
+            // Column index 2 contains the DDL body
+            let def: String = r.try_get(2).unwrap_or_else(|_| {
+                r.try_get::<String, _>(1).unwrap_or_default()
+            });
+            Ok(def)
+        }
+        None => Err(format!("Routine {} not found", name)),
+    }
+}
+
+async fn mssql_routine_definition(
+    pool: &bb8::Pool<bb8_tiberius::ConnectionManager>,
+    schema: &str,
+    name: &str,
+) -> Result<String, String> {
+    let mut conn = pool.get().await.map_err(|e| e.to_string())?;
+    let query = format!(
+        "SELECT OBJECT_DEFINITION(OBJECT_ID('{}.{}'))",
+        schema.replace('\'', "''"),
+        name.replace('\'', "''"),
+    );
+    let stream = conn.query(&*query, &[]).await.map_err(|e| e.to_string())?;
+    let row = stream
+        .into_first_result()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    match row.first() {
+        Some(r) => {
+            let def: Option<&str> = r.get(0);
+            match def {
+                Some(d) => {
+                    // Replace CREATE with ALTER
+                    let altered = if let Some(pos) = d.find("PROCEDURE") {
+                        if let Some(create_pos) = d[..pos].rfind("CREATE") {
+                            format!("ALTER{}", &d[create_pos + "CREATE".len()..])
+                        } else {
+                            d.to_string()
+                        }
+                    } else if let Some(pos) = d.find("FUNCTION") {
+                        if let Some(create_pos) = d[..pos].rfind("CREATE") {
+                            format!("ALTER{}", &d[create_pos + "CREATE".len()..])
+                        } else {
+                            d.to_string()
+                        }
+                    } else {
+                        d.to_string()
+                    };
+                    Ok(altered)
+                }
+                None => Err(format!("Routine {}.{} not found", schema, name)),
+            }
+        }
+        None => Err(format!("Routine {}.{} not found", schema, name)),
+    }
+}
+
+pub async fn get_routine_definition(
+    pool: DbPool,
+    driver: &Driver,
+    schema: &str,
+    name: &str,
+    routine_type: &str,
+) -> Result<String, String> {
+    match driver {
+        Driver::Postgres => pg_routine_definition(get_pg_pool(&pool)?, schema, name).await,
+        Driver::Mysql => {
+            mysql_routine_definition(get_mysql_pool(&pool)?, schema, name, routine_type).await
+        }
+        Driver::Sqlite => Err("SQLite does not support stored routines".to_string()),
+        Driver::Mssql => mssql_routine_definition(get_mssql_pool(&pool)?, schema, name).await,
     }
 }

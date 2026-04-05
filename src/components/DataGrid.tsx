@@ -10,29 +10,20 @@ import {
   type ColumnFiltersState,
 } from "@tanstack/react-table";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ArrowUp, ArrowDown, ArrowUpDown, Search, X, Filter, Check } from "lucide-react";
+import { ArrowUp, ArrowDown, ArrowUpDown, Search, X, Filter, Copy, ClipboardList, FileJson, Table2 } from "lucide-react";
 import { cn } from "../lib/utils";
 import type { QueryColumn } from "../types/query";
-
-/** Flash a "Copied" tooltip near the click position. */
-function useCopyFeedback() {
-  const [copiedId, setCopiedId] = useState<string | null>(null);
-  const timeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined);
-
-  const showCopied = useCallback((id: string) => {
-    if (timeoutRef.current) clearTimeout(timeoutRef.current);
-    setCopiedId(id);
-    timeoutRef.current = setTimeout(() => setCopiedId(null), 1200);
-  }, []);
-
-  return { copiedId, showCopied };
-}
 
 type CellValue = string | number | boolean | null;
 
 interface DataGridProps {
   columns: QueryColumn[];
   rows: CellValue[][];
+}
+
+interface ContextMenu {
+  x: number;
+  y: number;
 }
 
 function formatCell(value: CellValue): React.ReactNode {
@@ -52,43 +43,89 @@ function formatCell(value: CellValue): React.ReactNode {
   return str;
 }
 
+function cellToString(value: CellValue): string {
+  return value === null ? "NULL" : String(value);
+}
+
+function rowToTsv(row: CellValue[]): string {
+  return row.map(cellToString).join("\t");
+}
+
+function rowsToCsv(rows: CellValue[][], columns: QueryColumn[]): string {
+  const header = columns.map((c) => `"${c.name.replace(/"/g, '""')}"`).join(",");
+  const body = rows.map((row) =>
+    row.map((v) => {
+      const s = cellToString(v);
+      return `"${s.replace(/"/g, '""')}"`;
+    }).join(","),
+  );
+  return [header, ...body].join("\n");
+}
+
+function rowsToJson(rows: CellValue[][], columns: QueryColumn[]): string {
+  const objects = rows.map((row) => {
+    const obj: Record<string, CellValue> = {};
+    columns.forEach((col, i) => {
+      obj[col.name] = row[i];
+    });
+    return obj;
+  });
+  return JSON.stringify(objects, null, 2);
+}
+
+function rowsToMarkdown(rows: CellValue[][], columns: QueryColumn[]): string {
+  const header = "| " + columns.map((c) => c.name).join(" | ") + " |";
+  const separator = "| " + columns.map(() => "---").join(" | ") + " |";
+  const body = rows.map((row) =>
+    "| " + row.map((v) => cellToString(v).replace(/\|/g, "\\|")).join(" | ") + " |",
+  );
+  return [header, separator, ...body].join("\n");
+}
+
 export default function DataGrid({ columns, rows }: DataGridProps) {
   const [sorting, setSorting] = useState<SortingState>([]);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   const [globalFilter, setGlobalFilter] = useState("");
   const [showColumnFilters, setShowColumnFilters] = useState(false);
   const parentRef = useRef<HTMLDivElement>(null);
-  const { copiedId, showCopied } = useCopyFeedback();
 
-  const copyCell = useCallback(
-    (rowIdx: number, colIdx: number) => {
-      const value = rows[rowIdx]?.[colIdx];
-      const text = value === null ? "NULL" : String(value);
-      navigator.clipboard.writeText(text);
-      showCopied(`cell-${rowIdx}-${colIdx}`);
-    },
-    [rows, showCopied],
-  );
+  // Selection state: set of visible row indices (from tableRows, not original data)
+  const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
+  const lastClickedRow = useRef<number | null>(null);
 
-  const copyRow = useCallback(
-    (rowIdx: number) => {
-      const row = rows[rowIdx];
-      if (!row) return;
-      const text = row.map((v) => (v === null ? "NULL" : String(v))).join("\t");
-      navigator.clipboard.writeText(text);
-      showCopied(`row-${rowIdx}`);
-    },
-    [rows, showCopied],
-  );
+  // Context menu
+  const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
+  const contextRef = useRef<HTMLDivElement>(null);
 
   const [colWidths, setColWidths] = useState<number[]>(() =>
     columns.map(() => 150),
   );
 
-  // Reset widths when columns change
+  // Reset widths & selection when columns change
   useEffect(() => {
     setColWidths(columns.map(() => 150));
+    setSelectedRows(new Set());
+    lastClickedRow.current = null;
   }, [columns]);
+
+  // Close context menu on outside click / escape
+  useEffect(() => {
+    if (!contextMenu) return;
+    const onMouseDown = (e: MouseEvent) => {
+      if (contextRef.current && !contextRef.current.contains(e.target as Node)) {
+        setContextMenu(null);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setContextMenu(null);
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onMouseDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [contextMenu]);
 
   const resizing = useRef<{ colIdx: number; startX: number; startW: number } | null>(null);
 
@@ -189,6 +226,112 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
   const filteredCount = tableRows.length;
   const isFiltered = globalFilter || columnFilters.length > 0;
 
+  // Clear selection when filters/sorting change (visible row indices shift)
+  useEffect(() => {
+    setSelectedRows(new Set());
+    lastClickedRow.current = null;
+  }, [sorting, columnFilters, globalFilter]);
+
+  const handleRowClick = useCallback(
+    (e: React.MouseEvent, visibleIdx: number) => {
+      setSelectedRows((prev) => {
+        const next = new Set(prev);
+
+        if (e.shiftKey && lastClickedRow.current !== null) {
+          // Range select
+          const start = Math.min(lastClickedRow.current, visibleIdx);
+          const end = Math.max(lastClickedRow.current, visibleIdx);
+          for (let i = start; i <= end; i++) {
+            next.add(i);
+          }
+        } else if (e.ctrlKey || e.metaKey) {
+          // Toggle single row
+          if (next.has(visibleIdx)) {
+            next.delete(visibleIdx);
+          } else {
+            next.add(visibleIdx);
+          }
+        } else {
+          // Single select
+          next.clear();
+          next.add(visibleIdx);
+        }
+        return next;
+      });
+      lastClickedRow.current = visibleIdx;
+    },
+    [],
+  );
+
+  const handleContextMenu = useCallback(
+    (e: React.MouseEvent, visibleIdx: number) => {
+      e.preventDefault();
+      // If right-clicked row isn't selected, select only it
+      if (!selectedRows.has(visibleIdx)) {
+        setSelectedRows(new Set([visibleIdx]));
+        lastClickedRow.current = visibleIdx;
+      }
+      setContextMenu({ x: e.clientX, y: e.clientY });
+    },
+    [selectedRows],
+  );
+
+  // Get the actual data rows for the current selection
+  const getSelectedData = useCallback((): CellValue[][] => {
+    const sorted = Array.from(selectedRows).sort((a, b) => a - b);
+    return sorted.map((idx) => tableRows[idx]?.original).filter(Boolean);
+  }, [selectedRows, tableRows]);
+
+  const copyAs = useCallback(
+    (format: "tsv" | "csv" | "json" | "markdown") => {
+      const data = getSelectedData();
+      if (data.length === 0) return;
+      let text: string;
+      switch (format) {
+        case "tsv":
+          text = data.map(rowToTsv).join("\n");
+          break;
+        case "csv":
+          text = rowsToCsv(data, columns);
+          break;
+        case "json":
+          text = rowsToJson(data, columns);
+          break;
+        case "markdown":
+          text = rowsToMarkdown(data, columns);
+          break;
+      }
+      navigator.clipboard.writeText(text);
+      setContextMenu(null);
+    },
+    [getSelectedData, columns],
+  );
+
+  const selectAll = useCallback(() => {
+    const all = new Set<number>();
+    for (let i = 0; i < tableRows.length; i++) all.add(i);
+    setSelectedRows(all);
+  }, [tableRows.length]);
+
+  // Keyboard: Ctrl+A to select all, Ctrl+C to copy
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!parentRef.current?.contains(document.activeElement) &&
+          document.activeElement !== parentRef.current) return;
+
+      if ((e.ctrlKey || e.metaKey) && e.key === "a") {
+        e.preventDefault();
+        selectAll();
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === "c" && selectedRows.size > 0) {
+        e.preventDefault();
+        copyAs("tsv");
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [selectAll, copyAs, selectedRows.size]);
+
   const virtualizer = useVirtualizer({
     count: tableRows.length,
     getScrollElement: () => parentRef.current,
@@ -238,10 +381,15 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
             {filteredCount.toLocaleString()} of {totalRows.toLocaleString()}
           </span>
         )}
+        {selectedRows.size > 0 && (
+          <span className="text-[10px] text-muted-foreground ml-auto">
+            {selectedRows.size} row{selectedRows.size !== 1 && "s"} selected
+          </span>
+        )}
       </div>
 
       {/* Data grid */}
-      <div ref={parentRef} className="flex-1 overflow-auto">
+      <div ref={parentRef} className="flex-1 overflow-auto focus:outline-none" tabIndex={0}>
         <div className="min-w-fit text-xs">
           {/* Sticky header */}
           <div className="sticky top-0 z-10 bg-muted">
@@ -326,6 +474,7 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
           >
             {virtualizer.getVirtualItems().map((virtualRow) => {
               const row = tableRows[virtualRow.index];
+              const isSelected = selectedRows.has(virtualRow.index);
               return (
                 <div
                   key={row.id}
@@ -333,38 +482,37 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
                   ref={(node) => virtualizer.measureElement(node)}
                   className={cn(
                     "absolute left-0 w-full grid",
-                    virtualRow.index % 2 === 0 ? "bg-background" : "bg-muted/30",
-                    "hover:bg-primary/5",
+                    isSelected
+                      ? "bg-primary/10"
+                      : virtualRow.index % 2 === 0
+                        ? "bg-background"
+                        : "bg-muted/30",
+                    !isSelected && "hover:bg-primary/5",
                   )}
                   style={{
                     transform: `translateY(${virtualRow.start}px)`,
                     gridTemplateColumns,
                   }}
+                  onClick={(e) => handleRowClick(e, virtualRow.index)}
+                  onContextMenu={(e) => handleContextMenu(e, virtualRow.index)}
                 >
-                  {/* Row number — click to copy entire row */}
+                  {/* Row number */}
                   <div
-                    onClick={() => copyRow(row.index)}
-                    className="relative cursor-pointer border-r border-border px-2 py-1 text-right text-[10px] text-muted-foreground/50 tabular-nums hover:bg-primary/10 hover:text-primary"
-                    title="Click to copy row"
-                  >
-                    {copiedId === `row-${row.index}` ? (
-                      <Check size={10} className="inline text-success" />
-                    ) : (
-                      virtualRow.index + 1
+                    className={cn(
+                      "border-r border-border px-2 py-1 text-right text-[10px] tabular-nums",
+                      isSelected
+                        ? "text-primary font-medium"
+                        : "text-muted-foreground/50",
                     )}
+                  >
+                    {virtualRow.index + 1}
                   </div>
-                  {row.getVisibleCells().map((cell, cellIdx) => (
+                  {row.getVisibleCells().map((cell) => (
                     <div
                       key={cell.id}
-                      onClick={() => copyCell(row.index, cellIdx)}
-                      className="cursor-pointer truncate border-r border-border px-2 py-1 hover:bg-primary/5"
-                      title="Click to copy cell"
+                      className="truncate border-r border-border px-2 py-1"
                     >
-                      {copiedId === `cell-${row.index}-${cellIdx}` ? (
-                        <span className="text-[10px] text-success">Copied</span>
-                      ) : (
-                        flexRender(cell.column.columnDef.cell, cell.getContext())
-                      )}
+                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
                     </div>
                   ))}
                 </div>
@@ -373,7 +521,52 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
           </div>
         </div>
       </div>
+
+      {/* Context menu */}
+      {contextMenu && selectedRows.size > 0 && (
+        <div
+          ref={contextRef}
+          className="fixed z-50 min-w-52 rounded-md border border-border bg-background py-1 shadow-lg text-xs"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+        >
+          <CtxItem icon={Copy} label="Copy" shortcut="Ctrl+C" onClick={() => copyAs("tsv")} />
+          <CtxItem icon={ClipboardList} label="Copy as CSV" onClick={() => copyAs("csv")} />
+          <CtxItem icon={FileJson} label="Copy as JSON" onClick={() => copyAs("json")} />
+          <CtxItem icon={Table2} label="Copy as Markdown" onClick={() => copyAs("markdown")} />
+          <div className="my-1 border-t border-border" />
+          <CtxItem
+            label={`Select all (${tableRows.length})`}
+            onClick={() => {
+              selectAll();
+              setContextMenu(null);
+            }}
+          />
+        </div>
+      )}
     </div>
+  );
+}
+
+function CtxItem({
+  label,
+  onClick,
+  icon: Icon,
+  shortcut,
+}: {
+  label: string;
+  onClick: () => void;
+  icon?: React.ComponentType<{ size?: number; className?: string }>;
+  shortcut?: string;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className="flex w-full items-center gap-2 px-3 py-1 text-left text-xs hover:bg-accent hover:text-accent-foreground"
+    >
+      {Icon && <Icon size={12} className="shrink-0 opacity-60" />}
+      <span className="flex-1">{label}</span>
+      {shortcut && <span className="text-[10px] text-muted-foreground/50">{shortcut}</span>}
+    </button>
   );
 }
 

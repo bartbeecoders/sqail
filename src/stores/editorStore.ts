@@ -30,7 +30,11 @@ interface EditorState {
   activeTabId: string;
 
   addTab: () => void;
+  addTabWithContent: (title: string, content: string) => void;
   closeTab: (id: string) => void;
+  closeOtherTabs: (id: string) => void;
+  closeTabsToRight: (id: string) => void;
+  closeAllTabs: () => void;
   setActiveTab: (id: string) => void;
   renameTab: (id: string, title: string) => void;
   setContent: (id: string, content: string) => void;
@@ -62,6 +66,13 @@ export const useEditorStore = create<EditorState>((set, get) => {
       persist();
     },
 
+    addTabWithContent: (title, content) => {
+      const { tabs } = get();
+      const tab: EditorTab = { id: generateId(), title, content };
+      set({ tabs: [...tabs, tab], activeTabId: tab.id });
+      persist();
+    },
+
     closeTab: (id) => {
       const { tabs, activeTabId } = get();
       if (tabs.length <= 1) return; // always keep at least one tab
@@ -69,6 +80,30 @@ export const useEditorStore = create<EditorState>((set, get) => {
       const newActive =
         activeTabId === id ? filtered[Math.max(0, tabs.findIndex((t) => t.id === id) - 1)].id : activeTabId;
       set({ tabs: filtered, activeTabId: newActive });
+      persist();
+    },
+
+    closeOtherTabs: (id) => {
+      const { tabs } = get();
+      const kept = tabs.filter((t) => t.id === id);
+      if (kept.length === 0) return;
+      set({ tabs: kept, activeTabId: id });
+      persist();
+    },
+
+    closeTabsToRight: (id) => {
+      const { tabs, activeTabId } = get();
+      const idx = tabs.findIndex((t) => t.id === id);
+      if (idx === -1) return;
+      const kept = tabs.slice(0, idx + 1);
+      const newActive = kept.find((t) => t.id === activeTabId) ? activeTabId : id;
+      set({ tabs: kept, activeTabId: newActive });
+      persist();
+    },
+
+    closeAllTabs: () => {
+      const tab = createTab(1);
+      set({ tabs: [tab], activeTabId: tab.id });
       persist();
     },
 

@@ -14,7 +14,11 @@ import {
   Cog,
   AlertCircle,
   Sparkles,
+  FileEdit,
+  ClipboardCopy,
+  Download,
 } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
 import { cn } from "../lib/utils";
 import { useSchemaStore } from "../stores/schemaStore";
 import { useConnectionStore } from "../stores/connectionStore";
@@ -24,6 +28,7 @@ import type { TableInfo, ColumnInfo, RoutineInfo } from "../types/schema";
 import type { Driver } from "../types/connection";
 import type { ObjectMetadata } from "../types/metadata";
 import MetadataDetailModal from "./MetadataDetailModal";
+import { collectExportObjects, exportSchema, type SchemaExportFormat } from "../lib/exportSchema";
 
 /** Quote an identifier for the given dialect. */
 function quoteId(name: string, driver: Driver): string {
@@ -43,6 +48,49 @@ function qualifiedTable(schema: string, table: string, driver: Driver): string {
     return quoteId(table, driver);
   }
   return `${quoteId(schema, driver)}.${quoteId(table, driver)}`;
+}
+
+/** Generate a CREATE TABLE statement from loaded column info. */
+function generateCreateTable(
+  schema: string,
+  table: string,
+  cols: ColumnInfo[] | undefined,
+  driver: Driver,
+): string {
+  const ref = qualifiedTable(schema, table, driver);
+  if (!cols || cols.length === 0) {
+    return `-- Could not generate DDL: columns not loaded\n-- CREATE TABLE ${ref} (\n-- );\n`;
+  }
+  const pks = cols.filter((c) => c.isPrimaryKey).map((c) => quoteId(c.name, driver));
+  const colLines = cols.map((c) => {
+    let line = `  ${quoteId(c.name, driver)} ${c.dataType}`;
+    if (!c.isNullable) line += " NOT NULL";
+    if (c.columnDefault) line += ` DEFAULT ${c.columnDefault}`;
+    return line;
+  });
+  if (pks.length > 0) {
+    colLines.push(`  PRIMARY KEY (${pks.join(", ")})`);
+  }
+  return `CREATE TABLE ${ref} (\n${colLines.join(",\n")}\n);`;
+}
+
+/** Generate an ALTER TABLE template. */
+function generateAlterTable(
+  schema: string,
+  table: string,
+  driver: Driver,
+): string {
+  const ref = qualifiedTable(schema, table, driver);
+  const col = quoteId("column_name", driver);
+  return (
+    `-- ALTER TABLE: modify ${ref}\n\n` +
+    `-- Add a column\nALTER TABLE ${ref}\n  ADD ${col} VARCHAR(255);\n\n` +
+    `-- Drop a column\n-- ALTER TABLE ${ref}\n--   DROP COLUMN ${col};\n\n` +
+    `-- Rename a column\n` +
+    (driver === "mssql"
+      ? `-- EXEC sp_rename '${schema}.${table}.${col}', 'new_name', 'COLUMN';\n`
+      : `-- ALTER TABLE ${ref}\n--   RENAME COLUMN ${col} TO ${quoteId("new_name", driver)};\n`)
+  );
 }
 
 /** Generate dialect-specific SQL snippets for the context menu. */
@@ -89,12 +137,15 @@ function dialectSql(schema: string, table: string, tableType: "table" | "view", 
   return { selectTop, selectCount, columnInfo, dropLabel, dropSql };
 }
 
+type ContextMenuTarget =
+  | { kind: "table"; schemaName: string; name: string; tableType: "table" | "view" }
+  | { kind: "routine"; schemaName: string; name: string; routineType: "function" | "procedure" }
+  | { kind: "column"; schemaName: string; tableName: string; name: string; dataType: string; isPrimaryKey: boolean };
+
 interface ContextMenu {
   x: number;
   y: number;
-  schemaName: string;
-  tableName: string;
-  tableType: "table" | "view";
+  target: ContextMenuTarget;
 }
 
 export default function SchemaTree() {
@@ -106,6 +157,7 @@ export default function SchemaTree() {
     schemas,
     tables,
     columns,
+    indexes,
     routines,
     loading,
     error,
@@ -116,6 +168,7 @@ export default function SchemaTree() {
     loadAllColumns,
   } = useSchemaStore();
   const metadataError = useMetadataStore((s) => s.error);
+  const getMetadataForObject = useMetadataStore((s) => s.getForObject);
 
   // expanded state: top-level categories, schema nodes within a category, individual tables
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set());
@@ -126,6 +179,8 @@ export default function SchemaTree() {
   const contextRef = useRef<HTMLDivElement>(null);
   const prevConnectionId = useRef<string | null>(null);
   const [metadataModalEntry, setMetadataModalEntry] = useState<ObjectMetadata | null>(null);
+  const [showExportMenu, setShowExportMenu] = useState(false);
+  const exportRef = useRef<HTMLDivElement>(null);
 
   const loadMetadata = useMetadataStore((s) => s.loadMetadata);
 
@@ -168,9 +223,14 @@ export default function SchemaTree() {
   }, [schemas, activeConnectionId, loadTables, loadRoutines]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  // Close context menu on click outside
+  // Close context menu / export menu on click outside
   useEffect(() => {
-    const handler = () => setContextMenu(null);
+    const handler = (e: MouseEvent) => {
+      setContextMenu(null);
+      if (exportRef.current && !exportRef.current.contains(e.target as Node)) {
+        setShowExportMenu(false);
+      }
+    };
     document.addEventListener("click", handler);
     return () => document.removeEventListener("click", handler);
   }, []);
@@ -227,13 +287,30 @@ export default function SchemaTree() {
     insertIntoEditor(sql);
   };
 
-  const handleContextMenu = (e: React.MouseEvent, schemaName: string, tableName: string, tableType: "table" | "view") => {
+  const openContextMenu = (e: React.MouseEvent, target: ContextMenuTarget) => {
     e.preventDefault();
-    setContextMenu({ x: e.clientX, y: e.clientY, schemaName, tableName, tableType });
+    e.stopPropagation();
+    setContextMenu({ x: e.clientX, y: e.clientY, target });
   };
 
   const contextAction = (sql: string) => {
     insertIntoEditor(sql);
+    setContextMenu(null);
+  };
+
+  const contextActionNewTab = async (title: string, contentOrPromise: string | Promise<string>) => {
+    setContextMenu(null);
+    const store = useEditorStore.getState();
+    store.addTab();
+    const tab = store.getActiveTab();
+    if (!tab) return;
+    store.renameTab(tab.id, title);
+    const content = typeof contentOrPromise === "string" ? contentOrPromise : await contentOrPromise;
+    store.setContent(tab.id, content);
+  };
+
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text);
     setContextMenu(null);
   };
 
@@ -257,7 +334,8 @@ export default function SchemaTree() {
       const all = tables[schema.name];
       if (!all) continue;
       let items = all.filter((t) => t.tableType === type);
-      if (filterLower) {
+      const schemaMatches = filterLower && schema.name.toLowerCase().includes(filterLower);
+      if (filterLower && !schemaMatches) {
         items = items.filter((t) => t.name.toLowerCase().includes(filterLower));
       }
       if (items.length > 0) {
@@ -273,7 +351,8 @@ export default function SchemaTree() {
       const all = routines[schema.name];
       if (!all) continue;
       let items = all;
-      if (filterLower) {
+      const schemaMatches = filterLower && schema.name.toLowerCase().includes(filterLower);
+      if (filterLower && !schemaMatches) {
         items = items.filter((r) => r.name.toLowerCase().includes(filterLower));
       }
       if (items.length > 0) {
@@ -285,6 +364,20 @@ export default function SchemaTree() {
 
   const totalCount = (groups: { items: unknown[] }[]): number =>
     groups.reduce((sum, g) => sum + g.items.length, 0);
+
+  const handleExport = async (format: SchemaExportFormat) => {
+    setShowExportMenu(false);
+    const tGroups = getTablesOfType("table");
+    const vGroups = getTablesOfType("view");
+    const rGroups = getRoutines();
+    const objects = collectExportObjects(tGroups, vGroups, rGroups, columns, indexes, getMetadataForObject);
+    const connName = activeConnection?.name ?? "database";
+    try {
+      await exportSchema(format, objects, `${connName}-schema`);
+    } catch (e) {
+      console.error("Schema export failed:", e);
+    }
+  };
 
   if (!activeConnectionId) {
     return (
@@ -300,20 +393,47 @@ export default function SchemaTree() {
   const hasMultipleSchemas = schemas.length > 1;
 
   return (
-    <div className="flex flex-col text-xs">
-      {/* Header with refresh */}
+    <div className="flex flex-col min-h-0 h-full text-xs">
+      {/* Header with refresh + export */}
       <div className="flex items-center justify-between px-2 pb-1 pt-2">
         <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
           Database
         </span>
-        <button
-          onClick={handleRefresh}
-          disabled={loading}
-          className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-40"
-          title="Refresh schema"
-        >
-          {loading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
-        </button>
+        <div className="flex items-center gap-0.5">
+          <div ref={exportRef} className="relative">
+            <button
+              onClick={(e) => { e.stopPropagation(); setShowExportMenu((v) => !v); }}
+              className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+              title="Export schema"
+            >
+              <Download size={12} />
+            </button>
+            {showExportMenu && (
+              <div className="absolute right-0 top-full z-50 mt-1 min-w-36 rounded-md border border-border bg-background py-1 shadow-lg text-xs">
+                <button
+                  onClick={() => handleExport("markdown")}
+                  className="flex w-full items-center gap-2 px-3 py-1 text-left hover:bg-accent hover:text-accent-foreground"
+                >
+                  Export as Markdown
+                </button>
+                <button
+                  onClick={() => handleExport("excel")}
+                  className="flex w-full items-center gap-2 px-3 py-1 text-left hover:bg-accent hover:text-accent-foreground"
+                >
+                  Export as Excel
+                </button>
+              </div>
+            )}
+          </div>
+          <button
+            onClick={handleRefresh}
+            disabled={loading}
+            className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-40"
+            title="Refresh schema"
+          >
+            {loading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+          </button>
+        </div>
       </div>
 
       {/* Error display */}
@@ -352,7 +472,7 @@ export default function SchemaTree() {
       </div>
 
       {/* Tree: Type → Schema → Items */}
-      <div className="overflow-y-auto px-1">
+      <div className="overflow-y-auto pl-1 pr-2.5">
         {/* ── Tables ── */}
         <CategoryNode
           label="Tables"
@@ -382,7 +502,8 @@ export default function SchemaTree() {
                   columns={columns[`${schema}.${table.name}`]}
                   onToggle={() => toggleTable(schema, table.name)}
                   onDoubleClick={() => handleDoubleClick(schema, table.name)}
-                  onContextMenu={(e) => handleContextMenu(e, schema, table.name, table.tableType)}
+                  onContextMenu={(e) => openContextMenu(e, { kind: "table", schemaName: schema, name: table.name, tableType: table.tableType })}
+                  onColumnContextMenu={(e, col) => openContextMenu(e, { kind: "column", schemaName: schema, tableName: table.name, name: col.name, dataType: col.dataType, isPrimaryKey: col.isPrimaryKey })}
                   connectionId={activeConnectionId}
                   onShowMetadata={handleShowMetadata}
                 />
@@ -420,7 +541,8 @@ export default function SchemaTree() {
                   columns={columns[`${schema}.${view.name}`]}
                   onToggle={() => toggleTable(schema, view.name)}
                   onDoubleClick={() => handleDoubleClick(schema, view.name)}
-                  onContextMenu={(e) => handleContextMenu(e, schema, view.name, view.tableType)}
+                  onContextMenu={(e) => openContextMenu(e, { kind: "table", schemaName: schema, name: view.name, tableType: view.tableType })}
+                  onColumnContextMenu={(e, col) => openContextMenu(e, { kind: "column", schemaName: schema, tableName: view.name, name: col.name, dataType: col.dataType, isPrimaryKey: col.isPrimaryKey })}
                   connectionId={activeConnectionId}
                   onShowMetadata={handleShowMetadata}
                 />
@@ -450,63 +572,261 @@ export default function SchemaTree() {
               connectionId={activeConnectionId}
             >
               {items.map((routine) => (
-                <RoutineNode key={routine.name} routine={routine} />
+                <RoutineNode
+                  key={routine.name}
+                  routine={routine}
+                  onContextMenu={(e) => openContextMenu(e, {
+                    kind: "routine",
+                    schemaName: routine.schema,
+                    name: routine.name,
+                    routineType: routine.routineType,
+                  })}
+                />
               ))}
             </SchemaGroupNode>
           ))}
         </CategoryNode>
       </div>
 
-      {/* Context menu */}
-      {contextMenu && (() => {
-        const sql = dialectSql(
-          contextMenu.schemaName,
-          contextMenu.tableName,
-          contextMenu.tableType,
-          driver,
-        );
-        return (
-          <div
-            ref={contextRef}
-            className="fixed z-50 min-w-40 rounded-md border border-border bg-background py-1 shadow-lg"
-            style={{ left: contextMenu.x, top: contextMenu.y }}
-          >
-            <ContextItem
-              label={driver === "mssql" ? "SELECT TOP 100 *" : "SELECT * ... LIMIT 100"}
-              onClick={() => contextAction(sql.selectTop)}
-            />
-            <ContextItem
-              label="SELECT COUNT(*)"
-              onClick={() => contextAction(sql.selectCount)}
-            />
-            <ContextItem
-              label={driver === "mysql" ? "DESCRIBE" : driver === "sqlite" ? "PRAGMA table_info" : "Column info"}
-              onClick={() => contextAction(sql.columnInfo)}
-            />
-            <div className="my-1 border-t border-border" />
-            <ContextItem
-              label="Generate Metadata"
-              onClick={() => {
-                if (activeConnectionId) {
-                  useMetadataStore.getState().generateSingle(
-                    activeConnectionId,
-                    contextMenu.schemaName,
-                    contextMenu.tableName,
-                    contextMenu.tableType,
-                  );
+      {/* Unified context menu */}
+      {contextMenu && (
+        <div
+          ref={contextRef}
+          className="fixed z-50 min-w-48 rounded-md border border-border bg-background py-1 shadow-lg text-xs"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+        >
+          {contextMenu.target.kind === "table" && (() => {
+            const { schemaName, name, tableType } = contextMenu.target;
+            const sql = dialectSql(schemaName, name, tableType, driver);
+            const ref = qualifiedTable(schemaName, name, driver);
+            const colKey = `${schemaName}.${name}`;
+            return (
+              <>
+                <ContextItem
+                  label={driver === "mssql" ? "SELECT TOP 100 *" : "SELECT * LIMIT 100"}
+                  onClick={() => contextAction(sql.selectTop)}
+                />
+                <ContextItem
+                  label="SELECT COUNT(*)"
+                  onClick={() => contextAction(sql.selectCount)}
+                />
+                <ContextItem
+                  label={driver === "mysql" ? "DESCRIBE" : driver === "sqlite" ? "PRAGMA table_info" : "Column Info"}
+                  onClick={() => contextAction(sql.columnInfo)}
+                />
+                <ContextSeparator />
+                {tableType === "table" ? (
+                  <>
+                    <ContextItem
+                      label="CREATE TABLE"
+                      icon={FileEdit}
+                      onClick={() => contextActionNewTab(
+                        `CREATE ${name}`,
+                        generateCreateTable(schemaName, name, columns[colKey], driver),
+                      )}
+                    />
+                    <ContextItem
+                      label="ALTER TABLE"
+                      icon={FileEdit}
+                      onClick={() => contextActionNewTab(
+                        `ALTER ${name}`,
+                        generateAlterTable(schemaName, name, driver),
+                      )}
+                    />
+                  </>
+                ) : (
+                  <ContextItem
+                    label="View Definition"
+                    icon={FileEdit}
+                    onClick={() => {
+                      if (!activeConnectionId) return;
+                      contextActionNewTab(
+                        name,
+                        invoke<string>("get_view_definition", {
+                          connectionId: activeConnectionId,
+                          schemaName,
+                          viewName: name,
+                        }),
+                      );
+                    }}
+                  />
+                )}
+                <ContextSeparator />
+                <ContextItem
+                  label="Copy Name"
+                  icon={ClipboardCopy}
+                  onClick={() => copyToClipboard(ref)}
+                />
+                <ContextItem
+                  label="Insert Name"
+                  onClick={() => contextAction(ref)}
+                />
+                <ContextSeparator />
+                <ContextItem
+                  label="Generate Metadata"
+                  icon={Sparkles}
+                  onClick={() => {
+                    if (activeConnectionId) {
+                      useMetadataStore.getState().generateSingle(
+                        activeConnectionId,
+                        schemaName,
+                        name,
+                        tableType,
+                      );
+                    }
+                    setContextMenu(null);
+                  }}
+                />
+                <ContextSeparator />
+                <ContextItem
+                  label={sql.dropLabel}
+                  className="text-destructive"
+                  onClick={() => contextAction(sql.dropSql)}
+                />
+              </>
+            );
+          })()}
+
+          {contextMenu.target.kind === "routine" && (() => {
+            const { schemaName, name, routineType } = contextMenu.target;
+            const ref = qualifiedTable(schemaName, name, driver);
+            const typeLabel = routineType === "procedure" ? "Procedure" : "Function";
+
+            const execSql = (() => {
+              if (routineType === "procedure") {
+                switch (driver) {
+                  case "mssql":
+                    return `EXEC ${ref};`;
+                  case "mysql":
+                    return `CALL ${ref}();`;
+                  default:
+                    return `CALL ${ref}();`;
                 }
-                setContextMenu(null);
-              }}
-            />
-            <div className="my-1 border-t border-border" />
-            <ContextItem
-              label={sql.dropLabel}
-              className="text-destructive"
-              onClick={() => contextAction(sql.dropSql)}
-            />
-          </div>
-        );
-      })()}
+              }
+              // function
+              return `SELECT ${ref}();`;
+            })();
+
+            const dropSql =
+              `-- ⚠️ DANGER: This will drop the ${routineType}!\n` +
+              `-- DROP ${routineType.toUpperCase()} ${ref};`;
+
+            return (
+              <>
+                <ContextItem
+                  label="Open Definition"
+                  icon={FileEdit}
+                  onClick={() => {
+                    if (!activeConnectionId) return;
+                    contextActionNewTab(
+                      name,
+                      invoke<string>("get_routine_definition", {
+                        connectionId: activeConnectionId,
+                        schemaName,
+                        routineName: name,
+                        routineType,
+                      }),
+                    );
+                  }}
+                />
+                <ContextItem
+                  label={routineType === "procedure" ? (driver === "mssql" ? "EXEC" : "CALL") : "SELECT (execute)"}
+                  onClick={() => contextAction(execSql)}
+                />
+                <ContextSeparator />
+                <ContextItem
+                  label="Copy Name"
+                  icon={ClipboardCopy}
+                  onClick={() => copyToClipboard(ref)}
+                />
+                <ContextItem
+                  label="Insert Name"
+                  onClick={() => contextAction(ref)}
+                />
+                <ContextSeparator />
+                <ContextItem
+                  label="Generate Metadata"
+                  icon={Sparkles}
+                  onClick={() => {
+                    if (activeConnectionId) {
+                      useMetadataStore.getState().generateSingle(
+                        activeConnectionId,
+                        schemaName,
+                        name,
+                        routineType,
+                      );
+                    }
+                    setContextMenu(null);
+                  }}
+                />
+                <ContextSeparator />
+                <ContextItem
+                  label={`DROP ${typeLabel.toUpperCase()}`}
+                  className="text-destructive"
+                  onClick={() => contextAction(dropSql)}
+                />
+              </>
+            );
+          })()}
+
+          {contextMenu.target.kind === "column" && (() => {
+            const { schemaName, tableName, name, dataType, isPrimaryKey } = contextMenu.target;
+            const tableRef = qualifiedTable(schemaName, tableName, driver);
+            const colRef = quoteId(name, driver);
+
+            const selectCol =
+              driver === "mssql"
+                ? `SELECT TOP 100 ${colRef} FROM ${tableRef};`
+                : `SELECT ${colRef} FROM ${tableRef}\nLIMIT 100;`;
+
+            const selectDistinct =
+              driver === "mssql"
+                ? `SELECT DISTINCT TOP 100 ${colRef} FROM ${tableRef};`
+                : `SELECT DISTINCT ${colRef} FROM ${tableRef}\nLIMIT 100;`;
+
+            const whereClause = `SELECT * FROM ${tableRef}\nWHERE ${colRef} = ;`;
+
+            const countDistinct = `SELECT COUNT(DISTINCT ${colRef}) FROM ${tableRef};`;
+
+            return (
+              <>
+                <ContextItem
+                  label="SELECT Column"
+                  onClick={() => contextAction(selectCol)}
+                />
+                <ContextItem
+                  label="SELECT DISTINCT"
+                  onClick={() => contextAction(selectDistinct)}
+                />
+                <ContextItem
+                  label="COUNT DISTINCT"
+                  onClick={() => contextAction(countDistinct)}
+                />
+                <ContextItem
+                  label="WHERE Clause"
+                  onClick={() => contextAction(whereClause)}
+                />
+                <ContextSeparator />
+                <ContextItem
+                  label="Copy Name"
+                  icon={ClipboardCopy}
+                  onClick={() => copyToClipboard(name)}
+                />
+                <ContextItem
+                  label="Insert Name"
+                  onClick={() => contextAction(colRef)}
+                />
+                <ContextSeparator />
+                <ContextItem
+                  label={`Type: ${dataType}${isPrimaryKey ? " (PK)" : ""}`}
+                  className="text-muted-foreground cursor-default"
+                  onClick={() => setContextMenu(null)}
+                />
+              </>
+            );
+          })()}
+        </div>
+      )}
 
       {metadataModalEntry && activeConnectionId && (
         <MetadataDetailModal
@@ -623,6 +943,7 @@ function TableNode({
   onToggle,
   onDoubleClick,
   onContextMenu,
+  onColumnContextMenu,
   connectionId,
   onShowMetadata,
 }: {
@@ -633,6 +954,7 @@ function TableNode({
   onToggle: () => void;
   onDoubleClick: () => void;
   onContextMenu: (e: React.MouseEvent) => void;
+  onColumnContextMenu: (e: React.MouseEvent, col: ColumnInfo) => void;
   connectionId: string | null;
   onShowMetadata: (schemaName: string, objectName: string) => void;
 }) {
@@ -699,7 +1021,11 @@ function TableNode({
       {isExpanded && columns && (
         <div className="ml-5">
           {columns.map((col) => (
-            <ColumnNode key={col.name} column={col} />
+            <ColumnNode
+              key={col.name}
+              column={col}
+              onContextMenu={(e) => onColumnContextMenu(e, col)}
+            />
           ))}
         </div>
       )}
@@ -709,11 +1035,18 @@ function TableNode({
 
 /* ── Routine node ── */
 
-function RoutineNode({ routine }: { routine: RoutineInfo }) {
+function RoutineNode({
+  routine,
+  onContextMenu,
+}: {
+  routine: RoutineInfo;
+  onContextMenu: (e: React.MouseEvent) => void;
+}) {
   return (
     <div
-      className="flex items-center gap-1 rounded px-1 py-0.5 text-muted-foreground"
+      className="flex items-center gap-1 rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-accent-foreground"
       title={`${routine.schema}.${routine.name} (${routine.routineType})`}
+      onContextMenu={onContextMenu}
     >
       <Cog size={11} className="shrink-0 opacity-60" />
       <span className="truncate">{routine.name}</span>
@@ -724,11 +1057,12 @@ function RoutineNode({ routine }: { routine: RoutineInfo }) {
 
 /* ── Column node ── */
 
-function ColumnNode({ column }: { column: ColumnInfo }) {
+function ColumnNode({ column, onContextMenu }: { column: ColumnInfo; onContextMenu: (e: React.MouseEvent) => void }) {
   return (
     <div
-      className="flex items-center gap-1 rounded px-1 py-px text-[11px] text-muted-foreground"
+      className="flex items-center gap-1 rounded px-1 py-px text-[11px] text-muted-foreground hover:bg-accent hover:text-accent-foreground"
       title={`${column.name} ${column.dataType}${column.isNullable ? "" : " NOT NULL"}${column.columnDefault ? ` DEFAULT ${column.columnDefault}` : ""}`}
+      onContextMenu={onContextMenu}
     >
       {column.isPrimaryKey ? (
         <Key size={10} className="shrink-0 text-amber-500" />
@@ -751,25 +1085,32 @@ function EmptyMessage({ filter, label }: { filter: string; label: string }) {
   );
 }
 
-/* ── Context menu item ── */
+/* ── Context menu helpers ── */
+
+function ContextSeparator() {
+  return <div className="my-1 border-t border-border" />;
+}
 
 function ContextItem({
   label,
   onClick,
   className,
+  icon: Icon,
 }: {
   label: string;
   onClick: () => void;
   className?: string;
+  icon?: React.ComponentType<{ size?: number; className?: string }>;
 }) {
   return (
     <button
       onClick={onClick}
       className={cn(
-        "block w-full px-3 py-1 text-left text-xs hover:bg-accent hover:text-accent-foreground",
+        "flex w-full items-center gap-2 px-3 py-1 text-left text-xs hover:bg-accent hover:text-accent-foreground",
         className,
       )}
     >
+      {Icon && <Icon size={12} className="shrink-0 opacity-60" />}
       {label}
     </button>
   );

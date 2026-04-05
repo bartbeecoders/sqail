@@ -36,3 +36,16 @@ It does not seem to detect syntax errors properly. I do not see any error highli
 Improve the autocomplete functionality in the sql editor.
 when in a sql statement, propose the best matching next character or word. This could be a table name (after FROM or schema name), a column name (after SELECT or WHERE), a keyword (after FROM, WHERE, etc.), or a function name (after SELECT, WHERE, etc.).
 Create a full autocomplete system that can be used in the sql editor.
+
+
+The object tree list does not have a vertical scrollbar when there are many items.
+
+Add a button next to a function on stroed procedure in the object tree list that when clicked on opens a alter statement for that object.
+
+the filter on the object tree does  not work when I type in a schema name. Take into acccount also the schema name when filtering.
+
+Implement a full context menu on the sql objects tree list, for all objects
+
+Add a object and metadata export option.
+- export the structure and metadata of the filtered objects to a markdown file
+- ability to export to an excel list

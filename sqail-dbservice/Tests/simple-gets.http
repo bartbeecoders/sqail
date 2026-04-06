@@ -1,0 +1,107 @@
+# List saved connections
+GET http://localhost:5100/api/saved-connections
+
+###
+# Create a new saved connection
+POST http://localhost:5100/api/saved-connections
+Content-Type: application/json
+
+{
+  "id": "local-mssql",
+  "name": "Local SQL Server",
+  "provider": "mssql",
+  "connectionString": "Server=192.168.0.29;Database=alpha;User Id=report;Password=report;TrustServerCertificate=true;",
+  "commandTimeoutSeconds": 30,
+  "autoConnect": false
+}
+
+###
+# Update an existing saved connection
+PUT http://localhost:5100/api/saved-connections/local-mssql
+Content-Type: application/json
+
+{
+  "id": "local-mssql",
+  "name": "Local SQL Server (Updated)",
+  "provider": "mssql",
+  "connectionString": "Server=localhost;Database=test;Trusted_Connection=True;TrustServerCertificate=True;",
+  "commandTimeoutSeconds": 60,
+  "autoConnect": true
+}
+
+###
+# Delete a saved connection
+DELETE http://localhost:5100/api/saved-connections/local-mssql
+
+###
+# List active connections
+GET http://localhost:5100/api/connections
+
+###
+# Test a connection (without saving)
+POST http://localhost:5100/api/connections/test
+Content-Type: application/json
+
+{
+  "provider": "mssql",
+  "connectionString": "Server=localhost;Database=master;Trusted_Connection=True;TrustServerCertificate=True;"
+}
+
+###
+# Connect to a database
+POST http://localhost:5100/api/connections/connect
+Content-Type: application/json
+
+{
+  "id": "local-mssql",
+  "name": "Local SQL Server",
+  "provider": "mssql",
+  "connectionString": "Server=192.168.0.29;Database=alpha;User Id=report;Password=report;TrustServerCertificate=true;",
+  "commandTimeoutSeconds": 30
+}
+
+###
+# Disconnect from a database
+POST http://localhost:5100/api/connections/disconnect
+Content-Type: application/json
+
+{
+  "connectionId": "local-mssql"
+}
+
+###
+# Execute a SQL query
+POST http://localhost:5100/api/query/execute
+Content-Type: application/json
+
+{
+  "connectionId": "local-mssql",
+  "sql": "SELECT @@VERSION AS ServerVersion",
+  "timeoutSeconds": 30
+}
+
+###
+# Get full database metadata
+POST http://localhost:5100/api/metadata
+Content-Type: application/json
+
+{
+  "connectionId": "local-mssql",
+  "forceRefresh": false
+}
+
+###
+# Get tables for a connection
+GET http://localhost:5100/api/metadata/local-mssql/tables
+
+###
+# Get views for a connection
+GET http://localhost:5100/api/metadata/local-mssql/views
+
+###
+# Get stored procedures for a connection
+GET http://localhost:5100/api/metadata/local-mssql/procedures
+
+###
+# Get functions for a connection
+GET http://localhost:5100/api/metadata/local-mssql/functions

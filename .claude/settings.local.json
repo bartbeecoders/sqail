@@ -44,7 +44,15 @@
       "Bash(python3:*)",
       "Bash(npx vite:*)",
       "Bash(grep -r \"StateFlags\\\\|with_state_flags\\\\|DECORATIONS\" /run/media/bart/Development/dev/codeberg/sqail/node_modules/.pnpm/*window-state*/)",
-      "Bash(cargo doc:*)"
+      "Bash(cargo doc:*)",
+      "Bash(dotnet --version)",
+      "Bash(dotnet --list-sdks)",
+      "Bash(mkdir -p sqail-dbservice)",
+      "Bash(dotnet new:*)",
+      "Bash(dotnet add:*)",
+      "Bash(ls:*)",
+      "Bash(dotnet build:*)",
+      "WebFetch(domain:fast-endpoints.com)"
     ]
   }
 }

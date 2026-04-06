@@ -122,3 +122,6 @@ Make the object list pane width draggable
 
 Would it technically make sense to integrate page-agent in the app (https://github.com/alibaba/page-agent)?
 So you can control, UI test, and automate the app using AI.
+
+Use option A, add a tests folder where we will keep the tests for the app. The tests should be prompts that can be used to test the app using AI.
+You, claude code, will run the tests when I ask you to.

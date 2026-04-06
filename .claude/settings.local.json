@@ -44,7 +44,18 @@
       "Bash(python3:*)",
       "Bash(npx vite:*)",
       "Bash(grep -r \"StateFlags\\\\|with_state_flags\\\\|DECORATIONS\" /run/media/bart/Development/dev/codeberg/sqail/node_modules/.pnpm/*window-state*/)",
-      "Bash(cargo doc:*)"
+      "Bash(cargo doc:*)",
+      "WebFetch(domain:www.npmjs.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:alibaba.github.io)",
+      "WebFetch(domain:deepwiki.com)",
+      "Bash(pnpm exec:*)",
+      "Bash(npx tsx:*)",
+      "WebFetch(domain:v2.tauri.app)",
+      "Bash(cargo install:*)",
+      "Bash(pnpm remove:*)",
+      "Bash(curl -s -w \"\\\\nHTTP %{http_code}\" https://api.openrouter.ai/api/v1/models)",
+      "Bash(curl -s --max-time 10 -w \"\\\\nHTTP %{http_code}\" https://openrouter.ai/api/v1/models)"
     ]
   }
 }

@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useMemo } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { formatSqlAligned } from "./lib/sqlFormat";
 import { saveQuery, saveQueryAs, openQuery } from "./lib/fileOps";
+import TitleBar from "./components/TitleBar";
 import SplashScreen from "./components/SplashScreen";
 import Sidebar from "./components/Sidebar";
 import Toolbar from "./components/Toolbar";
@@ -53,11 +53,6 @@ export default function App() {
     localStorage.setItem("sqail_ai_panel_open", JSON.stringify(aiPanelOpen));
   }, [aiPanelOpen]);
 
-  useEffect(() => {
-    getCurrentWindow().setTitle(
-      `SQaiL v${__APP_VERSION__} (${__BUILD_NUMBER__})`,
-    );
-  }, []);
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId);
   const activeTabId = useEditorStore((s) => s.activeTabId);
   const loading = useQueryStore((s) => s.loading);
@@ -155,8 +150,10 @@ export default function App() {
   useGlobalShortcuts(shortcutHandlers);
 
   return (
-    <div className="flex h-full">
+    <div className="flex h-full flex-col">
+      <TitleBar />
       {!splashDone && <SplashScreen onComplete={() => setSplashDone(true)} />}
+      <div className="flex flex-1 overflow-hidden">
       <Sidebar
         collapsed={sidebarCollapsed}
         onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
@@ -181,6 +178,7 @@ export default function App() {
       {aiPanelOpen && <AiPanel />}
       <AiCommandPalette />
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
+      </div>
     </div>
   );
 }

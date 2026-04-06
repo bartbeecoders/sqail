@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { X, Loader2, CheckCircle2, XCircle, ExternalLink, ChevronDown } from "lucide-react";
+import { X, Loader2, CheckCircle2, XCircle, ExternalLink, ChevronDown, Link, FormInput } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { cn } from "../lib/utils";
 import { useConnectionStore } from "../stores/connectionStore";
@@ -9,6 +9,8 @@ import {
   type MssqlAuthMethod,
   defaultConnection,
   defaultPort,
+  parseConnectionString,
+  toConnectionString,
   DRIVER_LABELS,
   MSSQL_AUTH_LABELS,
 } from "../types/connection";
@@ -36,9 +38,12 @@ export default function ConnectionForm({ initial, onClose }: ConnectionFormProps
   const [entraSignedIn, setEntraSignedIn] = useState(false);
   const [entraLoading, setEntraLoading] = useState(false);
   const [deviceCode, setDeviceCode] = useState<DeviceCodeInfo | null>(null);
+  const [connStringMode, setConnStringMode] = useState(false);
+  const [connStringValue, setConnStringValue] = useState("");
+  const [connStringError, setConnStringError] = useState("");
 
   const { createConnection, updateConnection, testConnection } = useConnectionStore();
-  const isEdit = !!initial;
+  const isEdit = !!initial?.id;
 
   const set = <K extends keyof ConnectionConfig>(key: K, value: ConnectionConfig[K]) =>
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -150,6 +155,73 @@ export default function ConnectionForm({ initial, onClose }: ConnectionFormProps
             />
           </Field>
 
+          {/* Mode toggle */}
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                if (!connStringMode) {
+                  // Switching to connection string mode — build from current form
+                  setConnStringValue(toConnectionString(form));
+                  setConnStringError("");
+                }
+                setConnStringMode(!connStringMode);
+              }}
+              className={cn(
+                "flex items-center gap-1.5 rounded px-2 py-1 text-[11px] font-medium transition-colors",
+                connStringMode
+                  ? "bg-primary/10 text-primary"
+                  : "text-muted-foreground hover:bg-accent hover:text-foreground",
+              )}
+            >
+              {connStringMode ? <FormInput size={12} /> : <Link size={12} />}
+              {connStringMode ? "Switch to form" : "Use connection string"}
+            </button>
+          </div>
+
+          {connStringMode ? (
+            <>
+              <Field label="Connection String">
+                <textarea
+                  value={connStringValue}
+                  onChange={(e) => {
+                    setConnStringValue(e.target.value);
+                    setConnStringError("");
+                  }}
+                  placeholder="postgresql://user:password@host:5432/database"
+                  className="input font-mono text-[11px] resize-none"
+                  rows={3}
+                />
+              </Field>
+              {connStringError && (
+                <div className="flex items-start gap-2 rounded-md p-2 text-xs bg-destructive/10 text-destructive">
+                  <XCircle size={14} className="mt-0.5 shrink-0" />
+                  <span>{connStringError}</span>
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  try {
+                    const parsed = parseConnectionString(connStringValue);
+                    setForm((prev) => ({
+                      ...prev,
+                      ...parsed,
+                      name: prev.name || parsed.database || parsed.host || "",
+                    }));
+                    setConnStringError("");
+                    setConnStringMode(false);
+                  } catch (e) {
+                    setConnStringError(e instanceof Error ? e.message : String(e));
+                  }
+                }}
+                className="btn-secondary w-full text-xs"
+              >
+                Apply
+              </button>
+            </>
+          ) : (
+            <>
           {/* Driver */}
           <Field label="Driver">
             <div className="flex gap-1">
@@ -350,6 +422,8 @@ export default function ConnectionForm({ initial, onClose }: ConnectionFormProps
                 className="input"
               />
             </Field>
+          )}
+            </>
           )}
 
           {/* Color */}

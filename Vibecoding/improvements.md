@@ -117,3 +117,8 @@ Multiple open tabs can be linked to different connections.
 
 It should be possible to connect to multiple connections at the same time.
 When switching from one query to another query that is linked to a different connection, the connection should be switched to the new connection. And the object tree should show the objects of that connection.
+
+Make the object list pane width draggable
+
+Would it technically make sense to integrate page-agent in the app (https://github.com/alibaba/page-agent)?
+So you can control, UI test, and automate the app using AI.

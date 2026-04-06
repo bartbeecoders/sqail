@@ -38,7 +38,13 @@
       "Bash(gh auth:*)",
       "Bash(gh api:*)",
       "Bash(pacman -Q krb5)",
-      "WebFetch(domain:openrouter.ai)"
+      "WebFetch(domain:openrouter.ai)",
+      "Bash(npx tauri:*)",
+      "Bash(python3 -c ':*)",
+      "Bash(python3:*)",
+      "Bash(npx vite:*)",
+      "Bash(grep -r \"StateFlags\\\\|with_state_flags\\\\|DECORATIONS\" /run/media/bart/Development/dev/codeberg/sqail/node_modules/.pnpm/*window-state*/)",
+      "Bash(cargo doc:*)"
     ]
   }
 }

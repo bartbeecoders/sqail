@@ -10,7 +10,18 @@ Windows/Integrated authentication is not supported in this build. Enable the 'in
 
 Allow to set the connections through connection strings:
 
+like: 
+postgresql:
 postgresql://testuser:testpass123@192.168.0.34:5432/testdb
+
+sql server:
+Server=localhost;Database=MyDB;User Id=myUser;Password=myPassword;
+
+mysql:
+mysql://testuser:testpass123@192.168.0.34:3306/testdb
+
+sqllite:
+sqlite://./my_database.db
 
 
 
@@ -21,3 +32,5 @@ error occurred while decoding column schema_name: error in Any driver mapping: A
 Review the appliction and implement full support for postgres databases.
 
 In the database connections dialog, on a postgres connection, show a dropdown of the existing databases on the server. (when host and port and user are set)
+
+Add the ability to copy connections and make the connections list a dropdown.

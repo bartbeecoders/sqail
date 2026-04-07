@@ -13,7 +13,6 @@ public class DisconnectEndpoint(IConnectionManager connectionManager) : Endpoint
     public override void Configure()
     {
         Post("/api/connections/disconnect");
-        AllowAnonymous();
     }
 
     public override async Task HandleAsync(DisconnectRequest req, CancellationToken ct)

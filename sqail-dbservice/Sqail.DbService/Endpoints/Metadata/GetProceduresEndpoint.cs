@@ -9,7 +9,6 @@ public class GetProceduresEndpoint(IMetadataService metadataService) : EndpointW
     public override void Configure()
     {
         Get("/api/metadata/{connectionId}/procedures");
-        AllowAnonymous();
     }
 
     public override async Task HandleAsync(CancellationToken ct)

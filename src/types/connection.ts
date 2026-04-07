@@ -1,4 +1,4 @@
-export type Driver = "postgres" | "mysql" | "sqlite" | "mssql";
+export type Driver = "postgres" | "mysql" | "sqlite" | "mssql" | "dbservice";
 export type MssqlAuthMethod = "sql_server" | "windows" | "entra_id";
 
 export interface ConnectionConfig {
@@ -18,6 +18,10 @@ export interface ConnectionConfig {
   tenantId: string;
   azureClientId: string;
   color: string;
+  // DbService backend
+  dbserviceUrl: string;
+  dbserviceApiKey: string;
+  dbserviceRemoteId: string;
 }
 
 export function defaultPort(driver: Driver): number {
@@ -29,6 +33,8 @@ export function defaultPort(driver: Driver): number {
     case "mssql":
       return 1433;
     case "sqlite":
+      return 0;
+    case "dbservice":
       return 0;
   }
 }
@@ -51,6 +57,9 @@ export function defaultConnection(driver: Driver = "postgres"): ConnectionConfig
     tenantId: "",
     azureClientId: "",
     color: "",
+    dbserviceUrl: "",
+    dbserviceApiKey: "",
+    dbserviceRemoteId: "",
   };
 }
 
@@ -59,6 +68,7 @@ export const DRIVER_LABELS: Record<Driver, string> = {
   mysql: "MySQL",
   sqlite: "SQLite",
   mssql: "SQL Server",
+  dbservice: "DbService",
 };
 
 export const MSSQL_AUTH_LABELS: Record<MssqlAuthMethod, string> = {
@@ -157,6 +167,8 @@ export function toConnectionString(c: ConnectionConfig): string {
     }
     case "sqlite":
       return `sqlite://${c.filePath}`;
+    case "dbservice":
+      return c.dbserviceUrl;
     case "mssql": {
       const parts: string[] = [];
       parts.push(`Server=${c.host}${c.port !== 1433 ? "," + c.port : ""}`);

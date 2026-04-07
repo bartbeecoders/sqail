@@ -7,6 +7,18 @@ public class AppConfig
     public string MetadataFile { get; set; } = "metadata.json";
     /// <summary>Kept for one-time migration from appsettings into connections.json.</summary>
     public List<SavedConnection> SavedConnections { get; set; } = [];
+    public JwtOptions Jwt { get; set; } = new();
+}
+
+public class JwtOptions
+{
+    /// <summary>HS256 signing secret. Must be at least 32 chars.</summary>
+    public string Secret { get; set; } = "change-me-to-a-long-random-secret-32chars+";
+    public string Issuer { get; set; } = "sqail-dbservice";
+    public string Audience { get; set; } = "sqail";
+    /// <summary>Pre-shared API key clients present to /api/auth/token to obtain a JWT.</summary>
+    public string ApiKey { get; set; } = "change-me-api-key";
+    public int TokenLifetimeMinutes { get; set; } = 1440;
 }
 
 public class SavedConnection

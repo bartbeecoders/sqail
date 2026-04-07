@@ -1,5 +1,8 @@
+using System.Text;
 using System.Text.Json;
 using FastEndpoints;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.IdentityModel.Tokens;
 using Sqail.DbService.Configuration;
 using Sqail.DbService.Services;
 
@@ -41,6 +44,24 @@ builder.Services.AddSingleton<IQueryService, QueryService>();
 builder.Services.AddSingleton<IMetadataService, MetadataService>();
 builder.Services.AddFastEndpoints();
 
+builder.Services
+    .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidateAudience = true,
+            ValidateLifetime = true,
+            ValidateIssuerSigningKey = true,
+            ValidIssuer = appConfig.Jwt.Issuer,
+            ValidAudience = appConfig.Jwt.Audience,
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(appConfig.Jwt.Secret)),
+            ClockSkew = TimeSpan.FromSeconds(30),
+        };
+    });
+builder.Services.AddAuthorization();
+
 builder.Services.AddCors(options =>
 {
     options.AddDefaultPolicy(policy =>
@@ -54,9 +75,15 @@ builder.Services.AddCors(options =>
 var app = builder.Build();
 
 app.UseCors();
+app.UseAuthentication();
+app.UseAuthorization();
 app.UseFastEndpoints(c =>
 {
     c.Serializer.Options.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
+    // All endpoints require JWT unless they explicitly call AllowAnonymous() in Configure().
+    // Every endpoint requires JWT; endpoints that opt out via AllowAnonymous() keep working
+    // because ASP.NET Core short-circuits on IAllowAnonymous metadata.
+    c.Endpoints.Configurator = ep => ep.Description(b => b.RequireAuthorization());
 });
 
 Console.WriteLine($"Sqail DB Service running on http://0.0.0.0:{appConfig.Port}");
@@ -78,5 +105,7 @@ Console.WriteLine("  GET    /api/metadata/{id}/tables       - Get tables");
 Console.WriteLine("  GET    /api/metadata/{id}/views        - Get views");
 Console.WriteLine("  GET    /api/metadata/{id}/procedures   - Get stored procedures");
 Console.WriteLine("  GET    /api/metadata/{id}/functions    - Get functions");
+Console.WriteLine("  POST   /api/auth/token                 - Exchange API key for JWT (anonymous)");
+Console.WriteLine("All other endpoints require: Authorization: Bearer <jwt>");
 
 app.Run();

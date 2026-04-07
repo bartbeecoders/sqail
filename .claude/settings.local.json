@@ -52,7 +52,8 @@
       "Bash(dotnet add:*)",
       "Bash(ls:*)",
       "Bash(dotnet build:*)",
-      "WebFetch(domain:fast-endpoints.com)"
+      "WebFetch(domain:fast-endpoints.com)",
+      "Bash(grep -r \"HttpClient\\\\|http\\\\|POST\\\\|GET\" /run/media/bart/Development/dev/codeberg/sqail/src-tauri/src/*.rs)"
     ]
   }
 }

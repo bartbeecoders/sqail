@@ -744,5 +744,6 @@ pub async fn run_query(pool: DbPool, sql: &str) -> QueryResponse {
         DbPool::Mysql(p) => run_mysql(p, sql).await,
         DbPool::Sqlite(p) => run_sqlite(p, sql).await,
         DbPool::Mssql(p) => run_mssql(p, sql).await,
+        DbPool::DbService(c) => crate::dbservice::execute_query(&c, sql).await,
     }
 }

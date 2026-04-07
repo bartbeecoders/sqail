@@ -9,7 +9,6 @@ public class ExecuteSprocEndpoint(IQueryService queryService) : Endpoint<StoredP
     public override void Configure()
     {
         Post("/api/sproc/execute");
-        AllowAnonymous();
     }
 
     public override async Task HandleAsync(StoredProcedureRequest req, CancellationToken ct)

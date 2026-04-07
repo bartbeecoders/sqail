@@ -18,6 +18,11 @@ Use fastendpoint for the REST API  (https://fast-endpoints.com/)
 
 
 Update the dbservice:
-- [ ] Add a connections.json file to store the connections
-- [ ] Add a metadata.json file to store the metadata of the database    
-- [ ] Add a POST,PUT,DELETE endpoints to manage the connections
+- [x] Add a connections.json file to store the connections
+- [x] Add a metadata.json file to store the metadata of the database    
+- [x] Add a POST,PUT,DELETE endpoints to manage the connections
+
+
+Update Sqail to use the database service:
+Add the ability to use the DbService as a backend.
+Use JWT for authentication.

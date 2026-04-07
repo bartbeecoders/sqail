@@ -2,6 +2,7 @@ mod ai;
 mod auth;
 mod commands;
 mod db;
+mod dbservice;
 mod metadata;
 mod pool;
 mod query;

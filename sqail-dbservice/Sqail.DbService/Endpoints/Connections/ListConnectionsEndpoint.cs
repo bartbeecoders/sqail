@@ -9,7 +9,6 @@ public class ListConnectionsEndpoint(IConnectionManager connectionManager) : End
     public override void Configure()
     {
         Get("/api/connections");
-        AllowAnonymous();
     }
 
     public override async Task HandleAsync(CancellationToken ct)

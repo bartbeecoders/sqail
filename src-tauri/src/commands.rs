@@ -42,6 +42,7 @@ pub async fn create_connection(
             Driver::Mysql => 3306,
             Driver::Sqlite => 0,
             Driver::Mssql => 1433,
+            Driver::Dbservice => 0,
         };
     }
 
@@ -196,6 +197,19 @@ pub async fn test_connection(
                 Err("Unexpected result from test query".to_string())
             }
         }
+        Driver::Dbservice => {
+            if config.dbservice_url.is_empty() {
+                return Err("DbService URL is required".to_string());
+            }
+            let client = Arc::new(crate::pool::DbServiceClient {
+                base_url: config.dbservice_url.clone(),
+                remote_id: config.dbservice_remote_id.clone(),
+                jwt: tokio::sync::Mutex::new(String::new()),
+                api_key: config.dbservice_api_key.clone(),
+                http: crate::dbservice::build_http_client(),
+            });
+            crate::dbservice::test(&client).await
+        }
     }
 }
 
@@ -254,6 +268,7 @@ pub async fn list_databases(
             pool.close().await;
             Ok(rows)
         }
+        Driver::Dbservice => Err("Database listing not supported for DbService driver".to_string()),
         _ => Err("Database listing not supported for this driver".to_string()),
     }
 }
@@ -320,6 +335,23 @@ pub async fn connect(
                 .await
                 .map_err(|e| format!("Connection failed: {e}"))?;
             DbPool::Sqlite(Arc::new(pool))
+        }
+        Driver::Dbservice => {
+            if config.dbservice_url.is_empty() {
+                return Err("DbService URL is required".to_string());
+            }
+            let client = Arc::new(crate::pool::DbServiceClient {
+                base_url: config.dbservice_url.clone(),
+                remote_id: config.dbservice_remote_id.clone(),
+                jwt: tokio::sync::Mutex::new(String::new()),
+                api_key: config.dbservice_api_key.clone(),
+                http: crate::dbservice::build_http_client(),
+            });
+            // Eagerly exchange api_key for JWT so connect() fails fast on bad creds.
+            crate::dbservice::ensure_token(&client)
+                .await
+                .map_err(|e| format!("DbService auth failed: {e}"))?;
+            DbPool::DbService(client)
         }
     };
 

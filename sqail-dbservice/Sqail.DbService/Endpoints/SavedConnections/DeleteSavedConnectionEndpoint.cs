@@ -8,7 +8,6 @@ public class DeleteSavedConnectionEndpoint(IConnectionStore store) : EndpointWit
     public override void Configure()
     {
         Delete("/api/saved-connections/{id}");
-        AllowAnonymous();
     }
 
     public override async Task HandleAsync(CancellationToken ct)

@@ -125,7 +125,8 @@ export default function ConnectionForm({ initial, onClose }: ConnectionFormProps
     }
   };
 
-  const isNetwork = form.driver !== "sqlite";
+  const isDbService = form.driver === "dbservice";
+  const isNetwork = form.driver !== "sqlite" && !isDbService;
   const supportsDbList = form.driver === "postgres" || form.driver === "mysql";
 
   return (
@@ -413,7 +414,7 @@ export default function ConnectionForm({ initial, onClose }: ConnectionFormProps
           )}
 
           {/* SQLite file path */}
-          {!isNetwork && (
+          {form.driver === "sqlite" && (
             <Field label="Database File">
               <input
                 value={form.filePath}
@@ -422,6 +423,41 @@ export default function ConnectionForm({ initial, onClose }: ConnectionFormProps
                 className="input"
               />
             </Field>
+          )}
+
+          {/* DbService backend fields */}
+          {isDbService && (
+            <>
+              <Field label="Service URL">
+                <input
+                  value={form.dbserviceUrl}
+                  onChange={(e) => set("dbserviceUrl", e.target.value)}
+                  placeholder="http://localhost:5100"
+                  className="input"
+                />
+              </Field>
+              <Field label="API Key">
+                <input
+                  type="password"
+                  value={form.dbserviceApiKey}
+                  onChange={(e) => set("dbserviceApiKey", e.target.value)}
+                  placeholder="Shared API key (exchanged for a JWT)"
+                  className="input"
+                />
+              </Field>
+              <Field label="Remote Connection ID">
+                <input
+                  value={form.dbserviceRemoteId}
+                  onChange={(e) => set("dbserviceRemoteId", e.target.value)}
+                  placeholder="ID of a saved connection in DbService"
+                  className="input"
+                />
+              </Field>
+              <p className="text-[11px] text-muted-foreground">
+                Sqail exchanges the API key at <code>/api/auth/token</code> for a JWT and sends it
+                as <code>Authorization: Bearer …</code> on all subsequent requests.
+              </p>
+            </>
           )}
             </>
           )}

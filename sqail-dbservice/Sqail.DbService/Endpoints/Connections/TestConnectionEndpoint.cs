@@ -15,7 +15,6 @@ public class TestConnectionEndpoint(IConnectionManager connectionManager) : Endp
     public override void Configure()
     {
         Post("/api/connections/test");
-        AllowAnonymous();
     }
 
     public override async Task HandleAsync(TestConnectionRequest req, CancellationToken ct)

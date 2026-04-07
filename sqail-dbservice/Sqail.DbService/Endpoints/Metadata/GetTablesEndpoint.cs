@@ -9,7 +9,6 @@ public class GetTablesEndpoint(IMetadataService metadataService) : EndpointWitho
     public override void Configure()
     {
         Get("/api/metadata/{connectionId}/tables");
-        AllowAnonymous();
     }
 
     public override async Task HandleAsync(CancellationToken ct)

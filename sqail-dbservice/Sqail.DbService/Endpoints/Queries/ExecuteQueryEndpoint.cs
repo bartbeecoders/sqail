@@ -9,7 +9,6 @@ public class ExecuteQueryEndpoint(IQueryService queryService) : Endpoint<QueryRe
     public override void Configure()
     {
         Post("/api/query/execute");
-        AllowAnonymous();
     }
 
     public override async Task HandleAsync(QueryRequest req, CancellationToken ct)

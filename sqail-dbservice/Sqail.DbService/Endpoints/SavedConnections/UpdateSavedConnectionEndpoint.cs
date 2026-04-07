@@ -9,7 +9,6 @@ public class UpdateSavedConnectionEndpoint(IConnectionStore store) : Endpoint<Sa
     public override void Configure()
     {
         Put("/api/saved-connections/{id}");
-        AllowAnonymous();
     }
 
     public override async Task HandleAsync(SavedConnection req, CancellationToken ct)

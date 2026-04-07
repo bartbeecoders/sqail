@@ -18,7 +18,6 @@ public class ConnectEndpoint(IConnectionManager connectionManager) : Endpoint<Co
     public override void Configure()
     {
         Post("/api/connections/connect");
-        AllowAnonymous();
     }
 
     public override async Task HandleAsync(ConnectRequest req, CancellationToken ct)

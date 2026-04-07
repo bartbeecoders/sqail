@@ -7,6 +7,7 @@ pub enum Driver {
     Mysql,
     Sqlite,
     Mssql,
+    Dbservice,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -30,6 +31,7 @@ impl std::fmt::Display for Driver {
             Driver::Mysql => write!(f, "mysql"),
             Driver::Sqlite => write!(f, "sqlite"),
             Driver::Mssql => write!(f, "mssql"),
+            Driver::Dbservice => write!(f, "dbservice"),
         }
     }
 }
@@ -66,6 +68,13 @@ pub struct ConnectionConfig {
     pub azure_client_id: String,
     #[serde(default)]
     pub color: String,
+    // ── DbService backend ──
+    #[serde(default)]
+    pub dbservice_url: String,
+    #[serde(default)]
+    pub dbservice_api_key: String,
+    #[serde(default)]
+    pub dbservice_remote_id: String,
 }
 
 impl ConnectionConfig {
@@ -96,6 +105,7 @@ impl ConnectionConfig {
                 // Not used — MSSQL uses tiberius config directly
                 String::new()
             }
+            Driver::Dbservice => String::new(),
         }
     }
 

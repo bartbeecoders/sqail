@@ -636,6 +636,13 @@ fn get_mssql_pool(pool: &DbPool) -> Result<&Arc<bb8::Pool<bb8_tiberius::Connecti
     }
 }
 
+fn get_dbservice_client(pool: &DbPool) -> Result<&Arc<crate::pool::DbServiceClient>, String> {
+    match pool {
+        DbPool::DbService(c) => Ok(c),
+        _ => Err("Expected DbService client".to_string()),
+    }
+}
+
 pub async fn list_schemas(
     pool: DbPool,
     driver: &Driver,
@@ -645,6 +652,7 @@ pub async fn list_schemas(
         Driver::Mysql => mysql_schemas(get_mysql_pool(&pool)?).await,
         Driver::Sqlite => sqlite_schemas(get_sqlite_pool(&pool)?).await,
         Driver::Mssql => mssql_schemas(get_mssql_pool(&pool)?).await,
+        Driver::Dbservice => crate::dbservice::list_schemas(get_dbservice_client(&pool)?).await,
     }
 }
 
@@ -658,6 +666,9 @@ pub async fn list_tables(
         Driver::Mysql => mysql_tables(get_mysql_pool(&pool)?, schema).await,
         Driver::Sqlite => sqlite_tables(get_sqlite_pool(&pool)?, schema).await,
         Driver::Mssql => mssql_tables(get_mssql_pool(&pool)?, schema).await,
+        Driver::Dbservice => {
+            crate::dbservice::list_tables(get_dbservice_client(&pool)?, schema).await
+        }
     }
 }
 
@@ -672,6 +683,9 @@ pub async fn list_columns(
         Driver::Mysql => mysql_columns(get_mysql_pool(&pool)?, schema, table).await,
         Driver::Sqlite => sqlite_columns(get_sqlite_pool(&pool)?, schema, table).await,
         Driver::Mssql => mssql_columns(get_mssql_pool(&pool)?, schema, table).await,
+        Driver::Dbservice => {
+            crate::dbservice::list_columns(get_dbservice_client(&pool)?, schema, table).await
+        }
     }
 }
 
@@ -686,6 +700,7 @@ pub async fn list_indexes(
         Driver::Mysql => mysql_indexes(get_mysql_pool(&pool)?, schema, table).await,
         Driver::Sqlite => sqlite_indexes(get_sqlite_pool(&pool)?, schema, table).await,
         Driver::Mssql => mssql_indexes(get_mssql_pool(&pool)?, schema, table).await,
+        Driver::Dbservice => Ok(Vec::new()),
     }
 }
 
@@ -699,6 +714,7 @@ pub async fn list_routines(
         Driver::Mysql => mysql_routines(get_mysql_pool(&pool)?, schema).await,
         Driver::Sqlite => sqlite_routines(get_sqlite_pool(&pool)?, schema).await,
         Driver::Mssql => mssql_routines(get_mssql_pool(&pool)?, schema).await,
+        Driver::Dbservice => Ok(Vec::new()),
     }
 }
 
@@ -816,6 +832,7 @@ pub async fn get_view_definition(
         Driver::Mysql => mysql_view_definition(get_mysql_pool(&pool)?, schema, name).await,
         Driver::Sqlite => sqlite_view_definition(get_sqlite_pool(&pool)?, schema, name).await,
         Driver::Mssql => mssql_view_definition(get_mssql_pool(&pool)?, schema, name).await,
+        Driver::Dbservice => Err("View definitions not supported via DbService".to_string()),
     }
 }
 
@@ -946,5 +963,6 @@ pub async fn get_routine_definition(
         }
         Driver::Sqlite => Err("SQLite does not support stored routines".to_string()),
         Driver::Mssql => mssql_routine_definition(get_mssql_pool(&pool)?, schema, name).await,
+        Driver::Dbservice => Err("Routine definitions not supported via DbService".to_string()),
     }
 }

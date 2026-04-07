@@ -15,7 +15,6 @@ public class GetMetadataEndpoint(IMetadataService metadataService) : Endpoint<Ge
     public override void Configure()
     {
         Post("/api/metadata");
-        AllowAnonymous();
     }
 
     public override async Task HandleAsync(GetMetadataRequest req, CancellationToken ct)

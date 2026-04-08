@@ -490,7 +490,8 @@ export function createSqlCompletionProvider(): languages.CompletionItemProvider 
       const store = useSchemaStore.getState();
 
       const suggestions: languages.CompletionItem[] = [];
-      let sortBase = 0;
+      let sortBase: number = 0;
+      void sortBase;
 
       // ── Context-specific suggestions (highest priority) ────
 

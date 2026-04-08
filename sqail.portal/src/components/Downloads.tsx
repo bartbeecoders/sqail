@@ -1,5 +1,12 @@
-import { Download, Monitor, Terminal } from "lucide-react";
-import { VERSION, BUILD_NUMBER, DOWNLOADS, detectPlatform, getDownloadUrl } from "../lib/constants";
+import { Download, Monitor, Server, Terminal } from "lucide-react";
+import {
+  VERSION,
+  BUILD_NUMBER,
+  DOWNLOADS,
+  DBSERVICE_DOWNLOADS,
+  detectPlatform,
+  getDownloadUrl,
+} from "../lib/constants";
 
 const ICON_MAP: Record<string, React.ReactNode> = {
   Monitor: <Monitor size={20} />,
@@ -57,6 +64,38 @@ export default function Downloads() {
               </a>
             );
           })}
+        </div>
+
+        {/* DbService — optional backend service */}
+        <div className="mt-16">
+          <h3 className="mb-2 text-xl font-semibold text-text-primary">
+            DbService (optional backend)
+          </h3>
+          <p className="mb-6 text-sm text-text-muted">
+            A standalone HTTP service that proxies queries to remote databases.
+            Install on a server to share connections without exposing credentials to clients.
+          </p>
+          <div className="grid gap-4 sm:grid-cols-3">
+            {DBSERVICE_DOWNLOADS.map((dl) => (
+              <a
+                key={dl.platform}
+                href={getDownloadUrl(dl.fileName)}
+                className="group flex flex-col items-center gap-3 rounded-xl border border-border bg-bg-primary p-6 transition-colors hover:border-text-dim hover:bg-bg-card"
+              >
+                <div className="flex h-12 w-12 items-center justify-center rounded-full bg-bg-section text-text-muted group-hover:text-text-primary">
+                  <Server size={20} />
+                </div>
+                <span className="text-lg font-semibold text-text-primary">
+                  {dl.label}
+                </span>
+                <span className="break-all text-xs text-text-dim">{dl.fileName}</span>
+                <span className="inline-flex items-center gap-1 text-sm text-brand-cyan">
+                  <Download size={14} />
+                  Download
+                </span>
+              </a>
+            ))}
+          </div>
         </div>
 
         <div className="mt-8 flex items-center justify-center gap-6 text-sm text-text-dim">

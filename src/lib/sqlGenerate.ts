@@ -12,6 +12,7 @@ import type { ColumnInfo } from "../types/schema";
 function quoteIdent(name: string, driver: Driver): string {
   switch (driver) {
     case "mssql":
+    case "dbservice":
       return `[${name.replace(/]/g, "]]")}]`;
     case "mysql":
       return `\`${name.replace(/`/g, "``")}\``;
@@ -25,6 +26,7 @@ function quoteIdent(name: string, driver: Driver): string {
 function quoteAlias(name: string, driver: Driver): string {
   switch (driver) {
     case "mssql":
+    case "dbservice":
     case "mysql":
       // Single-quoted alias: 'Column Name'
       return `'${name.replace(/'/g, "''")}'`;

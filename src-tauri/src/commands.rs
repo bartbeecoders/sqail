@@ -351,6 +351,9 @@ pub async fn connect(
             crate::dbservice::ensure_token(&client)
                 .await
                 .map_err(|e| format!("DbService auth failed: {e}"))?;
+            // Open the pool on the remote backend so query/metadata calls can
+            // reference it by id.
+            crate::dbservice::connect(&client).await?;
             DbPool::DbService(client)
         }
     };

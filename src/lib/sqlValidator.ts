@@ -128,7 +128,7 @@ export function validateSql(text: string, driver?: string): SqlError[] {
   // Track state across lines
   let inSingleQuote = false;
   let inDoubleQuote = false;
-  let inLineComment = false;
+  let inLineComment: boolean;
   let inBlockComment = false;
   let parenDepth = 0;
   const parenStack: { line: number; col: number }[] = [];

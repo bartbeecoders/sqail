@@ -11,6 +11,20 @@ MODE="${1:-dev}"
 
 case "$MODE" in
   dev)
+    # Kill anything already listening on the dev ports (DbService 5100, Vite 1420).
+    for port in 5100 1420; do
+      pids=$(lsof -ti tcp:"$port" 2>/dev/null || true)
+      if [ -n "$pids" ]; then
+        echo "Killing process(es) on port $port: $pids"
+        kill -9 $pids 2>/dev/null || true
+      fi
+    done
+
+    echo "Starting Sqail.DbService in background..."
+    "$PROJECT_ROOT/scripts/start-dbservice.sh" dev &
+    DBSERVICE_PID=$!
+    trap 'echo "Stopping Sqail.DbService (pid $DBSERVICE_PID)..."; kill $DBSERVICE_PID 2>/dev/null || true' EXIT INT TERM
+
     echo "Starting sqail in development mode..."
     pnpm tauri dev
     ;;

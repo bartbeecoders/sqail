@@ -55,6 +55,7 @@ struct DbServiceColumn {
     name: String,
     data_type: String,
     #[serde(default)]
+    #[allow(dead_code)]
     is_nullable: bool,
 }
 
@@ -111,6 +112,30 @@ pub async fn ensure_token(client: &Arc<DbServiceClient>) -> Result<String, Strin
     let mut guard = client.jwt.lock().await;
     *guard = body.token.clone();
     Ok(body.token)
+}
+
+/// POST /api/connections/connect — tells the remote backend to open a pool for remote_id.
+/// The server resolves the connection string from its saved connection store.
+pub async fn connect(client: &Arc<DbServiceClient>) -> Result<(), String> {
+    let token = ensure_token(client).await?;
+    let url = format!("{}/api/connections/connect", trim_base(&client.base_url));
+    let res = client
+        .http
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "id": client.remote_id }))
+        .send()
+        .await
+        .map_err(|e| format!("DbService connect failed: {e}"))?;
+    if res.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "DbService connect failed ({}): {}",
+            res.status(),
+            res.text().await.unwrap_or_default()
+        ))
+    }
 }
 
 /// POST /api/connections/test — pings the remote backend using the configured remote_id.

@@ -1,5 +1,32 @@
 [
   {
+    "version": "0.3.4",
+    "sections": [
+      {
+        "title": "DbService Backend",
+        "items": [
+          "JWT authentication added to the DbService HTTP backend",
+          "Rust client now calls /api/connections/connect on pool open so subsequent query and metadata calls can reference connections by id",
+          "/api/connections/test and /api/connections/connect accept a saved connection id and resolve the connection string from the server's connection store",
+          "DbService Windows x64 self-contained release build in the GitHub pipeline, with a download link on the portal"
+        ]
+      },
+      {
+        "title": "Editor",
+        "items": [
+          "Fixed drag-drop of tables from a DbService connection producing 'undefined AS undefined FROM undefined.undefined' — the dbservice driver is now handled by the SELECT generator"
+        ]
+      },
+      {
+        "title": "Dev Tooling",
+        "items": [
+          "scripts/run.sh dev now launches the DbService alongside Tauri and tears it down on exit",
+          "scripts/run.sh dev frees ports 5100 (DbService) and 1420 (Vite) before starting to avoid 'address in use' errors"
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.3.3",
     "sections": [
       {

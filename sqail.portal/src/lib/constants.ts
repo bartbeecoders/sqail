@@ -49,6 +49,22 @@ export function getDownloadUrl(fileName: string): string {
   return `/releases/${fileName}`;
 }
 
+export interface DbServiceDownloadInfo {
+  platform: Platform;
+  label: string;
+  fileName: string;
+  ext: string;
+}
+
+export const DBSERVICE_DOWNLOADS: DbServiceDownloadInfo[] = [
+  {
+    platform: "windows",
+    label: "Windows (x64)",
+    fileName: `${FILE_PREFIX}_dbservice_win-x64.zip`,
+    ext: ".zip",
+  },
+];
+
 export const FEATURES = [
   {
     icon: "Monitor",

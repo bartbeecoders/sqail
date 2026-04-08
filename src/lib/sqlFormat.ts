@@ -106,7 +106,7 @@ const CLAUSE_STARTS = new Set([
 /** Convert snake_case to PascalCase (no spaces). */
 function toPascalCase(name: string): string {
   return name
-    .replace(/^[\[\]"`]+|[\[\]"`]+$/g, "") // strip quotes/brackets
+    .replace(/^[[\]"`]+|[[\]"`]+$/g, "") // strip quotes/brackets
     .split(/[_\s-]+/)
     .map((w) => (w.length > 0 ? w[0].toUpperCase() + w.slice(1).toLowerCase() : ""))
     .join("");
@@ -119,7 +119,7 @@ function toPascalCase(name: string): string {
  * Single word: [users]                 → "us"  (first two chars)
  */
 function generateTableAlias(tableName: string): string {
-  const clean = tableName.replace(/[\[\]"`]/g, "");
+  const clean = tableName.replace(/[[\]"`]/g, "");
   const dotParts = clean.split(".");
 
   if (dotParts.length >= 2) {
@@ -153,7 +153,7 @@ function tokenize(sql: string): Token[] {
   while (i < sql.length) {
     // Whitespace
     if (/\s/.test(sql[i])) {
-      let start = i;
+      const start = i;
       while (i < sql.length && /\s/.test(sql[i])) i++;
       tokens.push({ type: "whitespace", value: sql.slice(start, i), upper: " " });
       continue;
@@ -161,7 +161,7 @@ function tokenize(sql: string): Token[] {
 
     // Single-line comment
     if (sql[i] === "-" && sql[i + 1] === "-") {
-      let start = i;
+      const start = i;
       while (i < sql.length && sql[i] !== "\n") i++;
       tokens.push({ type: "comment", value: sql.slice(start, i), upper: sql.slice(start, i) });
       continue;
@@ -169,7 +169,7 @@ function tokenize(sql: string): Token[] {
 
     // Multi-line comment
     if (sql[i] === "/" && sql[i + 1] === "*") {
-      let start = i;
+      const start = i;
       i += 2;
       while (i < sql.length - 1 && !(sql[i] === "*" && sql[i + 1] === "/")) i++;
       i += 2;
@@ -179,7 +179,7 @@ function tokenize(sql: string): Token[] {
 
     // Bracketed identifier [...]
     if (sql[i] === "[") {
-      let start = i;
+      const start = i;
       i++;
       while (i < sql.length && sql[i] !== "]") i++;
       i++; // closing ]
@@ -189,7 +189,7 @@ function tokenize(sql: string): Token[] {
 
     // Quoted identifier "..."
     if (sql[i] === '"') {
-      let start = i;
+      const start = i;
       i++;
       while (i < sql.length && sql[i] !== '"') i++;
       i++;
@@ -199,7 +199,7 @@ function tokenize(sql: string): Token[] {
 
     // Backtick identifier `...`
     if (sql[i] === "`") {
-      let start = i;
+      const start = i;
       i++;
       while (i < sql.length && sql[i] !== "`") i++;
       i++;
@@ -209,7 +209,7 @@ function tokenize(sql: string): Token[] {
 
     // String literal '...'
     if (sql[i] === "'") {
-      let start = i;
+      const start = i;
       i++;
       while (i < sql.length) {
         if (sql[i] === "'" && sql[i + 1] === "'") {
@@ -227,7 +227,7 @@ function tokenize(sql: string): Token[] {
 
     // Number
     if (/\d/.test(sql[i])) {
-      let start = i;
+      const start = i;
       while (i < sql.length && /[\d.]/.test(sql[i])) i++;
       tokens.push({ type: "number", value: sql.slice(start, i), upper: sql.slice(start, i) });
       continue;
@@ -235,7 +235,7 @@ function tokenize(sql: string): Token[] {
 
     // Word (keyword or identifier)
     if (/[a-zA-Z_@#]/.test(sql[i])) {
-      let start = i;
+      const start = i;
       while (i < sql.length && /[a-zA-Z0-9_@#$]/.test(sql[i])) i++;
       const word = sql.slice(start, i);
       const upper = word.toUpperCase();
@@ -323,7 +323,7 @@ function parseSelect(tokens: Token[]): ParsedSelect | null {
 
   // Parse SELECT columns until FROM
   const columns: SelectColumn[] = [];
-  let colStart = pos;
+  const colStart = pos;
 
   // Find FROM position at top level (not inside parens)
   let fromPos = -1;
@@ -429,8 +429,8 @@ function parseSelect(tokens: Token[]): ParsedSelect | null {
       }
 
       // Detect clause keyword (1 or 2 words)
-      let keyword = "";
-      let skipCount = 0;
+      let keyword: string;
+      let skipCount: number;
       const twoWord = pos + 1 < mt.length ? mt[pos].upper + " " + mt[pos + 1].upper : "";
       if (CLAUSE_STARTS.has(twoWord)) {
         keyword = twoWord;
@@ -555,7 +555,7 @@ function buildColumnAlias(expr: string): string {
   const dotParts = expr.split(".");
   const colPart = dotParts[dotParts.length - 1].trim();
   // Strip brackets, backticks, double-quotes
-  const clean = colPart.replace(/[\[\]"`]/g, "");
+  const clean = colPart.replace(/[[\]"`]/g, "");
   // Handle * — no alias
   if (clean === "*") return "";
   return toPascalCase(clean);

@@ -258,9 +258,48 @@ jobs:
           path: dist/releases/sqail_*
           retention-days: 30
 
+  # ── Build DbService (Windows self-contained) ──────────────────────────
+  build-dbservice-windows:
+    needs: prepare
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Publish Sqail.DbService (win-x64, self-contained)
+        shell: bash
+        run: |
+          dotnet publish sqail-dbservice/Sqail.DbService/Sqail.DbService.csproj \
+            -c Release \
+            -r win-x64 \
+            --self-contained true \
+            -p:PublishSingleFile=true \
+            -p:IncludeNativeLibrariesForSelfExtract=true \
+            -o sqail-dbservice/publish/win-x64
+
+      - name: Package zip
+        shell: bash
+        run: |
+          PREFIX="${{ needs.prepare.outputs.file_prefix }}"
+          mkdir -p dist/releases
+          cd sqail-dbservice/publish/win-x64
+          7z a -tzip "../../../dist/releases/${PREFIX}_dbservice_win-x64.zip" .
+          cd -
+          ls -lh dist/releases/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dbservice-windows
+          path: dist/releases/sqail_*_dbservice_*
+          retention-days: 30
+
   # ── Upload binaries to VPS ─────────────────────────────────────────────
   deploy-binaries:
-    needs: [prepare, build-linux, build-windows, build-macos]
+    needs: [prepare, build-linux, build-windows, build-macos, build-dbservice-windows]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts

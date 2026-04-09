@@ -1,5 +1,24 @@
 [
   {
+    "version": "0.3.5",
+    "sections": [
+      {
+        "title": "AI Assistant",
+        "items": [
+          "Prompt history in the AI command palette — last 10 prompts remembered, navigate with Up/Down arrow keys",
+          "AI prompts now include the active editor query as context when relevant"
+        ]
+      },
+      {
+        "title": "Editor",
+        "items": [
+          "Split editor view now mirrors the same file in both panes, allowing you to view different parts of a long query simultaneously",
+          "Split panes share a single Monaco model — edits in either pane are instantly reflected in the other"
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.3.4",
     "sections": [
       {

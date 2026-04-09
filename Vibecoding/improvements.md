@@ -122,3 +122,6 @@ Make the object list pane width draggable
 
 Would it technically make sense to integrate page-agent in the app (https://github.com/alibaba/page-agent)?
 So you can control, UI test, and automate the app using AI.
+
+
+Check the split editor view. Splitting the editor view should show the same sql in both editors, so that the user can see different parts of the same query.

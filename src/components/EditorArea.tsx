@@ -1,9 +1,10 @@
 import { useState, useRef, useCallback } from "react";
-import { Columns2, X } from "lucide-react";
+import { Columns2 } from "lucide-react";
+import type { editor as monacoEditor } from "monaco-editor";
 import { cn } from "../lib/utils";
-import { useEditorStore } from "../stores/editorStore";
 import EditorTabs from "./EditorTabs";
 import SqlEditor from "./SqlEditor";
+import SplitEditorPane from "./SplitEditorPane";
 
 interface EditorAreaProps {
   onExecute?: (sql: string) => void;
@@ -12,24 +13,14 @@ interface EditorAreaProps {
 
 export default function EditorArea({ onExecute, onFormat }: EditorAreaProps) {
   const [split, setSplit] = useState(false);
-  const [splitTabId, setSplitTabId] = useState<string | null>(null);
   const [splitRatio, setSplitRatio] = useState(0.5);
   const containerRef = useRef<HTMLDivElement>(null);
   const dragging = useRef(false);
-  const tabs = useEditorStore((s) => s.tabs);
+  const primaryEditorRef = useRef<monacoEditor.IStandaloneCodeEditor | null>(null);
 
-  // When enabling split, default to a different tab if possible
   const toggleSplit = useCallback(() => {
-    if (split) {
-      setSplit(false);
-      setSplitTabId(null);
-    } else {
-      const state = useEditorStore.getState();
-      const other = state.tabs.find((t) => t.id !== state.activeTabId);
-      setSplitTabId(other?.id ?? state.activeTabId);
-      setSplit(true);
-    }
-  }, [split]);
+    setSplit((prev) => !prev);
+  }, []);
 
   const onResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -79,8 +70,8 @@ export default function EditorArea({ onExecute, onFormat }: EditorAreaProps) {
 
       {split ? (
         <div ref={containerRef} className="flex flex-1 overflow-hidden">
-          <div style={{ flex: `${splitRatio} 1 0%` }} className="min-w-0 overflow-hidden">
-            <SqlEditor onExecute={onExecute} onFormat={onFormat} />
+          <div style={{ flex: `${splitRatio} 1 0%` }} className="flex min-w-0 flex-col overflow-hidden">
+            <SqlEditor onExecute={onExecute} onFormat={onFormat} editorRefOut={primaryEditorRef} />
           </div>
           <div
             onMouseDown={onResizeStart}
@@ -88,40 +79,12 @@ export default function EditorArea({ onExecute, onFormat }: EditorAreaProps) {
           >
             <div className="h-8 w-0.5 rounded-full bg-muted-foreground/30" />
           </div>
-          <div style={{ flex: `${1 - splitRatio} 1 0%` }} className="flex min-w-0 flex-col overflow-hidden">
-            {/* Split pane tab selector */}
-            <div className="flex h-7 shrink-0 items-center gap-px overflow-x-auto border-b border-border bg-muted/30 px-1">
-              {tabs.map((tab) => (
-                <button
-                  key={tab.id}
-                  onClick={() => setSplitTabId(tab.id)}
-                  className={cn(
-                    "rounded px-2 py-0.5 text-[10px] transition-colors",
-                    tab.id === splitTabId
-                      ? "bg-background text-foreground border border-border"
-                      : "text-muted-foreground hover:text-foreground hover:bg-muted",
-                  )}
-                >
-                  {tab.title}
-                </button>
-              ))}
-              <button
-                onClick={() => setSplit(false)}
-                className="ml-auto rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
-                title="Close split"
-              >
-                <X size={10} />
-              </button>
-            </div>
-            <SqlEditor
-              onExecute={onExecute}
-              onFormat={onFormat}
-              overrideTabId={splitTabId ?? undefined}
-            />
+          <div style={{ flex: `${1 - splitRatio} 1 0%` }} className="min-w-0 overflow-hidden">
+            <SplitEditorPane primaryEditorRef={primaryEditorRef} />
           </div>
         </div>
       ) : (
-        <SqlEditor onExecute={onExecute} onFormat={onFormat} />
+        <SqlEditor onExecute={onExecute} onFormat={onFormat} editorRefOut={primaryEditorRef} />
       )}
     </div>
   );

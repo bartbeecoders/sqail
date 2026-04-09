@@ -28,9 +28,11 @@ interface SqlEditorProps {
   onExecute?: (sql: string) => void;
   onFormat?: () => void;
   overrideTabId?: string;
+  /** When true, expose the editor ref so a split pane can share its model. */
+  editorRefOut?: React.MutableRefObject<monacoEditor.IStandaloneCodeEditor | null>;
 }
 
-export default function SqlEditor({ onExecute, onFormat, overrideTabId }: SqlEditorProps) {
+export default function SqlEditor({ onExecute, onFormat, overrideTabId, editorRefOut }: SqlEditorProps) {
   const isDark = useDarkMode();
   const editorRef = useRef<monacoEditor.IStandaloneCodeEditor | null>(null);
   const { activeTabId: storeActiveTabId, tabs, setContent } = useEditorStore();
@@ -86,6 +88,7 @@ export default function SqlEditor({ onExecute, onFormat, overrideTabId }: SqlEdi
     (editor, monaco) => {
       editorRef.current = editor;
       monacoRef.current = monaco;
+      if (editorRefOut) editorRefOut.current = editor;
 
       // Initial validation
       setTimeout(() => runValidation(), 100);

@@ -56,3 +56,8 @@ openrouter has an endpoint (curl https://openrouter.ai/api/v1/models \
 Show that list in the AI settings sidebar, so the user can select one of them.
 
 On a corporate network, the user might encounter a CRYPT_E_NO_REVOCATION_CHECK error when trying to connect to the internet. Add a setting to disable SSL certificate verification for the AI provider.
+
+
+Keep a prompt history of the last 10 prompts in the AI assitant dialog box.
+
+When a AI prompt is eneterd, always check if it applies to the active query in the editor. If it does, use the active query as context for the AI prompt.

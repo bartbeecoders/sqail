@@ -53,7 +53,11 @@
       "Bash(ls:*)",
       "Bash(dotnet build:*)",
       "WebFetch(domain:fast-endpoints.com)",
-      "Bash(grep -r \"HttpClient\\\\|http\\\\|POST\\\\|GET\" /run/media/bart/Development/dev/codeberg/sqail/src-tauri/src/*.rs)"
+      "Bash(grep -r \"HttpClient\\\\|http\\\\|POST\\\\|GET\" /run/media/bart/Development/dev/codeberg/sqail/src-tauri/src/*.rs)",
+      "Bash(cat /run/media/bart/Development/dev/codeberg/sqail/sqail-dbservice/Sqail.DbService/Configuration/*.cs)",
+      "Bash(pnpm check:*)",
+      "Bash(pnpm lint:*)",
+      "Bash(npx eslint:*)"
     ]
   }
 }

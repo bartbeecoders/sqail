@@ -50,6 +50,8 @@ export default function AiCommandPalette() {
     error,
     providers,
     closePalette,
+    promptHistory,
+    addToPromptHistory,
     generateSql,
     explainQuery,
     optimizeQuery,
@@ -62,6 +64,8 @@ export default function AiCommandPalette() {
   } = useAiStore();
 
   const [prompt, setPrompt] = useState("");
+  const [historyIndex, setHistoryIndex] = useState(-1);
+  const draftRef = useRef("");
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const responseRef = useRef<HTMLDivElement>(null);
 
@@ -82,6 +86,8 @@ export default function AiCommandPalette() {
   useEffect(() => {
     if (paletteOpen) {
       setPrompt("");
+      setHistoryIndex(-1);
+      draftRef.current = "";
       // Small delay to ensure DOM is ready
       requestAnimationFrame(() => inputRef.current?.focus());
     }
@@ -151,6 +157,10 @@ export default function AiCommandPalette() {
     const text = prompt.trim();
     if (!text) return;
 
+    addToPromptHistory(text);
+    setHistoryIndex(-1);
+    draftRef.current = "";
+
     // Check for prefix commands
     const firstWord = text.split(/\s/)[0].toLowerCase();
     const prefixFlow = PREFIX_COMMANDS[firstWord];
@@ -164,8 +174,12 @@ export default function AiCommandPalette() {
         await handleSubmitFlow(prefixFlow);
       }
     } else {
-      // Default: natural language to SQL
-      await handleSubmitFlow("generate_sql", text);
+      // Default: natural language to SQL — include active editor query as context
+      const editorSql = getCurrentSql();
+      const fullPrompt = editorSql
+        ? `Current query in editor:\n${editorSql}\n\nUser request: ${text}`
+        : text;
+      await handleSubmitFlow("generate_sql", fullPrompt);
     }
   };
 
@@ -203,6 +217,29 @@ export default function AiCommandPalette() {
     if (e.key === "Escape" && !streaming) {
       e.preventDefault();
       closePalette();
+    }
+    // Prompt history navigation with Up/Down arrows
+    if (e.key === "ArrowUp" && promptHistory.length > 0) {
+      e.preventDefault();
+      if (historyIndex === -1) {
+        draftRef.current = prompt;
+      }
+      const newIndex = historyIndex === -1
+        ? promptHistory.length - 1
+        : Math.max(0, historyIndex - 1);
+      setHistoryIndex(newIndex);
+      setPrompt(promptHistory[newIndex]);
+    }
+    if (e.key === "ArrowDown" && historyIndex !== -1) {
+      e.preventDefault();
+      if (historyIndex >= promptHistory.length - 1) {
+        setHistoryIndex(-1);
+        setPrompt(draftRef.current);
+      } else {
+        const newIndex = historyIndex + 1;
+        setHistoryIndex(newIndex);
+        setPrompt(promptHistory[newIndex]);
+      }
     }
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();

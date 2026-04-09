@@ -63,6 +63,10 @@ interface AiState {
 
   loadHistory: () => Promise<void>;
   clearHistory: () => Promise<void>;
+
+  /** Last 10 prompts entered in the palette (newest last). */
+  promptHistory: string[];
+  addToPromptHistory: (prompt: string) => void;
 }
 
 export const useAiStore = create<AiState>((set, get) => ({
@@ -78,6 +82,7 @@ export const useAiStore = create<AiState>((set, get) => ({
   paletteOpen: false,
   paletteFlow: null,
   paletteSql: "",
+  promptHistory: [],
 
   loadProviders: async () => {
     try {
@@ -134,6 +139,14 @@ export const useAiStore = create<AiState>((set, get) => ({
     }),
   closePalette: () =>
     set({ paletteOpen: false, paletteFlow: null, paletteSql: "" }),
+
+  addToPromptHistory: (prompt) => {
+    const { promptHistory } = get();
+    // Avoid consecutive duplicates
+    if (promptHistory[promptHistory.length - 1] === prompt) return;
+    const updated = [...promptHistory, prompt].slice(-10);
+    set({ promptHistory: updated });
+  },
 
   generateSql: async (prompt, schemaContext, driver) => {
     set({ streaming: true, currentResponse: "", error: null, currentFlow: "generate_sql" });

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::ai::provider::{AiHistoryEntry, AiProviderConfig};
 
@@ -10,7 +10,7 @@ pub struct AiProviderStore {
 }
 
 impl AiProviderStore {
-    pub fn new(app_data_dir: &PathBuf) -> Self {
+    pub fn new(app_data_dir: &Path) -> Self {
         Self {
             path: app_data_dir.join("ai_providers.json"),
         }
@@ -37,7 +37,7 @@ pub struct AiHistoryStore {
 }
 
 impl AiHistoryStore {
-    pub fn new(app_data_dir: &PathBuf) -> Self {
+    pub fn new(app_data_dir: &Path) -> Self {
         Self {
             path: app_data_dir.join("ai_history.json"),
         }

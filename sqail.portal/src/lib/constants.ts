@@ -1,5 +1,5 @@
-export const VERSION = "0.3.1";
-export const BUILD_NUMBER = "20260404-2";
+export const VERSION = "0.3.6";
+export const BUILD_NUMBER = "20260411-1";
 export const GITHUB_URL = "https://github.com/bartbeecoders/sqail";
 
 export type Platform = "windows" | "macos" | "linux";
@@ -24,8 +24,8 @@ export const DOWNLOADS: DownloadInfo[] = [
   },
   {
     platform: "macos",
-    label: "macOS",
-    fileName: `${FILE_PREFIX}_x64.dmg`,
+    label: "macOS (Universal)",
+    fileName: `${FILE_PREFIX}_universal.dmg`,
     icon: "Apple",
     ext: ".dmg",
   },
@@ -145,6 +145,7 @@ export const NAV_ITEMS = [
   { label: "Features", href: "#features" },
   { label: "AI", href: "#ai" },
   { label: "Databases", href: "#databases" },
+  { label: "Compare", href: "#compare" },
   { label: "Download", href: "#download" },
   { label: "Changelog", href: "#changelog" },
 ] as const;

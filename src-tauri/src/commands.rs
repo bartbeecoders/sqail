@@ -799,6 +799,39 @@ pub async fn ai_format_sql(
 }
 
 #[tauri::command]
+pub async fn ai_fix_query(
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+    sql: String,
+    error_message: String,
+    schema_context: String,
+    driver: String,
+) -> Result<String, String> {
+    let config = get_default_provider(&state).await?;
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let rid = request_id.clone();
+
+    let user_message = format!(
+        "Failing SQL query:\n{sql}\n\nDatabase error:\n{error_message}"
+    );
+
+    tokio::spawn(async move {
+        client::stream_ai_response(
+            app_handle,
+            rid,
+            &config,
+            &user_message,
+            "fix_query",
+            Some(&driver),
+            Some(&schema_context),
+        )
+        .await;
+    });
+
+    Ok(request_id)
+}
+
+#[tauri::command]
 pub async fn ai_comment_sql(
     app_handle: AppHandle,
     state: State<'_, AppState>,

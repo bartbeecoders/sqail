@@ -45,6 +45,13 @@ pub fn build_system_prompt(flow: &str, driver: Option<&str>, schema_context: Opt
                          (using -- syntax) explaining what each significant section does. \
                          Return ONLY the commented SQL, no additional explanation or markdown code fences.".to_string());
         }
+        "fix_query" => {
+            parts.push("The user will provide a SQL query that failed and the error message returned by the database. \
+                         Diagnose the cause of the error and return a corrected version of the query. \
+                         Use the schema context to verify table and column names. \
+                         Return ONLY the corrected SQL query, no explanation or markdown code fences. \
+                         The corrected SQL must be ready to execute as-is.".to_string());
+        }
         "generate_metadata" => {
             parts.push("The user will provide the structure of a single database object (table, view, function, or procedure). \
                          Generate documentation metadata as a JSON object with these exact fields:\n\

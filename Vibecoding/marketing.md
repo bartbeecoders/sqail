@@ -1,6 +1,6 @@
 SQaiL -  Smart SQL editor
 
-Create a web app to promote sqail.ai.
+Create a web app to promote sqail.io.
 
 We will host this website on our VPS server.
 
@@ -33,3 +33,7 @@ The binaries names should have the release nr and a build date nr in the filenam
 Add a loading dialog when starting the application. Add a progress bar to show the progress of the application loading.
 Add a splash screen with the sqail logo and a progress bar to show the progress of the application loading.
 Make it look professional and modern. Use the image-gen plugin to generate the splash screen.
+
+Can you change the app icon to the 'snail' like image.
+
+Add a marketing folder with a marketing plan and a marketing strategy.

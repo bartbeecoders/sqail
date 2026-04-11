@@ -199,13 +199,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Rust
+      - name: Setup Rust (with both macOS targets)
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          key: macos-universal
 
       - name: Setup Node + pnpm
         uses: pnpm/action-setup@v4
@@ -232,22 +235,38 @@ jobs:
       - name: Build frontend
         run: pnpm build
 
-      - name: Build DMG
-        run: pnpm tauri build --config src-tauri/tauri.ci.json
+      - name: Build universal DMG (x86_64 + aarch64)
+        run: pnpm tauri build --target universal-apple-darwin --config src-tauri/tauri.ci.json
+
+      - name: Ad-hoc sign the .app bundle
+        # Even without an Apple Developer ID, re-signing with `-` ad-hoc
+        # ensures every binary inside the bundle has a valid signature.
+        # This prevents "damaged" errors that come from a broken/missing
+        # signature on arm64 after lipo. Gatekeeper will still block on
+        # quarantine (users must run `xattr -cr`) — that's a separate
+        # issue solved only by real notarization.
+        run: |
+          BUNDLE="src-tauri/target/universal-apple-darwin/release/bundle"
+          for app in "$BUNDLE/macos/"*.app; do
+            [ -d "$app" ] || continue
+            echo "Ad-hoc signing $app"
+            codesign --force --deep --sign - "$app"
+            codesign --verify --deep --strict --verbose=2 "$app" || true
+          done
 
       - name: Collect artifacts
         run: |
           PREFIX="${{ needs.prepare.outputs.file_prefix }}"
-          BUNDLE="src-tauri/target/release/bundle"
+          BUNDLE="src-tauri/target/universal-apple-darwin/release/bundle"
           mkdir -p dist/releases
 
-          # DMG
+          # DMG (universal)
           for f in "$BUNDLE/dmg/"*.dmg; do
-            [ -f "$f" ] && cp "$f" "dist/releases/${PREFIX}_x64.dmg"
+            [ -f "$f" ] && cp "$f" "dist/releases/${PREFIX}_universal.dmg"
           done
-          # App bundle as tar.gz
+          # App bundle as tar.gz (universal)
           for f in "$BUNDLE/macos/"*.app; do
-            [ -d "$f" ] && tar -czf "dist/releases/${PREFIX}_x64.app.tar.gz" -C "$BUNDLE/macos" "$(basename "$f")"
+            [ -d "$f" ] && tar -czf "dist/releases/${PREFIX}_universal.app.tar.gz" -C "$BUNDLE/macos" "$(basename "$f")"
           done
 
           ls -lh dist/releases/

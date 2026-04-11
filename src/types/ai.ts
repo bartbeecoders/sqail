@@ -19,7 +19,7 @@ export interface AiProviderConfig {
   acceptInvalidCerts?: boolean;
 }
 
-export type AiFlow = "generate_sql" | "explain" | "optimize" | "document" | "format_sql" | "comment_sql";
+export type AiFlow = "generate_sql" | "explain" | "optimize" | "document" | "format_sql" | "comment_sql" | "fix_query";
 
 export interface AiHistoryEntry {
   id: string;
@@ -59,6 +59,7 @@ export const AI_FLOW_LABELS: Record<AiFlow, string> = {
   document: "Generate Docs",
   format_sql: "Format SQL",
   comment_sql: "Add Comments",
+  fix_query: "Fix Query",
 };
 
 /** Whether a provider type requires an API key */

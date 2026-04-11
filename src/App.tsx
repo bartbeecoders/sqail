@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useMemo } from "react";
 import { formatSqlAligned } from "./lib/sqlFormat";
 import { saveQuery, saveQueryAs, openQuery } from "./lib/fileOps";
 import TitleBar from "./components/TitleBar";
+import ResizeHandles from "./components/ResizeHandles";
 import SplashScreen from "./components/SplashScreen";
 import Sidebar from "./components/Sidebar";
 import Toolbar from "./components/Toolbar";
@@ -152,6 +153,7 @@ export default function App() {
   return (
     <div className="flex h-full flex-col">
       <TitleBar />
+      <ResizeHandles />
       {!splashDone && <SplashScreen onComplete={() => setSplashDone(true)} />}
       <div className="flex flex-1 overflow-hidden">
       <Sidebar

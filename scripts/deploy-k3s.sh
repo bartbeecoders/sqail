@@ -4,7 +4,7 @@ set -euo pipefail
 #===============================================================================
 # SQaiL Portal - K3S Deployment Script (Podman)
 #===============================================================================
-# Builds and pushes the sqail.ai marketing site, then deploys to K3S on VPS.
+# Builds and pushes the sqail.io marketing site, then deploys to K3S on VPS.
 # Architecture: static Nginx container serving the Vite build
 # Namespace: sqail
 # Registry:  beecodersregistry.azurecr.io

@@ -10,18 +10,13 @@ pub enum Driver {
     Dbservice,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MssqlAuthMethod {
+    #[default]
     SqlServer,
     Windows,
     EntraId,
-}
-
-impl Default for MssqlAuthMethod {
-    fn default() -> Self {
-        MssqlAuthMethod::SqlServer
-    }
 }
 
 impl std::fmt::Display for Driver {

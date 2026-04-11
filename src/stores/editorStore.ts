@@ -41,6 +41,7 @@ interface EditorState {
   setFilePath: (id: string, filePath: string) => void;
   setConnectionId: (id: string, connectionId: string | undefined) => void;
   setSavedQueryId: (id: string, savedQueryId: string) => void;
+  togglePin: (id: string) => void;
   findTabBySavedQueryId: (savedQueryId: string) => EditorTab | undefined;
   getActiveTab: () => EditorTab | undefined;
   clearActiveTab: () => void;
@@ -88,7 +89,8 @@ export const useEditorStore = create<EditorState>((set, get) => {
 
     closeOtherTabs: (id) => {
       const { tabs } = get();
-      const kept = tabs.filter((t) => t.id === id);
+      // Spare pinned tabs and the target tab itself
+      const kept = tabs.filter((t) => t.id === id || t.pinned);
       if (kept.length === 0) return;
       set({ tabs: kept, activeTabId: id });
       persist();
@@ -98,15 +100,23 @@ export const useEditorStore = create<EditorState>((set, get) => {
       const { tabs, activeTabId } = get();
       const idx = tabs.findIndex((t) => t.id === id);
       if (idx === -1) return;
-      const kept = tabs.slice(0, idx + 1);
+      // Keep everything up to and including the target, plus any pinned tabs to the right
+      const kept = tabs.filter((t, i) => i <= idx || t.pinned);
       const newActive = kept.find((t) => t.id === activeTabId) ? activeTabId : id;
       set({ tabs: kept, activeTabId: newActive });
       persist();
     },
 
     closeAllTabs: () => {
-      const tab = createTab(1);
-      set({ tabs: [tab], activeTabId: tab.id });
+      const { tabs, activeTabId } = get();
+      const pinned = tabs.filter((t) => t.pinned);
+      if (pinned.length > 0) {
+        const newActive = pinned.find((t) => t.id === activeTabId) ? activeTabId : pinned[0].id;
+        set({ tabs: pinned, activeTabId: newActive });
+      } else {
+        const tab = createTab(1);
+        set({ tabs: [tab], activeTabId: tab.id });
+      }
       persist();
     },
 
@@ -146,6 +156,13 @@ export const useEditorStore = create<EditorState>((set, get) => {
     setSavedQueryId: (id, savedQueryId) => {
       set((s) => ({
         tabs: s.tabs.map((t) => (t.id === id ? { ...t, savedQueryId } : t)),
+      }));
+      persist();
+    },
+
+    togglePin: (id) => {
+      set((s) => ({
+        tabs: s.tabs.map((t) => (t.id === id ? { ...t, pinned: !t.pinned } : t)),
       }));
       persist();
     },

@@ -29,6 +29,7 @@ const INSERTABLE_FLOWS: AiFlow[] = [
   "optimize",
   "format_sql",
   "comment_sql",
+  "fix_query",
 ];
 
 /** Flows that operate on the current editor SQL (no free-text prompt needed). */
@@ -37,6 +38,7 @@ const SQL_CONTEXT_FLOWS: AiFlow[] = [
   "optimize",
   "format_sql",
   "comment_sql",
+  "fix_query",
 ];
 
 export default function AiCommandPalette() {
@@ -44,6 +46,7 @@ export default function AiCommandPalette() {
     paletteOpen,
     paletteFlow,
     paletteSql,
+    paletteError,
     streaming,
     currentResponse,
     currentFlow,
@@ -58,6 +61,7 @@ export default function AiCommandPalette() {
     generateDocs,
     formatSql,
     commentSql,
+    fixQuery,
     loadProviders,
     getDefaultProvider,
     setPanel,
@@ -144,6 +148,10 @@ export default function AiCommandPalette() {
       case "comment_sql":
         if (!editorSql) return;
         await commentSql(editorSql, schemaContext, driver);
+        break;
+      case "fix_query":
+        if (!editorSql || !paletteError) return;
+        await fixQuery(editorSql, paletteError, schemaContext, driver);
         break;
       case "document":
         if (!schemaContext) return;
@@ -344,12 +352,19 @@ export default function AiCommandPalette() {
 
         {/* Pre-set flow info */}
         {isPresetFlow && paletteSql && (
-          <div className="max-h-20 overflow-y-auto border-b border-border bg-muted/50 px-3 py-2">
+          <div className="max-h-32 overflow-y-auto border-b border-border bg-muted/50 px-3 py-2">
             <pre className="text-[10px] leading-relaxed text-muted-foreground">
               {paletteSql.length > 200
                 ? paletteSql.slice(0, 200) + "..."
                 : paletteSql}
             </pre>
+            {paletteError && (
+              <pre className="mt-1 whitespace-pre-wrap text-[10px] leading-relaxed text-destructive">
+                {paletteError.length > 300
+                  ? paletteError.slice(0, 300) + "..."
+                  : paletteError}
+              </pre>
+            )}
           </div>
         )}
 

@@ -1,4 +1,4 @@
-import { Download, Monitor, Server, Terminal } from "lucide-react";
+import { Download, Info, Monitor, Server, Terminal } from "lucide-react";
 import {
   VERSION,
   BUILD_NUMBER,
@@ -64,6 +64,34 @@ export default function Downloads() {
               </a>
             );
           })}
+        </div>
+
+        {/* macOS install note — unsigned app workaround */}
+        <div
+          className={`mt-8 rounded-xl border p-5 text-left transition-colors ${
+            platform === "macos"
+              ? "border-brand-yellow/40 bg-brand-yellow/5"
+              : "border-border bg-bg-primary"
+          }`}
+        >
+          <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-text-primary">
+            <Info size={16} className="text-brand-yellow" />
+            macOS: "sqail is damaged and cannot be opened"?
+          </div>
+          <p className="mb-3 text-sm text-text-muted">
+            sqail is not yet signed with an Apple Developer ID, so macOS
+            Gatekeeper flags it after download. The app is fine — you just need
+            to remove the quarantine attribute once. Drag sqail to{" "}
+            <span className="font-mono text-text-primary">/Applications</span>,
+            then run:
+          </p>
+          <pre className="overflow-x-auto rounded-lg border border-border bg-bg-primary px-4 py-3 text-xs text-brand-cyan">
+            <code>xattr -cr /Applications/sqail.app</code>
+          </pre>
+          <p className="mt-3 text-xs text-text-dim">
+            You only need to do this once per install. Proper signing +
+            notarization is on the roadmap.
+          </p>
         </div>
 
         {/* DbService — optional backend service */}

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const MAX_HISTORY_ENTRIES: usize = 500;
 
@@ -24,7 +24,7 @@ pub struct QueryHistoryStore {
 }
 
 impl QueryHistoryStore {
-    pub fn new(app_data_dir: &PathBuf) -> Self {
+    pub fn new(app_data_dir: &Path) -> Self {
         Self {
             path: app_data_dir.join("query_history.json"),
         }
@@ -71,7 +71,7 @@ pub struct SavedQueryStore {
 }
 
 impl SavedQueryStore {
-    pub fn new(app_data_dir: &PathBuf) -> Self {
+    pub fn new(app_data_dir: &Path) -> Self {
         Self {
             path: app_data_dir.join("saved_queries.json"),
         }

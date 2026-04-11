@@ -116,13 +116,27 @@ case "$PLATFORM" in
     done
     ;;
   macos)
+    # Detect host arch — a plain `tauri build` without --target produces a
+    # host-arch binary. CI is the source of truth for the `_universal.dmg`
+    # uploaded to sqail.io; this local path is for dev/testing.
+    case "$(uname -m)" in
+      arm64|aarch64) MAC_ARCH="aarch64" ;;
+      x86_64)        MAC_ARCH="x64" ;;
+      *)             MAC_ARCH="$(uname -m)" ;;
+    esac
+    # Ad-hoc sign the .app so the binary is at least runnable on arm64.
+    # Does not fix Gatekeeper quarantine — users still need `xattr -cr`.
+    for app in "$BUNDLE_DIR/macos/"*.app; do
+      [ -d "$app" ] || continue
+      codesign --force --deep --sign - "$app" 2>/dev/null || true
+    done
     for f in "$BUNDLE_DIR/dmg/"*.dmg 2>/dev/null; do
-      [ -f "$f" ] && copy_artifact "$f" "${PREFIX}_x64.dmg"
+      [ -f "$f" ] && copy_artifact "$f" "${PREFIX}_${MAC_ARCH}.dmg"
     done
     for f in "$BUNDLE_DIR/macos/"*.app; do
       if [ -d "$f" ]; then
-        tar -czf "$RELEASE_DIR/${PREFIX}_x64.app.tar.gz" -C "$BUNDLE_DIR/macos" "$(basename "$f")"
-        echo "  -> ${PREFIX}_x64.app.tar.gz"
+        tar -czf "$RELEASE_DIR/${PREFIX}_${MAC_ARCH}.app.tar.gz" -C "$BUNDLE_DIR/macos" "$(basename "$f")"
+        echo "  -> ${PREFIX}_${MAC_ARCH}.app.tar.gz"
         COLLECTED=$((COLLECTED + 1))
       fi
     done

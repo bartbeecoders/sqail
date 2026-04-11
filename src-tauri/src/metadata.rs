@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,7 +37,7 @@ pub struct MetadataStore {
 }
 
 impl MetadataStore {
-    pub fn new(app_data_dir: &PathBuf) -> Self {
+    pub fn new(app_data_dir: &Path) -> Self {
         Self {
             path: app_data_dir.join("metadata.json"),
         }

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { Plus, X } from "lucide-react";
+import { Pin, Plus, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { buildSelectStatement } from "../lib/sqlGenerate";
 import { cn } from "../lib/utils";
@@ -7,6 +7,7 @@ import { useConnectionStore } from "../stores/connectionStore";
 import { useEditorStore } from "../stores/editorStore";
 import { useSchemaStore } from "../stores/schemaStore";
 import type { ColumnInfo } from "../types/schema";
+import type { EditorTab } from "../types/editor";
 
 interface TabContextMenu {
   x: number;
@@ -27,6 +28,7 @@ export default function EditorTabs() {
     setActiveTab,
     renameTab,
     setConnectionId,
+    togglePin,
   } = useEditorStore();
   const connections = useConnectionStore((s) => s.connections);
   const globalConnectionId = useConnectionStore((s) => s.activeConnectionId);
@@ -124,96 +126,128 @@ export default function EditorTabs() {
     ? tabs.findIndex((t) => t.id === contextMenu.tabId)
     : -1;
   const hasTabsToRight = tabIdx >= 0 && tabIdx < tabs.length - 1;
+  const contextTab = tabIdx >= 0 ? tabs[tabIdx] : undefined;
+
+  const pinnedTabs = tabs.filter((t) => t.pinned);
+  const unpinnedTabs = tabs.filter((t) => !t.pinned);
+
+  const renderTab = (tab: EditorTab) => {
+    const isActive = tab.id === activeTabId;
+    const isEditing = editingTabId === tab.id;
+    const conn = tab.connectionId
+      ? connections.find((c) => c.id === tab.connectionId)
+      : undefined;
+    return (
+      <div
+        key={tab.id}
+        className={cn(
+          "group flex cursor-pointer items-center gap-1 rounded-t-md px-3 py-1 text-xs transition-colors",
+          isActive
+            ? "bg-background text-foreground border-x border-t border-border"
+            : "text-muted-foreground hover:text-foreground hover:bg-muted",
+        )}
+        onClick={() => setActiveTab(tab.id)}
+        onDoubleClick={() => {
+          setEditingTabId(tab.id);
+          setEditValue(tab.title);
+          requestAnimationFrame(() => inputRef.current?.select());
+        }}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setContextMenu({ x: e.clientX, y: e.clientY, tabId: tab.id });
+        }}
+      >
+        {conn && (
+          <span
+            className="h-2 w-2 shrink-0 rounded-full"
+            style={{ backgroundColor: conn.color || "#6366f1" }}
+            title={conn.name}
+          />
+        )}
+        {isEditing ? (
+          <input
+            ref={inputRef}
+            value={editValue}
+            onChange={(e) => setEditValue(e.target.value)}
+            onBlur={() => commitRename(tab.id)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") commitRename(tab.id);
+              if (e.key === "Escape") setEditingTabId(null);
+            }}
+            onClick={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => e.stopPropagation()}
+            className="w-24 bg-transparent outline-none ring-1 ring-border rounded px-1"
+            autoFocus
+          />
+        ) : (
+          <span className="max-w-24 truncate">{tab.title}</span>
+        )}
+        {!isEditing && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              togglePin(tab.id);
+            }}
+            className={cn(
+              "ml-1 rounded p-0.5 transition-opacity hover:bg-muted",
+              tab.pinned ? "opacity-100" : "opacity-0 group-hover:opacity-100",
+            )}
+            title={tab.pinned ? "Unpin tab" : "Pin tab"}
+          >
+            <Pin
+              size={10}
+              className={cn("shrink-0", tab.pinned && "fill-current")}
+            />
+          </button>
+        )}
+        {tabs.length > 1 && !isEditing && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              closeTab(tab.id);
+            }}
+            className="rounded p-0.5 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-muted"
+            title="Close tab"
+          >
+            <X size={10} />
+          </button>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div
       className={cn(
-        "flex h-8 items-end gap-px overflow-x-auto border-b border-border bg-muted/30 px-1",
+        "flex flex-col border-b border-border bg-muted/30",
         dragOver && "ring-2 ring-inset ring-primary/40",
       )}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
-      {tabs.map((tab) => {
-        const isActive = tab.id === activeTabId;
-        const isEditing = editingTabId === tab.id;
-        const conn = tab.connectionId
-          ? connections.find((c) => c.id === tab.connectionId)
-          : undefined;
-        return (
-          <div
-            key={tab.id}
-            className={cn(
-              "group flex cursor-pointer items-center gap-1 rounded-t-md px-3 py-1 text-xs transition-colors",
-              isActive
-                ? "bg-background text-foreground border-x border-t border-border"
-                : "text-muted-foreground hover:text-foreground hover:bg-muted",
-            )}
-            onClick={() => setActiveTab(tab.id)}
-            onDoubleClick={() => {
-              setEditingTabId(tab.id);
-              setEditValue(tab.title);
-              requestAnimationFrame(() => inputRef.current?.select());
-            }}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              setContextMenu({ x: e.clientX, y: e.clientY, tabId: tab.id });
-            }}
-          >
-            {conn && (
-              <span
-                className="h-2 w-2 shrink-0 rounded-full"
-                style={{ backgroundColor: conn.color || "#6366f1" }}
-                title={conn.name}
-              />
-            )}
-            {isEditing ? (
-              <input
-                ref={inputRef}
-                value={editValue}
-                onChange={(e) => setEditValue(e.target.value)}
-                onBlur={() => commitRename(tab.id)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") commitRename(tab.id);
-                  if (e.key === "Escape") setEditingTabId(null);
-                }}
-                onClick={(e) => e.stopPropagation()}
-                onDoubleClick={(e) => e.stopPropagation()}
-                className="w-24 bg-transparent outline-none ring-1 ring-border rounded px-1"
-                autoFocus
-              />
-            ) : (
-              <span className="max-w-24 truncate">{tab.title}</span>
-            )}
-            {tabs.length > 1 && !isEditing && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  closeTab(tab.id);
-                }}
-                className="ml-1 rounded p-0.5 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-muted"
-              >
-                <X size={10} />
-              </button>
-            )}
-          </div>
-        );
-      })}
-      <button
-        onClick={() => {
-          addTab();
-          // Assign current connection to the new tab
-          if (globalConnectionId) {
-            const newTab = useEditorStore.getState().getActiveTab();
-            if (newTab) setConnectionId(newTab.id, globalConnectionId);
-          }
-        }}
-        className="mb-0.5 ml-1 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-        title="New tab (Ctrl+N)"
-      >
-        <Plus size={12} />
-      </button>
+      {pinnedTabs.length > 0 && (
+        <div className="flex min-h-8 flex-wrap items-end gap-x-px gap-y-0.5 border-b border-border/60 bg-muted/40 px-1 py-0.5">
+          {pinnedTabs.map(renderTab)}
+        </div>
+      )}
+      <div className="flex min-h-8 flex-wrap items-end gap-x-px gap-y-0.5 px-1 py-0.5">
+        {unpinnedTabs.map(renderTab)}
+        <button
+          onClick={() => {
+            addTab();
+            // Assign current connection to the new tab
+            if (globalConnectionId) {
+              const newTab = useEditorStore.getState().getActiveTab();
+              if (newTab) setConnectionId(newTab.id, globalConnectionId);
+            }
+          }}
+          className="mb-0.5 ml-1 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+          title="New tab (Ctrl+N)"
+        >
+          <Plus size={12} />
+        </button>
+      </div>
 
       {contextMenu && (
         <div
@@ -253,6 +287,13 @@ export default function EditorTabs() {
             }}
           />
           <div className="my-1 border-t border-border" />
+          <ContextItem
+            label={contextTab?.pinned ? "Unpin tab" : "Pin tab"}
+            onClick={() => {
+              togglePin(contextMenu.tabId);
+              closeContextMenu();
+            }}
+          />
           <ContextItem
             label="Rename"
             onClick={() => {

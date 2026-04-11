@@ -99,6 +99,7 @@ pub fn run() {
             commands::ai_generate_docs,
             commands::ai_format_sql,
             commands::ai_comment_sql,
+            commands::ai_fix_query,
             commands::list_ai_history,
             commands::save_ai_history_entry,
             commands::clear_ai_history,

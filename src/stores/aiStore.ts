@@ -17,6 +17,7 @@ function stripThinkingBlocks(text: string): string {
 interface PaletteOptions {
   flow?: AiFlow;
   sql?: string;
+  errorMessage?: string;
 }
 
 interface AiState {
@@ -33,6 +34,7 @@ interface AiState {
   paletteOpen: boolean;
   paletteFlow: AiFlow | null;
   paletteSql: string;
+  paletteError: string;
 
   loadProviders: () => Promise<void>;
   createProvider: (config: AiProviderConfig) => Promise<void>;
@@ -56,6 +58,7 @@ interface AiState {
   generateDocs: (schemaContext: string, driver: string) => Promise<void>;
   formatSql: (sql: string, schemaContext: string, driver: string) => Promise<void>;
   commentSql: (sql: string, schemaContext: string, driver: string) => Promise<void>;
+  fixQuery: (sql: string, errorMessage: string, schemaContext: string, driver: string) => Promise<void>;
 
   appendChunk: (requestId: string, chunk: string) => void;
   finishStream: (requestId: string, fullText: string) => void;
@@ -82,6 +85,7 @@ export const useAiStore = create<AiState>((set, get) => ({
   paletteOpen: false,
   paletteFlow: null,
   paletteSql: "",
+  paletteError: "",
   promptHistory: [],
 
   loadProviders: async () => {
@@ -134,11 +138,12 @@ export const useAiStore = create<AiState>((set, get) => ({
       paletteOpen: true,
       paletteFlow: options?.flow ?? null,
       paletteSql: options?.sql ?? "",
+      paletteError: options?.errorMessage ?? "",
       currentResponse: "",
       error: null,
     }),
   closePalette: () =>
-    set({ paletteOpen: false, paletteFlow: null, paletteSql: "" }),
+    set({ paletteOpen: false, paletteFlow: null, paletteSql: "", paletteError: "" }),
 
   addToPromptHistory: (prompt) => {
     const { promptHistory } = get();
@@ -202,6 +207,21 @@ export const useAiStore = create<AiState>((set, get) => ({
     set({ streaming: true, currentResponse: "", error: null, currentFlow: "comment_sql" });
     try {
       const requestId = await invoke<string>("ai_comment_sql", { sql, schemaContext, driver });
+      set({ currentRequestId: requestId });
+    } catch (e) {
+      set({ streaming: false, error: String(e) });
+    }
+  },
+
+  fixQuery: async (sql, errorMessage, schemaContext, driver) => {
+    set({ streaming: true, currentResponse: "", error: null, currentFlow: "fix_query" });
+    try {
+      const requestId = await invoke<string>("ai_fix_query", {
+        sql,
+        errorMessage,
+        schemaContext,
+        driver,
+      });
       set({ currentRequestId: requestId });
     } catch (e) {
       set({ streaming: false, error: String(e) });

@@ -1,5 +1,25 @@
 # Releases
 
+> The authoritative changelog lives in `releases.json` (consumed by both the in-app About tab and the portal). This file tracks selected highlights.
+
+## v0.3.6
+
+### macOS Build Fixes
+- macOS release is now a true Universal binary (arm64 + x86_64) built via `--target universal-apple-darwin` — runs natively on both Apple Silicon and Intel Macs
+- Fixed misleading `_x64.dmg` filename on arm64 hosts: CI output is now `sqail_<version>_<build>_universal.dmg`
+- Ad-hoc codesign of the `.app` bundle after lipo, so every binary inside has a valid signature and will execute on arm64
+- Workaround documented for "sqail is damaged and cannot be opened" Gatekeeper error: run `xattr -cr /Applications/sqail.app` once per install (proper Apple Developer ID signing + notarization still on the roadmap)
+
+### Portal (sqail.io)
+- New "Why sqail?" comparison table vs DBeaver, DataGrip, TablePlus, and Beekeeper Studio
+- macOS install-notes block on the download page with the `xattr` workaround, highlighted for visitors detected as macOS
+
+### Docs
+- README rewritten with an elevator pitch, feature bullets keyed to the five messaging pillars, and a macOS install note
+- New `marketing/brand-guide.md` documenting the color palette, typography, voice, and messaging pillars
+
+---
+
 ## v0.2.0
 
 ### AI Integration

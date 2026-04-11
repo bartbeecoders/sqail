@@ -125,3 +125,13 @@ So you can control, UI test, and automate the app using AI.
 
 
 Check the split editor view. Splitting the editor view should show the same sql in both editors, so that the user can see different parts of the same query.
+
+Double clicking the app title should maximize or restore the window.
+
+When in normal mode (not maximized), it should be posstible to resize  the window by dragging the sides of the window.
+
+When there are too many tabs, overflow the tabs to a 2nd line. So have the ability have multiple rows.
+
+Add the ability to pin tabs, pinned tabs should be on a top line.
+
+When I run a query, and a sql error is shown, it could be usefull that the user can pass this error to an AI assistant to help fix the query.

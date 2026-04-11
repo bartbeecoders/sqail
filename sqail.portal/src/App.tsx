@@ -3,6 +3,7 @@ import Hero from "./components/Hero";
 import Features from "./components/Features";
 import AiSection from "./components/AiSection";
 import DatabaseSupport from "./components/DatabaseSupport";
+import Compare from "./components/Compare";
 import Downloads from "./components/Downloads";
 import Changelog from "./components/Changelog";
 import Footer from "./components/Footer";
@@ -15,6 +16,7 @@ export default function App() {
       <Features />
       <AiSection />
       <DatabaseSupport />
+      <Compare />
       <Downloads />
       <Changelog />
       <Footer />

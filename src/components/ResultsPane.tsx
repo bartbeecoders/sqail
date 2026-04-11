@@ -1,13 +1,22 @@
 import { useState, useRef, useEffect } from "react";
-import { Table2, Loader2, AlertCircle, CheckCircle2, Download } from "lucide-react";
+import { Table2, Loader2, AlertCircle, CheckCircle2, Download, Sparkles } from "lucide-react";
 import { cn } from "../lib/utils";
 import { useQueryStore } from "../stores/queryStore";
+import { useAiStore } from "../stores/aiStore";
 import { exportResults, type ExportFormat } from "../lib/exportResults";
 import DataGrid from "./DataGrid";
 
 export default function ResultsPane() {
-  const { results, activeResultIndex, totalTimeMs, error, loading, setActiveResultIndex } =
+  const { results, activeResultIndex, totalTimeMs, error, loading, lastExecutedSql, setActiveResultIndex } =
     useQueryStore();
+  const openPalette = useAiStore((s) => s.openPalette);
+  const aiProviders = useAiStore((s) => s.providers);
+
+  const handleFixWithAi = () => {
+    if (!error || !lastExecutedSql) return;
+    openPalette({ flow: "fix_query", sql: lastExecutedSql, errorMessage: error });
+  };
+  const canFixWithAi = aiProviders.length > 0 && !!lastExecutedSql;
 
   // Loading state
   if (loading) {
@@ -27,11 +36,21 @@ export default function ResultsPane() {
       <div className="flex flex-1 flex-col">
         <div className="flex flex-1 items-center justify-center px-8">
           <div className="max-w-lg rounded-md bg-destructive/10 p-4 text-sm text-destructive">
-            <div className="mb-1 flex items-center gap-2 font-medium">
+            <div className="mb-2 flex items-center gap-2 font-medium">
               <AlertCircle size={14} />
               Query Error
             </div>
             <p className="break-all text-xs opacity-80">{error}</p>
+            {canFixWithAi && (
+              <button
+                onClick={handleFixWithAi}
+                className="mt-3 inline-flex items-center gap-1 rounded-md bg-primary px-2 py-1 text-[11px] font-medium text-primary-foreground hover:bg-primary/90"
+                title="Ask the AI assistant to fix this query"
+              >
+                <Sparkles size={11} />
+                Fix with AI
+              </button>
+            )}
           </div>
         </div>
         <StatusBar totalTimeMs={totalTimeMs} />
@@ -98,8 +117,18 @@ export default function ResultsPane() {
       {/* Error banner (partial — some statements succeeded) */}
       {error && (
         <div className="flex items-center gap-2 border-t border-destructive/30 bg-destructive/10 px-3 py-1.5 text-xs text-destructive">
-          <AlertCircle size={12} />
-          <span className="truncate">{error}</span>
+          <AlertCircle size={12} className="shrink-0" />
+          <span className="flex-1 truncate">{error}</span>
+          {canFixWithAi && (
+            <button
+              onClick={handleFixWithAi}
+              className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium hover:bg-destructive/20"
+              title="Ask the AI assistant to fix this query"
+            >
+              <Sparkles size={10} />
+              Fix with AI
+            </button>
+          )}
         </div>
       )}
 

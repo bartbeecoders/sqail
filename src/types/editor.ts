@@ -5,4 +5,5 @@ export interface EditorTab {
   filePath?: string;
   savedQueryId?: string;
   connectionId?: string;
+  pinned?: boolean;
 }

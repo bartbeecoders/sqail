@@ -10,6 +10,8 @@ interface QueryState {
   totalTimeMs: number;
   error: string | null;
   loading: boolean;
+  /** SQL of the most recently executed query — used by "Fix with AI" on errors. */
+  lastExecutedSql: string;
 
   executeQuery: (connectionId: string, sql: string) => Promise<void>;
   setActiveResultIndex: (index: number) => void;
@@ -22,9 +24,10 @@ export const useQueryStore = create<QueryState>((set) => ({
   totalTimeMs: 0,
   error: null,
   loading: false,
+  lastExecutedSql: "",
 
   executeQuery: async (connectionId, sql) => {
-    set({ loading: true, error: null });
+    set({ loading: true, error: null, lastExecutedSql: sql });
     try {
       const response = await invoke<QueryResponse>("execute_query", {
         connectionId,

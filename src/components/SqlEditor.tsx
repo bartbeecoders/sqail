@@ -201,7 +201,7 @@ export default function SqlEditor({ onExecute, onFormat, overrideTabId, editorRe
 
       editor.focus();
     },
-    [onExecute, onFormat],
+    [onExecute, onFormat, editorRefOut, runValidation],
   );
 
   const handleChange = useCallback(

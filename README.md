@@ -1,8 +1,44 @@
-# SQaiL
+# sqail
 
-A lightweight, cross-platform desktop SQL database editor with AI integration. Built with Tauri v2.
+**A fast, small, open-source SQL editor that makes AI-assisted querying feel native.**
 
-Supports PostgreSQL, MySQL, SQLite, and Microsoft SQL Server.
+sqail (pronounced *"snail"*) is a lightweight cross-platform desktop SQL client with first-class AI integration, built on Tauri v2. It launches in under a second, stays under 20 MB, and ships with natural-language-to-SQL, query explanation, and optimization out of the box — without telemetry, lock-in, or a paid tier.
+
+It speaks PostgreSQL, MySQL, SQLite, and Microsoft SQL Server today. It uses the same Monaco editor that powers VS Code, stores credentials locally in encrypted SurrealDB, and lets you bring your own API key for Claude, OpenAI, Minimax, Z.ai, LM Studio, or any OpenAI-compatible endpoint. Everything else is up to you.
+
+[**Download for your OS →**](https://sqail.io) &nbsp;·&nbsp; [Codeberg](https://codeberg.org/bartbeecoders/sqail) &nbsp;·&nbsp; [GitHub mirror](https://github.com/bartbeecoders/sqail)
+
+## Why sqail
+
+- **Fast** — sub-20 MB binary, sub-second launch. No Electron, no JVM, no Chromium bundle.
+- **Smart** — schema-aware autocomplete and AI that actually knows your tables. NL-to-SQL, explain, optimize.
+- **Free** — open source forever. No account, no freemium, no feature gates.
+- **Private** — zero telemetry. Credentials stay on your machine. AI providers are only contacted when you configure them.
+- **Universal** — Postgres, MySQL, SQLite, SQL Server, one editor.
+
+## Features
+
+- Monaco-based editor with multi-cursor, split view, snippets, and dark/light themes
+- Tabbed workspace with query history you can search, filter, and re-run
+- Schema browser, connection manager, and SSH tunnel support
+- AI command palette: format, explain, optimize, generate SQL from natural language
+- Multi-provider AI: Claude, OpenAI, Minimax, Z.ai, LM Studio, Claude Code CLI, OpenAI-compatible
+- Keyboard-first shortcuts, fully customizable
+- Privacy-respecting: credentials in local encrypted SurrealDB, no telemetry
+
+## Install
+
+Prebuilt binaries for Linux, macOS, and Windows are available from [sqail.io](https://sqail.io). If you prefer to build from source, see [Development](#development).
+
+### macOS note: "sqail is damaged and cannot be opened"
+
+sqail is not yet signed with an Apple Developer ID, so macOS Gatekeeper will refuse to launch it after download with the misleading "damaged" error. The app is fine — you just need to remove the quarantine attribute once. After dragging sqail to `/Applications`, run:
+
+```bash
+xattr -cr /Applications/sqail.app
+```
+
+You only need to do this once per install. Proper signing + notarization is on the roadmap.
 
 ## Prerequisites
 
@@ -109,9 +145,15 @@ pnpm lint         # ESLint
 ```
 src/              React frontend (TypeScript, Vite, Tailwind CSS)
 src-tauri/        Rust backend (Tauri v2, sqlx, tiberius)
+sqail.portal/     Marketing website (sqail.io)
 scripts/          Build and development helper scripts
+marketing/        Brand, strategy, and plan documents
 Vibecoding/       Planning and architecture documents
 ```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Bug reports, docs fixes, and migration guides from other tools are all welcome.
 
 ## License
 

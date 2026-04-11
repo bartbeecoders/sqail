@@ -49,3 +49,9 @@ Implement a full context menu on the sql objects tree list, for all objects
 Add a object and metadata export option.
 - export the structure and metadata of the filtered objects to a markdown file
 - ability to export to an excel list
+
+
+The domain is now registered as sqail.io (on cloudflare)
+I have a cloudflare tunnel set up to forward requests to the VPS (212.47.77.32)
+Pointing to http://localhost:32080 (this is where the app is running on the VPS)
+But it does not work yet. Do I need to set an A record ?

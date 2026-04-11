@@ -20,9 +20,14 @@ export default function TitleBar() {
       onMouseDown={(e) => {
         // Only drag on the bar itself, not on buttons
         if ((e.target as HTMLElement).closest("button")) return;
+        // startDragging() seizes the mouse sequence so onDoubleClick never
+        // fires — detect the second click here via event.detail instead.
+        if (e.detail === 2) {
+          appWindow.toggleMaximize();
+          return;
+        }
         appWindow.startDragging();
       }}
-      onDoubleClick={() => appWindow.toggleMaximize()}
     >
       <div className="flex items-center gap-2 px-3 text-xs font-medium text-muted-foreground">
         <img src="/sqail-logo.svg" alt="" className="h-4 w-4" onError={(e) => (e.currentTarget.style.display = "none")} />

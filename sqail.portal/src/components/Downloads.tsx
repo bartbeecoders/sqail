@@ -3,6 +3,7 @@ import {
   VERSION,
   BUILD_NUMBER,
   DOWNLOADS,
+  LINUX_DOWNLOADS,
   DBSERVICE_DOWNLOADS,
   detectPlatform,
   getDownloadUrl,
@@ -64,6 +65,33 @@ export default function Downloads() {
               </a>
             );
           })}
+        </div>
+
+        {/* Additional Linux formats */}
+        <div className="mt-8 rounded-xl border border-border bg-bg-primary p-5">
+          <h3 className="mb-4 text-sm font-semibold text-text-primary">
+            Other Linux formats
+          </h3>
+          <div className="grid gap-3 sm:grid-cols-3">
+            {LINUX_DOWNLOADS.map((dl) => (
+              <a
+                key={dl.label}
+                href={getDownloadUrl(dl.fileName)}
+                className="group flex items-center gap-3 rounded-lg border border-border px-4 py-3 text-left transition-colors hover:border-text-dim hover:bg-bg-card"
+              >
+                <Terminal size={16} className="shrink-0 text-text-muted group-hover:text-text-primary" />
+                <div className="min-w-0">
+                  <span className="block text-sm font-medium text-text-primary">
+                    {dl.label}
+                  </span>
+                  <span className="block truncate text-xs text-text-dim">
+                    {dl.description}
+                  </span>
+                </div>
+                <Download size={14} className="ml-auto shrink-0 text-brand-cyan" />
+              </a>
+            ))}
+          </div>
         </div>
 
         {/* macOS install note — unsigned app workaround */}

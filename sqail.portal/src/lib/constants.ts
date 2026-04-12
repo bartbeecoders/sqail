@@ -38,6 +38,30 @@ export const DOWNLOADS: DownloadInfo[] = [
   },
 ];
 
+export interface LinuxDownloadInfo {
+  label: string;
+  fileName: string;
+  description: string;
+}
+
+export const LINUX_DOWNLOADS: LinuxDownloadInfo[] = [
+  {
+    label: "AppImage",
+    fileName: `${FILE_PREFIX}_amd64.AppImage`,
+    description: "Portable — runs on any Linux distro",
+  },
+  {
+    label: "RPM",
+    fileName: `${FILE_PREFIX}_amd64.rpm`,
+    description: "Fedora, RHEL, openSUSE",
+  },
+  {
+    label: "Arch (pacman)",
+    fileName: `${FILE_PREFIX}_x86_64.pkg.tar.zst`,
+    description: "Arch Linux, EndeavourOS, Manjaro",
+  },
+];
+
 export function detectPlatform(): Platform {
   const ua = navigator.userAgent.toLowerCase();
   if (ua.includes("win")) return "windows";

@@ -53,7 +53,9 @@ jobs:
             librsvg2-dev \
             patchelf \
             libssl-dev \
-            libkrb5-dev
+            libkrb5-dev \
+            fakeroot \
+            zstd
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -93,11 +95,73 @@ jobs:
 
       - name: Build AppImage
         run: pnpm tauri build --bundles appimage --config src-tauri/tauri.ci.json
-        continue-on-error: true
 
       - name: Build rpm
         run: pnpm tauri build --bundles rpm --config src-tauri/tauri.ci.json
-        continue-on-error: true
+
+      - name: Build Arch package (pacman)
+        run: |
+          PREFIX="${{ needs.prepare.outputs.file_prefix }}"
+          VERSION="${{ needs.prepare.outputs.app_version }}"
+          BUNDLE="src-tauri/target/release/bundle"
+
+          # Create a PKGBUILD-style directory structure
+          PKG_ROOT="archpkg/sqail"
+          mkdir -p "$PKG_ROOT/usr/bin"
+          mkdir -p "$PKG_ROOT/usr/share/applications"
+          mkdir -p "$PKG_ROOT/usr/share/icons/hicolor/128x128/apps"
+          mkdir -p "$PKG_ROOT/usr/share/icons/hicolor/32x32/apps"
+
+          # Copy the binary from the deb bundle (same binary)
+          cp src-tauri/target/release/sqail "$PKG_ROOT/usr/bin/sqail"
+          chmod 755 "$PKG_ROOT/usr/bin/sqail"
+
+          # Desktop file
+          cat > "$PKG_ROOT/usr/share/applications/sqail.desktop" <<DESK
+          [Desktop Entry]
+          Name=sqail
+          Comment=A lightweight SQL database editor with AI integration
+          Exec=sqail
+          Icon=sqail
+          Terminal=false
+          Type=Application
+          Categories=Development;Database;
+          DESK
+          # Strip leading whitespace from heredoc
+          sed -i 's/^          //' "$PKG_ROOT/usr/share/applications/sqail.desktop"
+
+          # Icons
+          cp src-tauri/icons/128x128.png "$PKG_ROOT/usr/share/icons/hicolor/128x128/apps/sqail.png"
+          cp src-tauri/icons/32x32.png "$PKG_ROOT/usr/share/icons/hicolor/32x32/apps/sqail.png"
+
+          # .PKGINFO
+          INSTALLED_SIZE=$(du -sb "$PKG_ROOT" | cut -f1)
+          cat > archpkg/.PKGINFO <<PKGINFO
+          pkgname = sqail
+          pkgver = ${VERSION}-1
+          pkgdesc = A lightweight SQL database editor with AI integration
+          url = https://sqail.io
+          builddate = $(date +%s)
+          packager = sqail CI <ci@sqail.io>
+          size = ${INSTALLED_SIZE}
+          arch = x86_64
+          license = MIT
+          depend = webkit2gtk-4.1
+          depend = gtk3
+          depend = openssl
+          PKGINFO
+          sed -i 's/^          //' archpkg/.PKGINFO
+
+          # Build the .pkg.tar.zst
+          mkdir -p dist/releases
+          cd archpkg
+          fakeroot -- bash -c '
+            tar -cf - --zstd \
+              -C . .PKGINFO \
+              -C sqail usr \
+            > ../dist/releases/'"${PREFIX}"'_x86_64.pkg.tar.zst
+          '
+          cd ..
 
       - name: Collect artifacts
         run: |
@@ -117,6 +181,7 @@ jobs:
           for f in "$BUNDLE/rpm/"*.rpm; do
             [ -f "$f" ] && cp "$f" "dist/releases/${PREFIX}_amd64.rpm"
           done
+          # Arch .pkg.tar.zst is already in dist/releases/ from the build step
 
           ls -lh dist/releases/
 

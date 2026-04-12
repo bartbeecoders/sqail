@@ -29,13 +29,6 @@ export const DOWNLOADS: DownloadInfo[] = [
     icon: "Apple",
     ext: ".dmg",
   },
-  {
-    platform: "linux",
-    label: "Linux (.deb)",
-    fileName: `${FILE_PREFIX}_amd64.deb`,
-    icon: "Terminal",
-    ext: ".deb",
-  },
 ];
 
 export interface LinuxDownloadInfo {
@@ -46,12 +39,12 @@ export interface LinuxDownloadInfo {
 
 export const LINUX_DOWNLOADS: LinuxDownloadInfo[] = [
   {
-    label: "AppImage",
-    fileName: `${FILE_PREFIX}_amd64.AppImage`,
-    description: "Portable — runs on any Linux distro",
+    label: ".deb",
+    fileName: `${FILE_PREFIX}_amd64.deb`,
+    description: "Ubuntu, Debian, Pop!_OS, Mint",
   },
   {
-    label: "RPM",
+    label: ".rpm",
     fileName: `${FILE_PREFIX}_amd64.rpm`,
     description: "Fedora, RHEL, openSUSE",
   },
@@ -59,6 +52,11 @@ export const LINUX_DOWNLOADS: LinuxDownloadInfo[] = [
     label: "Arch (pacman)",
     fileName: `${FILE_PREFIX}_x86_64.pkg.tar.zst`,
     description: "Arch Linux, EndeavourOS, Manjaro",
+  },
+  {
+    label: "AppImage",
+    fileName: `${FILE_PREFIX}_amd64.AppImage`,
+    description: "Portable — runs on any distro",
   },
 ];
 

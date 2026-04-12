@@ -3,7 +3,15 @@ import { VERSION, DOWNLOADS, GITHUB_URL, detectPlatform, getDownloadUrl } from "
 
 export default function Hero() {
   const platform = detectPlatform();
-  const primaryDownload = DOWNLOADS.find((d) => d.platform === platform) ?? DOWNLOADS[2];
+  const primaryDownload = DOWNLOADS.find((d) => d.platform === platform);
+
+  // Windows / macOS: direct download link. Linux: scroll to #download to pick format.
+  const ctaHref = primaryDownload
+    ? getDownloadUrl(primaryDownload.fileName)
+    : "#download";
+  const ctaLabel = primaryDownload
+    ? `Download for ${primaryDownload.label}`
+    : "Download for Linux";
 
   return (
     <section className="relative flex min-h-screen items-center overflow-hidden pt-16">
@@ -34,11 +42,11 @@ export default function Hero() {
 
           <div className="flex flex-wrap gap-4">
             <a
-              href={getDownloadUrl(primaryDownload.fileName)}
+              href={ctaHref}
               className="inline-flex items-center gap-2 rounded-lg bg-brand-cyan px-6 py-3 font-semibold text-bg-primary transition-colors hover:bg-brand-cyan/85"
             >
               <Download size={18} />
-              Download for {primaryDownload.label}
+              {ctaLabel}
             </a>
             <a
               href={GITHUB_URL}

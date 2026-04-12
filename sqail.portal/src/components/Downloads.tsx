@@ -21,6 +21,7 @@ const ICON_MAP: Record<string, React.ReactNode> = {
 
 export default function Downloads() {
   const platform = detectPlatform();
+  const isLinux = platform === "linux";
 
   return (
     <section id="download" className="bg-bg-section py-24">
@@ -32,7 +33,8 @@ export default function Downloads() {
           Free, open source, and ready to go. Pick your platform.
         </p>
 
-        <div className="grid gap-4 sm:grid-cols-3">
+        {/* Windows + macOS */}
+        <div className="grid gap-4 sm:grid-cols-2">
           {DOWNLOADS.map((dl) => {
             const isCurrent = dl.platform === platform;
             return (
@@ -67,28 +69,52 @@ export default function Downloads() {
           })}
         </div>
 
-        {/* Additional Linux formats */}
-        <div className="mt-8 rounded-xl border border-border bg-bg-primary p-5">
-          <h3 className="mb-4 text-sm font-semibold text-text-primary">
-            Other Linux formats
-          </h3>
-          <div className="grid gap-3 sm:grid-cols-3">
+        {/* Linux — all formats */}
+        <div
+          className={`mt-6 rounded-xl border p-6 text-left transition-colors ${
+            isLinux
+              ? "border-brand-cyan bg-brand-cyan/5"
+              : "border-border bg-bg-primary"
+          }`}
+        >
+          <div className="mb-4 flex items-center gap-3">
+            <div
+              className={`flex h-10 w-10 items-center justify-center rounded-full ${
+                isLinux
+                  ? "bg-brand-cyan/15 text-brand-cyan"
+                  : "bg-bg-section text-text-muted"
+              }`}
+            >
+              <Terminal size={20} />
+            </div>
+            <div>
+              <h3 className="text-lg font-semibold text-text-primary">Linux</h3>
+              <p className="text-xs text-text-dim">Pick the format for your distro</p>
+            </div>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
             {LINUX_DOWNLOADS.map((dl) => (
               <a
                 key={dl.label}
                 href={getDownloadUrl(dl.fileName)}
-                className="group flex items-center gap-3 rounded-lg border border-border px-4 py-3 text-left transition-colors hover:border-text-dim hover:bg-bg-card"
+                className={`group flex items-center gap-3 rounded-lg border px-4 py-3 transition-colors ${
+                  isLinux
+                    ? "border-brand-cyan/30 bg-bg-primary hover:border-brand-cyan/60 hover:bg-bg-card"
+                    : "border-border hover:border-text-dim hover:bg-bg-card"
+                }`}
               >
-                <Terminal size={16} className="shrink-0 text-text-muted group-hover:text-text-primary" />
-                <div className="min-w-0">
-                  <span className="block text-sm font-medium text-text-primary">
+                <div className="min-w-0 flex-1">
+                  <span className="block text-sm font-semibold text-text-primary">
                     {dl.label}
                   </span>
                   <span className="block truncate text-xs text-text-dim">
                     {dl.description}
                   </span>
                 </div>
-                <Download size={14} className="ml-auto shrink-0 text-brand-cyan" />
+                <Download
+                  size={14}
+                  className="shrink-0 text-brand-cyan"
+                />
               </a>
             ))}
           </div>

@@ -135,3 +135,6 @@ When there are too many tabs, overflow the tabs to a 2nd line. So have the abili
 Add the ability to pin tabs, pinned tabs should be on a top line.
 
 When I run a query, and a sql error is shown, it could be usefull that the user can pass this error to an AI assistant to help fix the query.
+
+Add a close all pinned tabs menu options.
+Close all tabs should also close the pinned tabs.

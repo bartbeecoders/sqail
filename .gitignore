@@ -56,3 +56,7 @@ build-number.json
 scripts/secrets.md
 
 CLAUDE.md
+
+# Raw screenshot captures — framed versions are committed under
+# sqail.portal/public/screenshots/, raws are local-only.
+marketing/screenshots-raw/

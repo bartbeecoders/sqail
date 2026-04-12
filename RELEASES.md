@@ -2,6 +2,34 @@
 
 > The authoritative changelog lives in `releases.json` (consumed by both the in-app About tab and the portal). This file tracks selected highlights.
 
+## v0.4.0
+
+### Portal Screenshots Gallery
+- New Screenshots section on the portal with tabbed gallery: Editor, Connections, AI, Split Editor, Light Theme
+- Editor screenshot embedded in Docs Getting Started panel
+- Screenshot capture and prep scripts for consistent marketing screenshots
+
+### AI & Editor (from 0.3.4–0.3.6)
+- AI prompt history: last 10 prompts navigable with Up/Down arrows in command palette
+- AI prompts now include active editor query as context
+- Split editor can share the same file across panes
+- DbService connect flow for shared database connections
+
+### macOS & Build
+- Universal macOS build (arm64 + x86_64) with ad-hoc codesign
+- macOS download renamed to _universal.dmg
+- Windows release build fixes
+- Editor drag-drop fix
+- Vite bumped to 8.0.5 (security fixes)
+
+### Portal & Docs
+- Why sqail comparison table vs DBeaver, DataGrip, TablePlus, Beekeeper
+- macOS Gatekeeper install note with xattr workaround on Downloads page
+- Brand guide, marketing strategy, and marketing plan documents
+- README rewritten with five messaging pillars
+
+---
+
 ## v0.3.6
 
 ### macOS Build Fixes

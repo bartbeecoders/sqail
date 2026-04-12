@@ -1,7 +1,8 @@
-Update the version nr (0.3.6)
+Update the version nr (0.4.0)
 Include the changelog in the release. (about page)
 Check the build for warings or error and correct them.
 commit, tag and push to github
+Make a first release on github (v0.4.0)
 
 
 

@@ -119,6 +119,20 @@ Current mark lives at `src-tauri/icons/icon.png` (app) and `sqail.portal/public/
 - **Resolution:** 2x DPI minimum. Export as PNG for the portal, GIF/MP4 for animated demos.
 - **Focus:** one feature per shot. If you can't point at what the screenshot proves, retake it.
 
+### Consistent framing
+
+Raw screenshots should be wrapped with `scripts/screenshot-frame.sh` before they ship anywhere public. The script produces a 2880×1800 sheet with consistent padding, a branded gradient background, and a drop shadow — so every shot on the portal, README, and press kit looks like it came from the same session.
+
+```bash
+# Dark background (default)
+./scripts/screenshot-frame.sh raw/editor.png sqail.portal/public/screenshots/editor.png
+
+# Light background (for theming posts)
+./scripts/screenshot-frame.sh --bg light raw/editor-light.png sqail.portal/public/screenshots/light.png
+```
+
+Requires ImageMagick (`magick` or `convert` on PATH). If a framed shot ever looks wrong, fix the script, not the individual image — drift between shots is worse than imperfect framing.
+
 ## 9. Social cards
 
 Recommended sizes:

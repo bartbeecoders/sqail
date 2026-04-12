@@ -1,4 +1,4 @@
-export const VERSION = "0.3.6";
+export const VERSION = "0.4.0";
 export const BUILD_NUMBER = "20260411-1";
 export const GITHUB_URL = "https://github.com/bartbeecoders/sqail";
 
@@ -67,44 +67,34 @@ export const DBSERVICE_DOWNLOADS: DbServiceDownloadInfo[] = [
 
 export const FEATURES = [
   {
-    icon: "Monitor",
-    title: "Cross-Platform",
-    description: "Native desktop app for Windows, macOS, and Linux. No browser needed.",
-  },
-  {
     icon: "Zap",
-    title: "Lightweight",
-    description: "Built with Tauri and Rust — fast startup, small footprint, no Electron bloat.",
+    title: "Fast",
+    headline: "Opens before your terminal.",
+    description: "Under 20 MB, sub-second launch, native Tauri webview. No Electron, no JVM, no Chromium bundle.",
   },
   {
-    icon: "Database",
-    title: "4 Databases",
-    description: "Connect to PostgreSQL, MySQL, SQLite, and SQL Server from one app.",
-  },
-  {
-    icon: "Code",
-    title: "Monaco Editor",
-    description: "VS Code-grade SQL editing with syntax highlighting and intelligent autocomplete.",
-  },
-  {
-    icon: "History",
-    title: "Query History",
-    description: "Every query is saved. Search, filter, and re-run your past work instantly.",
-  },
-  {
-    icon: "Moon",
-    title: "Dark & Light",
-    description: "Beautiful themes that adapt to your system preference or manual selection.",
-  },
-  {
-    icon: "Keyboard",
-    title: "Keyboard-First",
-    description: "Fully customizable shortcuts for a fast, mouse-free workflow.",
+    icon: "Sparkles",
+    title: "Smart",
+    headline: "AI that actually knows your schema.",
+    description: "Schema-aware autocomplete and NL-to-SQL with your tables injected as context. Bring your own key.",
   },
   {
     icon: "GitBranch",
-    title: "Open Source",
-    description: "Free forever. Hosted on GitHub. Community-driven development.",
+    title: "Free",
+    headline: "Open source. Forever.",
+    description: "MIT licensed, hosted on Codeberg with a GitHub mirror. No account, no freemium, no feature gates.",
+  },
+  {
+    icon: "ShieldCheck",
+    title: "Private",
+    headline: "Your queries stay on your machine.",
+    description: "No telemetry. Credentials live in a local encrypted store. AI providers are only called when you configure them.",
+  },
+  {
+    icon: "Database",
+    title: "Universal",
+    headline: "Postgres, MySQL, SQLite, SQL Server — one editor.",
+    description: "Multi-driver single UI with SSH tunnels, split editor, query history, and Monaco-powered editing.",
   },
 ] as const;
 
@@ -143,9 +133,11 @@ export const DATABASES = [
 
 export const NAV_ITEMS = [
   { label: "Features", href: "#features" },
+  { label: "Screenshots", href: "#screenshots" },
   { label: "AI", href: "#ai" },
   { label: "Databases", href: "#databases" },
   { label: "Compare", href: "#compare" },
   { label: "Download", href: "#download" },
+  { label: "Docs", href: "#docs" },
   { label: "Changelog", href: "#changelog" },
 ] as const;

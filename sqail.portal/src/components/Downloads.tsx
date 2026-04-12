@@ -76,18 +76,29 @@ export default function Downloads() {
         >
           <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-text-primary">
             <Info size={16} className="text-brand-yellow" />
-            macOS: "sqail is damaged and cannot be opened"?
+            macOS: Gatekeeper warning on first launch?
           </div>
           <p className="mb-3 text-sm text-text-muted">
             sqail is not yet signed with an Apple Developer ID, so macOS
-            Gatekeeper flags it after download. The app is fine — you just need
-            to remove the quarantine attribute once. Drag sqail to{" "}
+            Gatekeeper blocks it on first launch with either{" "}
+            <span className="text-text-primary">"sqail is damaged and cannot be opened"</span>{" "}
+            (older macOS) or{" "}
+            <span className="text-text-primary">"Apple could not verify 'sqail' is free of malware"</span>{" "}
+            (Sonoma / Sequoia and later). Both mean the same thing — the app is
+            fine, it just has a quarantine attribute from being downloaded. Drag
+            sqail to{" "}
             <span className="font-mono text-text-primary">/Applications</span>,
             then run:
           </p>
           <pre className="overflow-x-auto rounded-lg border border-border bg-bg-primary px-4 py-3 text-xs text-brand-cyan">
             <code>xattr -cr /Applications/sqail.app</code>
           </pre>
+          <p className="mt-3 text-xs text-text-muted">
+            Or open <span className="text-text-primary">System Settings →
+            Privacy &amp; Security</span>, scroll to the bottom, and click{" "}
+            <span className="text-text-primary">"Open Anyway"</span> after your
+            first failed launch attempt.
+          </p>
           <p className="mt-3 text-xs text-text-dim">
             You only need to do this once per install. Proper signing +
             notarization is on the roadmap.

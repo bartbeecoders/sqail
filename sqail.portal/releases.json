@@ -1,5 +1,47 @@
 [
   {
+    "version": "0.4.0",
+    "sections": [
+      {
+        "title": "Portal Screenshots Gallery",
+        "items": [
+          "New Screenshots section on the portal with tabbed gallery: Editor, Connections, AI, Split Editor, Light Theme",
+          "Editor screenshot embedded in Docs Getting Started panel",
+          "Screenshot capture helper script (screenshot-capture.sh) that focuses the sqail window before capture",
+          "Screenshot prep script fixed to select the correct Tauri window via _NET_WM_WINDOW_TYPE_NORMAL"
+        ]
+      },
+      {
+        "title": "AI & Editor (from 0.3.4\u20130.3.6)",
+        "items": [
+          "AI prompt history: last 10 prompts navigable with Up/Down arrows in command palette",
+          "AI prompts now include active editor query as context",
+          "Split editor can share the same file across panes",
+          "DbService connect flow for shared database connections"
+        ]
+      },
+      {
+        "title": "macOS & Build",
+        "items": [
+          "Universal macOS build (arm64 + x86_64) with ad-hoc codesign",
+          "macOS download renamed to _universal.dmg",
+          "Windows release build fixes",
+          "Editor drag-drop fix",
+          "Vite bumped to 8.0.5 (security fixes)"
+        ]
+      },
+      {
+        "title": "Portal & Docs",
+        "items": [
+          "Why sqail comparison table vs DBeaver, DataGrip, TablePlus, Beekeeper",
+          "macOS Gatekeeper install note with xattr workaround on Downloads page",
+          "Brand guide, marketing strategy, and marketing plan documents",
+          "README rewritten with five messaging pillars"
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.3.0",
     "sections": [
       {

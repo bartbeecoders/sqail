@@ -30,13 +30,20 @@ It speaks PostgreSQL, MySQL, SQLite, and Microsoft SQL Server today. It uses the
 
 Prebuilt binaries for Linux, macOS, and Windows are available from [sqail.io](https://sqail.io). If you prefer to build from source, see [Development](#development).
 
-### macOS note: "sqail is damaged and cannot be opened"
+### macOS note: Gatekeeper warnings on first launch
 
-sqail is not yet signed with an Apple Developer ID, so macOS Gatekeeper will refuse to launch it after download with the misleading "damaged" error. The app is fine — you just need to remove the quarantine attribute once. After dragging sqail to `/Applications`, run:
+sqail is not yet signed with an Apple Developer ID, so macOS Gatekeeper will refuse to launch it after download with one of two misleading errors, depending on your macOS version:
+
+- **"sqail is damaged and cannot be opened"** (older macOS)
+- **"Apple could not verify 'sqail' is free of malware"** (Sonoma / Sequoia and later)
+
+Both mean the same thing: the app has a quarantine attribute from being downloaded, and it isn't notarized. The app is fine — you just need to remove the quarantine attribute once. After dragging sqail to `/Applications`, run:
 
 ```bash
 xattr -cr /Applications/sqail.app
 ```
+
+Alternatively, open **System Settings → Privacy & Security**, scroll to the bottom, and click **"Open Anyway"** next to the sqail warning after your first failed launch attempt.
 
 You only need to do this once per install. Proper signing + notarization is on the roadmap.
 

@@ -17,13 +17,13 @@ Tactical execution plan derived from `marketing-strategy.md`. This is the *what,
 ### Portal (sqail.io)
 
 - [x] Hero section with tagline, snail logo, primary download CTA (OS auto-detect)
-- [ ] Feature grid keyed to the five messaging pillars (Fast, Smart, Free, Private, Universal) — *current grid is 8 generic features; needs re-key*
-- [ ] Screenshots: editor, schema browser, AI sidebar, split editor, dark + light mode
-- [ ] 30-60s animated demo GIF (NL-to-SQL in action)
+- [x] Feature grid keyed to the five messaging pillars (Fast, Smart, Free, Private, Universal)
+- [x] Screenshots: editor, connections, AI sidebar, split editor, light mode — wired into portal `Screenshots` gallery + Docs Getting Started
+- [ ] 30-60s animated demo GIF (NL-to-SQL in action) — *needs user capture*
 - [x] Downloads page with per-OS binaries, SHA256 checksums, version + build date
 - [x] Changelog page (mirror of RELEASES.md)
 - [x] "Why sqail" comparison table (vs. DBeaver, DataGrip, TablePlus, Beekeeper)
-- [ ] Docs section: Getting Started, Connections, AI Setup, Keyboard Shortcuts
+- [x] Docs section: Getting Started, Connections, AI Setup, Keyboard Shortcuts
 - [x] Footer: Codeberg, GitHub, License, Privacy (no telemetry statement)
 
 ### Branding assets
@@ -31,13 +31,13 @@ Tactical execution plan derived from `marketing-strategy.md`. This is the *what,
 - [ ] Finalized snail logo (SVG, PNG @1x/@2x, favicon, OG image) — *raster icons present, SVG pipeline outstanding*
 - [x] Color palette documented (primary, accent, neutral grays, dark/light variants) — see `brand-guide.md`
 - [x] Typography pairing (portal + in-app consistency) — see `brand-guide.md`
-- [ ] Screenshot template (consistent window chrome, sample data, dark mode)
-- [ ] Press kit ZIP: logos, screenshots, one-liner, long description, bio
+- [x] Screenshot template — `scripts/screenshot-frame.sh`, documented in `brand-guide.md` §8
+- [~] Press kit text drafted in `marketing/press-kit/` — *final ZIP pending logo + screenshots*
 - [ ] Social banners: 1500×500 (X), 1200×630 (OG), 1080×1080 (square)
 
 ### Product readiness
 
-- [ ] v0.4 stable across Linux / macOS / Windows — *currently on v0.3.5*
+- [x] v0.4.0 stable across Linux / macOS / Windows
 - [x] First-run experience: splash screen, onboarding to add first connection
 - [x] AI provider setup flow: friction-free "paste key, pick model"
 - [ ] Crash-free rate acceptable on all three platforms

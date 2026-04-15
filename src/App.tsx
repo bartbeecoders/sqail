@@ -1,5 +1,8 @@
 import { useState, useCallback, useEffect, useMemo } from "react";
-import { formatSqlAligned } from "./lib/sqlFormat";
+import { formatSqlAligned, formatSqlWithComments } from "./lib/sqlFormat";
+import type { FormatOptions } from "./lib/sqlFormat";
+import { useMetadataStore } from "./stores/metadataStore";
+import { useSettingsStore } from "./stores/settingsStore";
 import { saveQuery, saveQueryAs, openQuery } from "./lib/fileOps";
 import TitleBar from "./components/TitleBar";
 import ResizeHandles from "./components/ResizeHandles";
@@ -11,6 +14,7 @@ import ResultsPane from "./components/ResultsPane";
 import ResizablePanel from "./components/ResizablePanel";
 import AiPanel from "./components/AiPanel";
 import AiCommandPalette from "./components/AiCommandPalette";
+import InfoPanel from "./components/InfoPanel";
 import SettingsModal from "./components/SettingsModal";
 import { useEditorStore } from "./stores/editorStore";
 import { useConnectionStore } from "./stores/connectionStore";
@@ -33,6 +37,7 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => loadUiState("sqail_sidebar_collapsed", false));
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [connectionFormOpen, setConnectionFormOpen] = useState(false);
+  const [infoPanelOpen, setInfoPanelOpen] = useState(() => loadUiState("sqail_info_panel_open", false));
   const aiPanelOpen = useAiStore((s) => s.panelOpen);
 
   // Restore AI panel state on mount
@@ -53,6 +58,11 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("sqail_ai_panel_open", JSON.stringify(aiPanelOpen));
   }, [aiPanelOpen]);
+
+  // Persist info panel open state
+  useEffect(() => {
+    localStorage.setItem("sqail_info_panel_open", JSON.stringify(infoPanelOpen));
+  }, [infoPanelOpen]);
 
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId);
   const activeTabId = useEditorStore((s) => s.activeTabId);
@@ -102,7 +112,32 @@ export default function App() {
     const tab = state.getActiveTab();
     if (!tab || !tab.content.trim()) return;
     try {
-      const formatted = formatSqlAligned(tab.content);
+      const settings = useSettingsStore.getState();
+      const fmtOpts: FormatOptions = {
+        indent: settings.formatIndent,
+        uppercaseKeywords: settings.formatUppercaseKeywords,
+        andOrNewLine: settings.formatAndOrNewLine,
+      };
+      const formatted = formatSqlAligned(tab.content, fmtOpts);
+      state.setContent(tab.id, formatted);
+    } catch {
+      // If formatting fails, leave content unchanged
+    }
+  }, []);
+
+  const handleFormatWithComments = useCallback(() => {
+    const state = useEditorStore.getState();
+    const tab = state.getActiveTab();
+    if (!tab || !tab.content.trim()) return;
+    try {
+      const metaStore = useMetadataStore.getState();
+      const settings = useSettingsStore.getState();
+      const fmtOpts: FormatOptions = {
+        indent: settings.formatIndent,
+        uppercaseKeywords: settings.formatUppercaseKeywords,
+        andOrNewLine: settings.formatAndOrNewLine,
+      };
+      const formatted = formatSqlWithComments(tab.content, metaStore, fmtOpts);
       state.setContent(tab.id, formatted);
     } catch {
       // If formatting fails, leave content unchanged
@@ -166,10 +201,13 @@ export default function App() {
         <Toolbar
           onRun={handleRunFromToolbar}
           onFormat={handleFormat}
+          onFormatWithComments={handleFormatWithComments}
           onClear={handleClear}
           hasConnection={!!(useEditorStore.getState().getActiveTab()?.connectionId ?? activeConnectionId)}
           loading={loading}
           onOpenSettings={() => setSettingsOpen(true)}
+          infoPanelOpen={infoPanelOpen}
+          onToggleInfoPanel={() => setInfoPanelOpen(!infoPanelOpen)}
         />
         <ResizablePanel
           top={<EditorArea onExecute={handleExecute} onFormat={handleFormat} />}
@@ -177,6 +215,7 @@ export default function App() {
           defaultRatio={0.6}
         />
       </div>
+      {infoPanelOpen && <InfoPanel onClose={() => setInfoPanelOpen(false)} />}
       {aiPanelOpen && <AiPanel />}
       <AiCommandPalette />
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}

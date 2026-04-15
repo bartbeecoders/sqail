@@ -252,6 +252,38 @@ function GeneralTab() {
         </div>
       </section>
 
+      {/* SQL Formatting section */}
+      <section>
+        <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+          SQL Formatting
+        </h3>
+        <div className="space-y-3">
+          <SettingRow label="Indent Size">
+            <select
+              value={settings.formatIndent}
+              onChange={(e) => update("formatIndent", Number(e.target.value))}
+              className="input w-20"
+            >
+              <option value={2}>2</option>
+              <option value={4}>4</option>
+              <option value={8}>8</option>
+            </select>
+          </SettingRow>
+          <SettingRow label="Uppercase Keywords">
+            <ToggleSwitch
+              checked={settings.formatUppercaseKeywords}
+              onChange={(v) => update("formatUppercaseKeywords", v)}
+            />
+          </SettingRow>
+          <SettingRow label="AND/OR on New Lines">
+            <ToggleSwitch
+              checked={settings.formatAndOrNewLine}
+              onChange={(v) => update("formatAndOrNewLine", v)}
+            />
+          </SettingRow>
+        </div>
+      </section>
+
       {/* Behavior section */}
       <section>
         <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">

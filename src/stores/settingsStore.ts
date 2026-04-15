@@ -21,6 +21,11 @@ export interface AppSettings {
   defaultRowLimit: number;
   queryTimeoutSeconds: number;
 
+  // Formatting
+  formatIndent: number;
+  formatUppercaseKeywords: boolean;
+  formatAndOrNewLine: boolean;
+
   // Behavior
   routineDropAction: "definition" | "exec";
 }
@@ -36,6 +41,9 @@ const DEFAULTS: AppSettings = {
   theme: "system",
   defaultRowLimit: 1000,
   queryTimeoutSeconds: 30,
+  formatIndent: 4,
+  formatUppercaseKeywords: true,
+  formatAndOrNewLine: true,
   routineDropAction: "definition",
 };
 

@@ -6,12 +6,14 @@ import {
   ClipboardCopy,
   X,
   AlertCircle,
+  ChevronDown,
+  Columns2,
 } from "lucide-react";
 import { useAiStore } from "../stores/aiStore";
 import { useEditorStore } from "../stores/editorStore";
 import { useConnectionStore } from "../stores/connectionStore";
 import { buildSchemaContext } from "../lib/schemaContext";
-import { AI_FLOW_LABELS } from "../types/ai";
+import { AI_FLOW_LABELS, AI_PROVIDER_LABELS } from "../types/ai";
 import type { AiFlow, AiHistoryEntry } from "../types/ai";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -52,6 +54,8 @@ export default function AiCommandPalette() {
     currentFlow,
     error,
     providers,
+    selectedProviderId,
+    setSelectedProviderId,
     closePalette,
     promptHistory,
     addToPromptHistory,
@@ -65,6 +69,7 @@ export default function AiCommandPalette() {
     loadProviders,
     getDefaultProvider,
     setPanel,
+    openDiffPreview,
   } = useAiStore();
 
   const [prompt, setPrompt] = useState("");
@@ -299,10 +304,14 @@ export default function AiCommandPalette() {
             </span>
           )}
           <div className="flex-1" />
-          {defaultProvider && (
-            <span className="text-[10px] text-muted-foreground">
-              {defaultProvider.name}
-            </span>
+          {providers.length > 0 && (
+            <ProviderDropdown
+              providers={providers}
+              selectedId={selectedProviderId}
+              defaultProvider={defaultProvider}
+              onSelect={setSelectedProviderId}
+              disabled={streaming}
+            />
           )}
           <button
             onClick={closePalette}
@@ -396,13 +405,25 @@ export default function AiCommandPalette() {
         {/* Action bar */}
         {(canInsert || canCopy) && (
           <div className="flex gap-1.5 border-t border-border px-3 py-2">
+            {canInsert && currentFlow === "format_sql" && paletteSql && (
+              <button
+                onClick={() => {
+                  openDiffPreview(paletteSql, currentResponse);
+                  closePalette();
+                }}
+                className="btn-primary flex items-center gap-1 text-[10px]"
+              >
+                <Columns2 size={10} />
+                Preview Changes
+              </button>
+            )}
             {canInsert && (
               <button
                 onClick={handleInsertToEditor}
-                className="btn-primary flex items-center gap-1 text-[10px]"
+                className={`flex items-center gap-1 text-[10px] ${currentFlow === "format_sql" && paletteSql ? "btn-secondary" : "btn-primary"}`}
               >
                 <Code size={10} />
-                Insert to Editor
+                Apply Directly
               </button>
             )}
             {canCopy && (
@@ -417,6 +438,103 @@ export default function AiCommandPalette() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function ProviderDropdown({
+  providers,
+  selectedId,
+  defaultProvider,
+  onSelect,
+  disabled,
+}: {
+  providers: import("../types/ai").AiProviderConfig[];
+  selectedId: string | null;
+  defaultProvider: import("../types/ai").AiProviderConfig | undefined;
+  onSelect: (id: string | null) => void;
+  disabled: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  const activeProvider = selectedId
+    ? providers.find((p) => p.id === selectedId)
+    : defaultProvider;
+
+  const close = useCallback(() => setOpen(false), []);
+
+  useEffect(() => {
+    if (!open) return;
+    const onMouseDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) close();
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        close();
+      }
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      document.removeEventListener("mousedown", onMouseDown);
+      document.removeEventListener("keydown", onKeyDown, true);
+    };
+  }, [open, close]);
+
+  if (providers.length <= 1) {
+    return (
+      <span className="text-[10px] text-muted-foreground">
+        {activeProvider?.name}
+      </span>
+    );
+  }
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        onClick={() => !disabled && setOpen((v) => !v)}
+        disabled={disabled}
+        className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors disabled:opacity-40"
+        title="Select AI provider"
+      >
+        <span className="max-w-28 truncate">{activeProvider?.name}</span>
+        <ChevronDown size={10} />
+      </button>
+      {open && (
+        <div className="absolute right-0 top-full z-50 mt-1 min-w-44 rounded-md border border-border bg-background py-1 shadow-lg">
+          {providers.map((p) => {
+            const isActive = selectedId ? p.id === selectedId : p.id === defaultProvider?.id;
+            return (
+              <button
+                key={p.id}
+                onClick={() => {
+                  onSelect(p.id === defaultProvider?.id ? null : p.id);
+                  close();
+                }}
+                className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] transition-colors ${
+                  isActive
+                    ? "bg-primary/10 text-primary"
+                    : "hover:bg-accent hover:text-accent-foreground"
+                }`}
+              >
+                <div className="flex-1 min-w-0">
+                  <div className="truncate font-medium">{p.name}</div>
+                  <div className="truncate text-[9px] text-muted-foreground">
+                    {AI_PROVIDER_LABELS[p.provider]} — {p.model}
+                  </div>
+                </div>
+                {p.isDefault && (
+                  <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-[8px] text-muted-foreground">
+                    default
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

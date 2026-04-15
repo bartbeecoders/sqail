@@ -626,8 +626,12 @@ function prefixWithAlias(expr: string, tableAlias: string): string {
   if (/^[a-zA-Z0-9_]+\./.test(trimmed) || /^\[?\w+\]?\./.test(trimmed)) {
     return trimmed;
   }
-  // Skip expressions that are functions, *, numbers, or complex expressions
-  if (/^\(/.test(trimmed) || /^\d/.test(trimmed) || trimmed === "*") {
+  // Skip expressions that are functions, *, numbers, string literals, or complex expressions
+  if (/^\(/.test(trimmed) || /^\d/.test(trimmed) || /^['"]/.test(trimmed) || trimmed === "*") {
+    return trimmed;
+  }
+  // Skip function calls: word followed by '(' (e.g. ISNULL(...), COUNT(...), COALESCE(...))
+  if (/^[a-zA-Z_]\w*\s*\(/.test(trimmed)) {
     return trimmed;
   }
   // Skip CASE expressions and other keywords at start
@@ -767,18 +771,24 @@ function formatSelect(parsed: ParsedSelect, opts: Required<FormatOptions> = DEFA
     return { expr, alias };
   });
 
-  // Calculate max expression length for alignment
+  // Calculate max expression length for alignment (cap at 50 to avoid excessive padding)
+  const MAX_ALIGN_WIDTH = 50;
   const maxExprLen = processedCols.reduce(
     (max, col) => Math.max(max, col.expr.length),
     0,
   );
+  const useAlignment = maxExprLen <= MAX_ALIGN_WIDTH;
 
   // Render column lines
   processedCols.forEach((col, i) => {
     const comma = i < processedCols.length - 1 ? "," : "";
     if (col.alias) {
-      const padding = " ".repeat(maxExprLen - col.expr.length + 1);
-      lines.push(`${indent}${col.expr}${padding}AS ${col.alias}${comma}`);
+      if (useAlignment) {
+        const padding = " ".repeat(maxExprLen - col.expr.length + 1);
+        lines.push(`${indent}${col.expr}${padding}AS ${col.alias}${comma}`);
+      } else {
+        lines.push(`${indent}${col.expr} AS ${col.alias}${comma}`);
+      }
     } else {
       lines.push(`${indent}${col.expr}${comma}`);
     }
@@ -951,18 +961,23 @@ function formatSelectWithComments(parsed: ParsedSelect, metadataLookup: Metadata
     return { expr, alias };
   });
 
-  // Calculate max line length for alignment of inline comments
+  // Calculate max expression length for alignment (cap at 50 to avoid excessive padding)
+  const MAX_ALIGN_WIDTH = 50;
   const maxExprLen = processedCols.reduce(
     (max, col) => Math.max(max, col.expr.length),
     0,
   );
+  const useAlignment = maxExprLen <= MAX_ALIGN_WIDTH;
 
   // Build column lines with alias, then compute max full-line length for comment alignment
   const columnLines = processedCols.map((col, i) => {
     const comma = i < processedCols.length - 1 ? "," : "";
     if (col.alias) {
-      const padding = " ".repeat(maxExprLen - col.expr.length + 1);
-      return `${indent}${col.expr}${padding}AS ${col.alias}${comma}`;
+      if (useAlignment) {
+        const padding = " ".repeat(maxExprLen - col.expr.length + 1);
+        return `${indent}${col.expr}${padding}AS ${col.alias}${comma}`;
+      }
+      return `${indent}${col.expr} AS ${col.alias}${comma}`;
     }
     return `${indent}${col.expr}${comma}`;
   });

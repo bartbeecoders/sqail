@@ -12,6 +12,8 @@ import {
   providerHasBaseUrl,
   getDefaultModel,
   getDefaultBaseUrl,
+  ZAI_ENDPOINTS,
+  ZAI_MODELS,
 } from "../types/ai";
 
 interface AiProviderFormProps {
@@ -203,6 +205,32 @@ export default function AiProviderForm({ initial, onClose }: AiProviderFormProps
             </Field>
           )}
 
+          {/* Z.ai Endpoint */}
+          {form.provider === "zai" && (
+            <Field label="Endpoint">
+              <div className="flex gap-1">
+                {ZAI_ENDPOINTS.map((ep) => (
+                  <button
+                    key={ep.url}
+                    type="button"
+                    onClick={() => set("baseUrl", ep.url)}
+                    className={cn(
+                      "flex-1 rounded-md px-2 py-1.5 text-[11px] font-medium transition-colors",
+                      (form.baseUrl ?? ZAI_ENDPOINTS[1].url) === ep.url
+                        ? "bg-primary text-primary-foreground"
+                        : "bg-muted text-muted-foreground hover:bg-accent",
+                    )}
+                  >
+                    {ep.label}
+                  </button>
+                ))}
+              </div>
+              <p className="mt-1 text-[10px] text-muted-foreground truncate">
+                {form.baseUrl ?? ZAI_ENDPOINTS[1].url}
+              </p>
+            </Field>
+          )}
+
           {/* Model */}
           {needsModel && form.provider === "openRouter" ? (
             <Field label="Model">
@@ -269,6 +297,18 @@ export default function AiProviderForm({ initial, onClose }: AiProviderFormProps
                 )}
               </div>
             </Field>
+          ) : needsModel && form.provider === "zai" ? (
+            <Field label="Model">
+              <select
+                value={form.model}
+                onChange={(e) => set("model", e.target.value)}
+                className="input"
+              >
+                {ZAI_MODELS.map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+            </Field>
           ) : needsModel ? (
             <Field label="Model">
               <input
@@ -280,8 +320,8 @@ export default function AiProviderForm({ initial, onClose }: AiProviderFormProps
             </Field>
           ) : null}
 
-          {/* Base URL */}
-          {hasBaseUrl && (
+          {/* Base URL (not shown for Z.ai since it has its own endpoint selector) */}
+          {hasBaseUrl && form.provider !== "zai" && (
             <Field label="Base URL">
               <input
                 value={form.baseUrl ?? ""}

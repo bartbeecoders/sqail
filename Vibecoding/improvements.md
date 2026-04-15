@@ -138,3 +138,12 @@ When I run a query, and a sql error is shown, it could be usefull that the user 
 
 Add a close all pinned tabs menu options.
 Close all tabs should also close the pinned tabs.
+
+Add a format with comments option (use the format button with dropdown to show the option).
+This will format the sql with comments, based on the metadata of the sql object.
+
+Generating the metadata is rather slow, maybe we should make it optional. Investigate if we can make it faster. Provide some options.
+
+Add a metadata generation log pane, where we can track the LLM interaction progress (prompts, responses, tokens used) 
+
+Move the metadata tab and the log tab as a flyout panel to thje right of the editor.

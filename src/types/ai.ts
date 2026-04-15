@@ -78,7 +78,7 @@ const DEFAULT_MODELS: Record<AiProviderType, string> = {
   openRouter: "anthropic/claude-sonnet-4",
   openAiCompatible: "model-name",
   minimax: "MiniMax-Text-01",
-  zai: "deepseek-chat",
+  zai: "GLM-4.7",
   claudeCodeCli: "claude-sonnet-4-20250514",
   lmStudio: "local-model",
 };
@@ -88,6 +88,21 @@ const DEFAULT_BASE_URLS: Partial<Record<AiProviderType, string>> = {
   zai: "https://api.z.ai/api/paas/v4",
   lmStudio: "https://llm.hideterms.com/v1",
 };
+
+export const ZAI_ENDPOINTS = [
+  { url: "https://api.z.ai/api/coding/paas/v4", label: "Coding" },
+  { url: "https://api.z.ai/api/paas/v4", label: "General" },
+] as const;
+
+export const ZAI_MODELS = [
+  "GLM-5.1",
+  "GLM-5V-Turbo",
+  "GLM-5",
+  "GLM-5-Turbo",
+  "GLM-4.7",
+  "GLM-4.6",
+  "GLM-4.5",
+] as const;
 
 export function defaultProvider(provider: AiProviderType = "claude"): AiProviderConfig {
   return {

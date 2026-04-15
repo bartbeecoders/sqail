@@ -76,7 +76,22 @@ pub async fn stream_ai_response(
     }
 }
 
-/// Non-streaming AI call that returns the full response text.
+/// Token usage from an AI API call.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+}
+
+/// Result of a non-streaming AI call including response text and token usage.
+pub struct AiCallResult {
+    pub text: String,
+    pub usage: Option<TokenUsage>,
+}
+
+/// Non-streaming AI call that returns the full response text and token usage.
 /// Used for metadata generation where we need to parse the JSON response.
 pub async fn call_ai_response(
     config: &AiProviderConfig,
@@ -84,7 +99,7 @@ pub async fn call_ai_response(
     flow: &str,
     driver: Option<&str>,
     schema_context: Option<&str>,
-) -> Result<String, String> {
+) -> Result<AiCallResult, String> {
     let system_prompt = build_system_prompt(flow, driver, schema_context);
 
     match config.provider {
@@ -116,7 +131,7 @@ async fn call_claude(
     config: &AiProviderConfig,
     system_prompt: &str,
     user_message: &str,
-) -> Result<String, String> {
+) -> Result<AiCallResult, String> {
     let client = build_http_client(config.accept_invalid_certs)?;
     let url = config
         .base_url
@@ -151,12 +166,21 @@ async fn call_claude(
     let json: serde_json::Value = resp.json().await
         .map_err(|e| format!("Failed to parse response: {e}"))?;
 
-    json.get("content")
+    let text = json.get("content")
         .and_then(|c| c.get(0))
         .and_then(|b| b.get("text"))
         .and_then(|t| t.as_str())
         .map(|s| s.to_string())
-        .ok_or_else(|| "Unexpected Claude response format".to_string())
+        .ok_or_else(|| "Unexpected Claude response format".to_string())?;
+
+    let usage = json.get("usage").map(|u| TokenUsage {
+        prompt_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+        completion_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+        total_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0)
+            + u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+    });
+
+    Ok(AiCallResult { text, usage })
 }
 
 async fn call_openai(
@@ -164,7 +188,7 @@ async fn call_openai(
     system_prompt: &str,
     user_message: &str,
     default_base: &str,
-) -> Result<String, String> {
+) -> Result<AiCallResult, String> {
     let client = build_http_client(config.accept_invalid_certs)?;
     let url = resolve_openai_url(config.base_url.as_deref(), default_base);
     let body = build_openai_body(config, system_prompt, user_message, false);
@@ -192,19 +216,27 @@ async fn call_openai(
     let json: serde_json::Value = resp.json().await
         .map_err(|e| format!("Failed to parse response: {e}"))?;
 
-    json.get("choices")
+    let text = json.get("choices")
         .and_then(|c| c.get(0))
         .and_then(|c| c.get("message"))
         .and_then(|m| m.get("content"))
         .and_then(|t| t.as_str())
         .map(|s| s.to_string())
-        .ok_or_else(|| "Unexpected API response format".to_string())
+        .ok_or_else(|| "Unexpected API response format".to_string())?;
+
+    let usage = json.get("usage").map(|u| TokenUsage {
+        prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+        completion_tokens: u.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+        total_tokens: u.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+    });
+
+    Ok(AiCallResult { text, usage })
 }
 
 async fn call_claude_code_cli(
     system_prompt: &str,
     user_message: &str,
-) -> Result<String, String> {
+) -> Result<AiCallResult, String> {
     let full_prompt = format!("{system_prompt}\n\n{user_message}");
 
     let output = Command::new("claude")
@@ -217,7 +249,10 @@ async fn call_claude_code_cli(
         .map_err(|e| format!("Failed to run claude CLI: {e}"))?;
 
     if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        Ok(AiCallResult {
+            text: String::from_utf8_lossy(&output.stdout).to_string(),
+            usage: None, // CLI doesn't report token usage
+        })
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         Err(format!("claude CLI error: {stderr}"))

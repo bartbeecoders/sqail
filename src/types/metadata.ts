@@ -39,3 +39,18 @@ export interface MetadataError {
   connectionId: string;
   error: string;
 }
+
+export interface MetadataLogEntry {
+  id: string;
+  timestamp: string;
+  objectNames: string[];
+  flow: string;
+  prompt: string;
+  response: string;
+  status: "success" | "error";
+  error?: string;
+  durationMs: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+}

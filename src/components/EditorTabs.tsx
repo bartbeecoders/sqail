@@ -1,11 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { Pin, Plus, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { buildSelectStatement } from "../lib/sqlGenerate";
+import { buildSelectStatement, buildRoutineCallStatement } from "../lib/sqlGenerate";
 import { cn } from "../lib/utils";
 import { useConnectionStore } from "../stores/connectionStore";
 import { useEditorStore } from "../stores/editorStore";
 import { useSchemaStore } from "../stores/schemaStore";
+import { useSettingsStore } from "../stores/settingsStore";
 import type { ColumnInfo } from "../types/schema";
 import type { EditorTab } from "../types/editor";
 
@@ -66,7 +67,7 @@ export default function EditorTabs() {
   }, [contextMenu, closeContextMenu]);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
-    if (e.dataTransfer.types.includes("application/sqlai-table")) {
+    if (e.dataTransfer.types.includes("application/sqlai-table") || e.dataTransfer.types.includes("application/sqlai-routine")) {
       e.preventDefault();
       e.dataTransfer.dropEffect = "copy";
       setDragOver(true);
@@ -80,14 +81,6 @@ export default function EditorTabs() {
   const handleDrop = useCallback(
     async (e: React.DragEvent) => {
       setDragOver(false);
-      const raw = e.dataTransfer.getData("application/sqlai-table");
-      if (!raw) return;
-      e.preventDefault();
-
-      const { schemaName, tableName } = JSON.parse(raw) as {
-        schemaName: string;
-        tableName: string;
-      };
 
       const connStore = useConnectionStore.getState();
       const conn = connStore.connections.find(
@@ -95,28 +88,72 @@ export default function EditorTabs() {
       );
       if (!conn) return;
 
-      const schemaStore = useSchemaStore.getState();
-      const key = `${schemaName}.${tableName}`;
-      let cols = schemaStore.columns[key];
-      if (!cols) {
-        try {
-          cols = await invoke<ColumnInfo[]>("list_columns", {
-            connectionId: conn.id,
-            schemaName,
-            tableName,
-          });
-          schemaStore.loadColumns(conn.id, schemaName, tableName);
-        } catch {
-          cols = [];
+      // Handle table drop
+      const tableRaw = e.dataTransfer.getData("application/sqlai-table");
+      if (tableRaw) {
+        e.preventDefault();
+        const { schemaName, tableName } = JSON.parse(tableRaw) as {
+          schemaName: string;
+          tableName: string;
+        };
+
+        const schemaStore = useSchemaStore.getState();
+        const key = `${schemaName}.${tableName}`;
+        let cols = schemaStore.columns[key];
+        if (!cols) {
+          try {
+            cols = await invoke<ColumnInfo[]>("list_columns", {
+              connectionId: conn.id,
+              schemaName,
+              tableName,
+            });
+            schemaStore.loadColumns(conn.id, schemaName, tableName);
+          } catch {
+            cols = [];
+          }
         }
+
+        const sql = buildSelectStatement(schemaName, tableName, cols, conn.driver);
+        addTabWithContent(tableName, sql);
+        const newTab = useEditorStore.getState().getActiveTab();
+        if (newTab && conn.id) {
+          setConnectionId(newTab.id, conn.id);
+        }
+        return;
       }
 
-      const sql = buildSelectStatement(schemaName, tableName, cols, conn.driver);
-      addTabWithContent(tableName, sql);
-      // Link the new tab to the current connection
-      const newTab = useEditorStore.getState().getActiveTab();
-      if (newTab && conn.id) {
-        setConnectionId(newTab.id, conn.id);
+      // Handle routine drop
+      const routineRaw = e.dataTransfer.getData("application/sqlai-routine");
+      if (routineRaw) {
+        e.preventDefault();
+        const { schemaName, routineName, routineType } = JSON.parse(routineRaw) as {
+          schemaName: string;
+          routineName: string;
+          routineType: "procedure" | "function";
+        };
+
+        const dropAction = useSettingsStore.getState().routineDropAction;
+        let sql: string;
+        if (dropAction === "definition") {
+          try {
+            sql = await invoke<string>("get_routine_definition", {
+              connectionId: conn.id,
+              schemaName,
+              routineName,
+              routineType,
+            });
+          } catch {
+            sql = buildRoutineCallStatement(schemaName, routineName, routineType, conn.driver);
+          }
+        } else {
+          sql = buildRoutineCallStatement(schemaName, routineName, routineType, conn.driver);
+        }
+        addTabWithContent(routineName, sql);
+        const newTab = useEditorStore.getState().getActiveTab();
+        if (newTab && conn.id) {
+          setConnectionId(newTab.id, conn.id);
+        }
+        return;
       }
     },
     [addTabWithContent, setConnectionId],

@@ -14,7 +14,6 @@ import {
   TableProperties,
   Clock,
   Bookmark,
-  BookOpen,
 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { useConnectionStore } from "../stores/connectionStore";
@@ -25,9 +24,7 @@ import ConnectionForm from "./ConnectionForm";
 import SchemaTree from "./SchemaTree";
 import QueryHistoryPanel from "./QueryHistoryPanel";
 import SavedQueriesPanel from "./SavedQueriesPanel";
-import MetadataPanel from "./MetadataPanel";
-
-type BottomTab = "schema" | "history" | "saved" | "metadata";
+type BottomTab = "schema" | "history" | "saved";
 
 interface SidebarProps {
   collapsed: boolean;
@@ -396,7 +393,6 @@ export default function Sidebar({ collapsed, onToggle, externalFormOpen, onExter
                 { id: "schema" as const, icon: TableProperties, label: "Schema" },
                 { id: "history" as const, icon: Clock, label: "History" },
                 { id: "saved" as const, icon: Bookmark, label: "Saved" },
-                { id: "metadata" as const, icon: BookOpen, label: "Metadata" },
               ]).map(({ id, icon: Icon, label }) => (
                 <button
                   key={id}
@@ -419,7 +415,6 @@ export default function Sidebar({ collapsed, onToggle, externalFormOpen, onExter
                 <QueryHistoryPanel onSaveQuery={handleSaveFromHistory} />
               )}
               {bottomTab === "saved" && <SavedQueriesPanel />}
-              {bottomTab === "metadata" && <MetadataPanel />}
             </div>
           </div>
         )}

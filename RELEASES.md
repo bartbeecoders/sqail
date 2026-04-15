@@ -2,6 +2,22 @@
 
 > The authoritative changelog lives in `releases.json` (consumed by both the in-app About tab and the portal). This file tracks selected highlights.
 
+## v0.4.1
+
+### SQL Formatting
+- Stored procedure formatting: embedded SELECT statements properly formatted with fields on separate lines, aligned AS aliases
+- WHERE/ON clauses break AND/OR conditions onto separate indented lines
+- Column alignment capped at 50 chars to prevent excessive whitespace
+- Fixed false table alias prefix on function calls and string literals
+- New "Format with AI" option with diff preview (side-by-side Monaco diff editor, Accept/Reject)
+- SQL Formatting settings: indent size, uppercase keywords, AND/OR new lines
+
+### Schema Tree
+- Ctrl+scroll font resizing, separate Procedures/Functions categories
+
+### Editor & Settings
+- Ctrl+scroll zoom (changed from Shift), routine drag-and-drop, grid-aligned settings layout
+
 ## v0.4.0
 
 ### Portal Screenshots Gallery

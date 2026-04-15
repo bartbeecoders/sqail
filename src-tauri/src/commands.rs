@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde::Deserialize;
+
 use sqlx::postgres::PgPoolOptions;
 use sqlx::mysql::MySqlPoolOptions;
 use sqlx::sqlite::SqlitePoolOptions;
@@ -12,7 +14,7 @@ use crate::ai::client;
 use crate::ai::provider::{AiHistoryEntry, AiProviderConfig};
 use crate::auth::entra;
 use crate::db::connections::{ConnectionConfig, Driver, MssqlAuthMethod};
-use crate::metadata::{GeneratedMetadata, ObjectMetadata};
+use crate::metadata::{ColumnMetadata, GeneratedMetadata, ObjectMetadata};
 use crate::pool::DbPool;
 use crate::query::{self, QueryResponse};
 use crate::schema::{self, ColumnInfo, IndexInfo, RoutineInfo, SchemaInfo, TableInfo};
@@ -659,6 +661,20 @@ async fn get_default_provider(state: &State<'_, AppState>) -> Result<AiProviderC
         .ok_or_else(|| "No AI provider configured. Add one in AI settings.".to_string())
 }
 
+async fn get_provider(state: &State<'_, AppState>, provider_id: Option<String>) -> Result<AiProviderConfig, String> {
+    match provider_id {
+        Some(id) => {
+            let providers = state.ai_providers.lock().await;
+            providers
+                .iter()
+                .find(|p| p.id == id)
+                .cloned()
+                .ok_or_else(|| format!("AI provider with id '{}' not found.", id))
+        }
+        None => get_default_provider(state).await,
+    }
+}
+
 #[tauri::command]
 pub async fn ai_generate_sql(
     app_handle: AppHandle,
@@ -666,8 +682,9 @@ pub async fn ai_generate_sql(
     prompt: String,
     schema_context: String,
     driver: String,
+    provider_id: Option<String>,
 ) -> Result<String, String> {
-    let config = get_default_provider(&state).await?;
+    let config = get_provider(&state, provider_id).await?;
     let request_id = uuid::Uuid::new_v4().to_string();
     let rid = request_id.clone();
 
@@ -694,8 +711,9 @@ pub async fn ai_explain_query(
     sql: String,
     schema_context: String,
     driver: String,
+    provider_id: Option<String>,
 ) -> Result<String, String> {
-    let config = get_default_provider(&state).await?;
+    let config = get_provider(&state, provider_id).await?;
     let request_id = uuid::Uuid::new_v4().to_string();
     let rid = request_id.clone();
 
@@ -722,8 +740,9 @@ pub async fn ai_optimize_query(
     sql: String,
     schema_context: String,
     driver: String,
+    provider_id: Option<String>,
 ) -> Result<String, String> {
-    let config = get_default_provider(&state).await?;
+    let config = get_provider(&state, provider_id).await?;
     let request_id = uuid::Uuid::new_v4().to_string();
     let rid = request_id.clone();
 
@@ -749,8 +768,9 @@ pub async fn ai_generate_docs(
     state: State<'_, AppState>,
     schema_context: String,
     driver: String,
+    provider_id: Option<String>,
 ) -> Result<String, String> {
-    let config = get_default_provider(&state).await?;
+    let config = get_provider(&state, provider_id).await?;
     let request_id = uuid::Uuid::new_v4().to_string();
     let rid = request_id.clone();
 
@@ -777,8 +797,9 @@ pub async fn ai_format_sql(
     sql: String,
     schema_context: String,
     driver: String,
+    provider_id: Option<String>,
 ) -> Result<String, String> {
-    let config = get_default_provider(&state).await?;
+    let config = get_provider(&state, provider_id).await?;
     let request_id = uuid::Uuid::new_v4().to_string();
     let rid = request_id.clone();
 
@@ -806,8 +827,9 @@ pub async fn ai_fix_query(
     error_message: String,
     schema_context: String,
     driver: String,
+    provider_id: Option<String>,
 ) -> Result<String, String> {
-    let config = get_default_provider(&state).await?;
+    let config = get_provider(&state, provider_id).await?;
     let request_id = uuid::Uuid::new_v4().to_string();
     let rid = request_id.clone();
 
@@ -838,8 +860,9 @@ pub async fn ai_comment_sql(
     sql: String,
     schema_context: String,
     driver: String,
+    provider_id: Option<String>,
 ) -> Result<String, String> {
-    let config = get_default_provider(&state).await?;
+    let config = get_provider(&state, provider_id).await?;
     let request_id = uuid::Uuid::new_v4().to_string();
     let rid = request_id.clone();
 
@@ -1000,6 +1023,23 @@ struct MetadataDonePayload {
     total_generated: usize,
 }
 
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct MetadataLogPayload {
+    id: String,
+    timestamp: String,
+    object_names: Vec<String>,
+    flow: String, // "generate_metadata" or "generate_batch_metadata"
+    prompt: String,
+    response: String,
+    status: String, // "success" or "error"
+    error: Option<String>,
+    duration_ms: u64,
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+    total_tokens: Option<u64>,
+}
+
 fn build_object_prompt(
     object_name: &str,
     object_type: &str,
@@ -1100,6 +1140,376 @@ fn parse_metadata_response(response: &str) -> GeneratedMetadata {
     }
 }
 
+/// Build a combined prompt for multiple objects separated by "---".
+fn build_batch_prompt(
+    objects: &[(String, String, String, Vec<ColumnInfo>, Vec<IndexInfo>)], // (schema, name, type, cols, idxs)
+) -> String {
+    objects
+        .iter()
+        .map(|(schema, name, obj_type, cols, idxs)| {
+            build_object_prompt(name, obj_type, schema, cols, idxs)
+        })
+        .collect::<Vec<_>>()
+        .join("\n---\n")
+}
+
+/// Intermediate struct for deserialising batch metadata responses.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchMetadataEntry {
+    object_name: String,
+    description: String,
+    #[serde(default)]
+    columns: Vec<ColumnMetadata>,
+    #[serde(default)]
+    example_usage: String,
+    #[serde(default)]
+    related_objects: Vec<String>,
+    #[serde(default)]
+    dependencies: Vec<String>,
+}
+
+/// Parse a batch metadata response (JSON array) into a vec of (objectName, GeneratedMetadata).
+fn parse_batch_metadata_response(response: &str) -> Vec<(String, GeneratedMetadata)> {
+    let response = strip_thinking_blocks(response);
+    let response = response.trim();
+
+    // Strip markdown fences
+    let cleaned = response
+        .strip_prefix("```json")
+        .or_else(|| response.strip_prefix("```"))
+        .unwrap_or(response);
+    let cleaned = cleaned.strip_suffix("```").unwrap_or(cleaned).trim();
+
+    // Try to parse as JSON array
+    if let Ok(entries) = serde_json::from_str::<Vec<BatchMetadataEntry>>(cleaned) {
+        return entries
+            .into_iter()
+            .map(|e| {
+                (
+                    e.object_name,
+                    GeneratedMetadata {
+                        description: e.description,
+                        columns: e.columns,
+                        example_usage: e.example_usage,
+                        related_objects: e.related_objects,
+                        dependencies: e.dependencies,
+                    },
+                )
+            })
+            .collect();
+    }
+
+    // Try to extract JSON array from the response
+    if let Some(start) = cleaned.find('[') {
+        if let Some(end) = cleaned.rfind(']') {
+            let json_slice = &cleaned[start..=end];
+            if let Ok(entries) = serde_json::from_str::<Vec<BatchMetadataEntry>>(json_slice) {
+                return entries
+                    .into_iter()
+                    .map(|e| {
+                        (
+                            e.object_name,
+                            GeneratedMetadata {
+                                description: e.description,
+                                columns: e.columns,
+                                example_usage: e.example_usage,
+                                related_objects: e.related_objects,
+                                dependencies: e.dependencies,
+                            },
+                        )
+                    })
+                    .collect();
+            }
+        }
+    }
+
+    // Fallback: empty
+    Vec::new()
+}
+
+/// Maximum number of objects per batch prompt.
+const METADATA_BATCH_SIZE: usize = 5;
+/// Maximum number of concurrent LLM requests.
+const METADATA_CONCURRENCY: usize = 4;
+
+/// Shared implementation for batched + parallel metadata generation.
+/// Used by both generate_all_metadata and generate_schema_metadata.
+async fn run_batched_metadata_generation(
+    app_handle: AppHandle,
+    pool: DbPool,
+    driver: crate::db::connections::Driver,
+    ai_config: AiProviderConfig,
+    conn_id: String,
+    all_objects: Vec<(String, String, String)>, // (schema, name, type)
+) {
+    let app_state = app_handle.state::<AppState>();
+    let driver_str = format!("{:?}", driver).to_lowercase();
+    let total = all_objects.len();
+
+    // Phase 1: Prefetch all columns and indexes in parallel
+    let mut enriched: Vec<(String, String, String, Vec<ColumnInfo>, Vec<IndexInfo>)> =
+        Vec::with_capacity(total);
+
+    // Fetch in parallel batches of 8
+    for chunk in all_objects.chunks(8) {
+        let mut handles = Vec::new();
+        for (schema_name, object_name, object_type) in chunk {
+            let pool = pool.clone();
+            let driver = driver.clone();
+            let sn = schema_name.clone();
+            let on = object_name.clone();
+            let ot = object_type.clone();
+            handles.push(tokio::spawn(async move {
+                let (cols, idxs) = if ot == "table" || ot == "view" {
+                    let c = schema::list_columns(pool.clone(), &driver, &sn, &on)
+                        .await
+                        .unwrap_or_default();
+                    let i = schema::list_indexes(pool, &driver, &sn, &on)
+                        .await
+                        .unwrap_or_default();
+                    (c, i)
+                } else {
+                    (Vec::new(), Vec::new())
+                };
+                (sn, on, ot, cols, idxs)
+            }));
+        }
+        for h in handles {
+            if let Ok(result) = h.await {
+                enriched.push(result);
+            }
+        }
+    }
+
+    // Phase 2: Batch objects and process batches in parallel
+    let batches: Vec<Vec<(String, String, String, Vec<ColumnInfo>, Vec<IndexInfo>)>> = enriched
+        .chunks(METADATA_BATCH_SIZE)
+        .map(|c| c.to_vec())
+        .collect();
+
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(METADATA_CONCURRENCY));
+    let generated_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let processed_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let mut batch_handles = Vec::new();
+
+    for batch in batches {
+        let sem = semaphore.clone();
+        let ai_cfg = ai_config.clone();
+        let drv = driver_str.clone();
+        let cid = conn_id.clone();
+        let ah = app_handle.clone();
+        let gen_count = generated_count.clone();
+        let proc_count = processed_count.clone();
+        let total_objects = total;
+
+        batch_handles.push(tokio::spawn(async move {
+            let _permit = sem.acquire().await.unwrap();
+
+            let batch_names: Vec<String> = batch.iter().map(|(_, n, _, _, _)| n.clone()).collect();
+
+            // Emit progress for batch start
+            let current = proc_count.load(std::sync::atomic::Ordering::Relaxed);
+            let _ = ah.emit(
+                "metadata:progress",
+                MetadataProgressPayload {
+                    connection_id: cid.clone(),
+                    current: current + 1,
+                    total: total_objects,
+                    object_name: batch_names.join(", "),
+                    status: "generating".to_string(),
+                },
+            );
+
+            if batch.len() == 1 {
+                // Single object: use the original single-object prompt
+                let (ref sn, ref on, ref ot, ref cols, ref idxs) = batch[0];
+                let prompt = build_object_prompt(on, ot, sn, cols, idxs);
+                let start = std::time::Instant::now();
+                match client::call_ai_response(&ai_cfg, &prompt, "generate_metadata", Some(&drv), None).await {
+                    Ok(result) => {
+                        let duration_ms = start.elapsed().as_millis() as u64;
+                        let metadata = parse_metadata_response(&result.text);
+                        let now = chrono::Utc::now().to_rfc3339();
+                        let entry = ObjectMetadata {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            connection_id: cid.clone(),
+                            schema_name: sn.clone(),
+                            object_name: on.clone(),
+                            object_type: ot.clone(),
+                            metadata,
+                            generated_at: now.clone(),
+                            updated_at: now,
+                        };
+                        let batch_state = ah.state::<AppState>();
+                        let mut entries = batch_state.metadata.lock().await;
+                        if let Some(existing) = entries.iter_mut().find(|e| {
+                            e.connection_id == cid && e.schema_name == *sn && e.object_name == *on
+                        }) {
+                            *existing = entry;
+                        } else {
+                            entries.push(entry);
+                        }
+                        drop(entries);
+                        gen_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                        let _ = ah.emit("metadata:log", MetadataLogPayload {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            object_names: vec![on.clone()],
+                            flow: "generate_metadata".to_string(),
+                            prompt: prompt.clone(),
+                            response: result.text,
+                            status: "success".to_string(),
+                            error: None,
+                            duration_ms,
+                            prompt_tokens: result.usage.as_ref().map(|u| u.prompt_tokens),
+                            completion_tokens: result.usage.as_ref().map(|u| u.completion_tokens),
+                            total_tokens: result.usage.as_ref().map(|u| u.total_tokens),
+                        });
+                    }
+                    Err(err) => {
+                        let duration_ms = start.elapsed().as_millis() as u64;
+                        eprintln!("Metadata generation error for {on}: {err}");
+                        let _ = ah.emit("metadata:log", MetadataLogPayload {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            object_names: vec![on.clone()],
+                            flow: "generate_metadata".to_string(),
+                            prompt: prompt.clone(),
+                            response: String::new(),
+                            status: "error".to_string(),
+                            error: Some(err),
+                            duration_ms,
+                            prompt_tokens: None,
+                            completion_tokens: None,
+                            total_tokens: None,
+                        });
+                    }
+                }
+            } else {
+                // Multiple objects: use batch prompt
+                let prompt = build_batch_prompt(&batch);
+                let start = std::time::Instant::now();
+                match client::call_ai_response(&ai_cfg, &prompt, "generate_batch_metadata", Some(&drv), None).await {
+                    Ok(result) => {
+                        let duration_ms = start.elapsed().as_millis() as u64;
+                        let parsed = parse_batch_metadata_response(&result.text);
+                        let now = chrono::Utc::now().to_rfc3339();
+
+                        // Match parsed results back to batch objects
+                        for (sn, on, ot, _, _) in &batch {
+                            let metadata = parsed
+                                .iter()
+                                .find(|(name, _)| name == on)
+                                .map(|(_, m)| m.clone())
+                                .unwrap_or_else(|| GeneratedMetadata {
+                                    description: String::new(),
+                                    columns: Vec::new(),
+                                    example_usage: String::new(),
+                                    related_objects: Vec::new(),
+                                    dependencies: Vec::new(),
+                                });
+
+                            if metadata.description.is_empty() {
+                                continue;
+                            }
+
+                            let entry = ObjectMetadata {
+                                id: uuid::Uuid::new_v4().to_string(),
+                                connection_id: cid.clone(),
+                                schema_name: sn.clone(),
+                                object_name: on.clone(),
+                                object_type: ot.clone(),
+                                metadata,
+                                generated_at: now.clone(),
+                                updated_at: now.clone(),
+                            };
+                            let batch_state = ah.state::<AppState>();
+                            let mut entries = batch_state.metadata.lock().await;
+                            if let Some(existing) = entries.iter_mut().find(|e| {
+                                e.connection_id == cid && e.schema_name == *sn && e.object_name == *on
+                            }) {
+                                *existing = entry;
+                            } else {
+                                entries.push(entry);
+                            }
+                            drop(entries);
+                            gen_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+
+                        let _ = ah.emit("metadata:log", MetadataLogPayload {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            object_names: batch_names.clone(),
+                            flow: "generate_batch_metadata".to_string(),
+                            prompt: prompt.clone(),
+                            response: result.text,
+                            status: "success".to_string(),
+                            error: None,
+                            duration_ms,
+                            prompt_tokens: result.usage.as_ref().map(|u| u.prompt_tokens),
+                            completion_tokens: result.usage.as_ref().map(|u| u.completion_tokens),
+                            total_tokens: result.usage.as_ref().map(|u| u.total_tokens),
+                        });
+                    }
+                    Err(err) => {
+                        let duration_ms = start.elapsed().as_millis() as u64;
+                        eprintln!("Batch metadata generation error for [{}]: {err}", batch_names.join(", "));
+                        let _ = ah.emit("metadata:log", MetadataLogPayload {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            object_names: batch_names.clone(),
+                            flow: "generate_batch_metadata".to_string(),
+                            prompt: prompt.clone(),
+                            response: String::new(),
+                            status: "error".to_string(),
+                            error: Some(err),
+                            duration_ms,
+                            prompt_tokens: None,
+                            completion_tokens: None,
+                            total_tokens: None,
+                        });
+                    }
+                }
+            }
+
+            // Emit progress for batch completion
+            let new_count = proc_count.fetch_add(batch.len(), std::sync::atomic::Ordering::Relaxed) + batch.len();
+            let _ = ah.emit(
+                "metadata:progress",
+                MetadataProgressPayload {
+                    connection_id: cid.clone(),
+                    current: new_count.min(total_objects),
+                    total: total_objects,
+                    object_name: batch_names.join(", "),
+                    status: "complete".to_string(),
+                },
+            );
+        }));
+    }
+
+    // Wait for all batches
+    for h in batch_handles {
+        let _ = h.await;
+    }
+
+    // Save to disk
+    if let Err(e) = app_state.save_metadata().await {
+        eprintln!("Failed to save metadata: {e}");
+    }
+
+    let final_count = generated_count.load(std::sync::atomic::Ordering::Relaxed);
+    let _ = app_handle.emit(
+        "metadata:done",
+        MetadataDonePayload {
+            connection_id: conn_id,
+            total_generated: final_count,
+        },
+    );
+}
+
 #[tauri::command]
 pub async fn generate_all_metadata(
     app_handle: AppHandle,
@@ -1108,14 +1518,13 @@ pub async fn generate_all_metadata(
 ) -> Result<String, String> {
     let (pool, driver) = get_pool_and_driver(&state, &connection_id).await?;
     let ai_config = get_default_provider(&state).await?;
-    let driver_str = format!("{:?}", driver).to_lowercase();
     let generation_id = uuid::Uuid::new_v4().to_string();
     let conn_id = connection_id.clone();
 
     // Gather all schemas, tables, and routines upfront
     let schemas = schema::list_schemas(pool.clone(), &driver).await?;
 
-    let mut all_objects: Vec<(String, String, String)> = Vec::new(); // (schema, name, type)
+    let mut all_objects: Vec<(String, String, String)> = Vec::new();
 
     for s in &schemas {
         let tables = schema::list_tables(pool.clone(), &driver, &s.name).await.unwrap_or_default();
@@ -1128,115 +1537,8 @@ pub async fn generate_all_metadata(
         }
     }
 
-    let total = all_objects.len();
-
     tokio::spawn(async move {
-        let app_state = app_handle.state::<AppState>();
-        let mut generated_count = 0;
-
-        for (i, (schema_name, object_name, object_type)) in all_objects.iter().enumerate() {
-            let _ = app_handle.emit(
-                "metadata:progress",
-                MetadataProgressPayload {
-                    connection_id: conn_id.clone(),
-                    current: i + 1,
-                    total,
-                    object_name: object_name.clone(),
-                    status: "generating".to_string(),
-                },
-            );
-
-            // Fetch columns and indexes for tables/views
-            let (columns, indexes) = if object_type == "table" || object_type == "view" {
-                let cols = schema::list_columns(pool.clone(), &driver, schema_name, object_name)
-                    .await
-                    .unwrap_or_default();
-                let idxs = schema::list_indexes(pool.clone(), &driver, schema_name, object_name)
-                    .await
-                    .unwrap_or_default();
-                (cols, idxs)
-            } else {
-                (Vec::new(), Vec::new())
-            };
-
-            let prompt = build_object_prompt(object_name, object_type, schema_name, &columns, &indexes);
-
-            match client::call_ai_response(
-                &ai_config,
-                &prompt,
-                "generate_metadata",
-                Some(&driver_str),
-                None,
-            )
-            .await
-            {
-                Ok(response) => {
-                    let metadata = parse_metadata_response(&response);
-                    let now = chrono::Utc::now().to_rfc3339();
-                    let entry = ObjectMetadata {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        connection_id: conn_id.clone(),
-                        schema_name: schema_name.clone(),
-                        object_name: object_name.clone(),
-                        object_type: object_type.clone(),
-                        metadata,
-                        generated_at: now.clone(),
-                        updated_at: now,
-                    };
-
-                    // Upsert into state
-                    let mut entries = app_state.metadata.lock().await;
-                    if let Some(existing) = entries.iter_mut().find(|e| {
-                        e.connection_id == conn_id
-                            && e.schema_name == *schema_name
-                            && e.object_name == *object_name
-                    }) {
-                        *existing = entry;
-                    } else {
-                        entries.push(entry);
-                    }
-                    drop(entries);
-                    generated_count += 1;
-
-                    let _ = app_handle.emit(
-                        "metadata:progress",
-                        MetadataProgressPayload {
-                            connection_id: conn_id.clone(),
-                            current: i + 1,
-                            total,
-                            object_name: object_name.clone(),
-                            status: "complete".to_string(),
-                        },
-                    );
-                }
-                Err(err) => {
-                    let _ = app_handle.emit(
-                        "metadata:progress",
-                        MetadataProgressPayload {
-                            connection_id: conn_id.clone(),
-                            current: i + 1,
-                            total,
-                            object_name: object_name.clone(),
-                            status: "error".to_string(),
-                        },
-                    );
-                    eprintln!("Metadata generation error for {object_name}: {err}");
-                }
-            }
-        }
-
-        // Save to disk
-        if let Err(e) = app_state.save_metadata().await {
-            eprintln!("Failed to save metadata: {e}");
-        }
-
-        let _ = app_handle.emit(
-            "metadata:done",
-            MetadataDonePayload {
-                connection_id: conn_id,
-                total_generated: generated_count,
-            },
-        );
+        run_batched_metadata_generation(app_handle, pool, driver, ai_config, conn_id, all_objects).await;
     });
 
     Ok(generation_id)
@@ -1244,7 +1546,7 @@ pub async fn generate_all_metadata(
 
 #[tauri::command]
 pub async fn generate_single_metadata(
-    _app_handle: AppHandle,
+    app_handle: AppHandle,
     state: State<'_, AppState>,
     connection_id: String,
     schema_name: String,
@@ -1269,16 +1571,53 @@ pub async fn generate_single_metadata(
 
     let prompt = build_object_prompt(&object_name, &object_type, &schema_name, &columns, &indexes);
 
-    let response = client::call_ai_response(
+    let start = std::time::Instant::now();
+    let result = match client::call_ai_response(
         &ai_config,
         &prompt,
         "generate_metadata",
         Some(&driver_str),
         None,
     )
-    .await?;
+    .await {
+        Ok(r) => r,
+        Err(err) => {
+            let duration_ms = start.elapsed().as_millis() as u64;
+            let _ = app_handle.emit("metadata:log", MetadataLogPayload {
+                id: uuid::Uuid::new_v4().to_string(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                object_names: vec![object_name.clone()],
+                flow: "generate_metadata".to_string(),
+                prompt: prompt.clone(),
+                response: String::new(),
+                status: "error".to_string(),
+                error: Some(err.clone()),
+                duration_ms,
+                prompt_tokens: None,
+                completion_tokens: None,
+                total_tokens: None,
+            });
+            return Err(err);
+        }
+    };
+    let duration_ms = start.elapsed().as_millis() as u64;
 
-    let metadata = parse_metadata_response(&response);
+    let _ = app_handle.emit("metadata:log", MetadataLogPayload {
+        id: uuid::Uuid::new_v4().to_string(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        object_names: vec![object_name.clone()],
+        flow: "generate_metadata".to_string(),
+        prompt: prompt.clone(),
+        response: result.text.clone(),
+        status: "success".to_string(),
+        error: None,
+        duration_ms,
+        prompt_tokens: result.usage.as_ref().map(|u| u.prompt_tokens),
+        completion_tokens: result.usage.as_ref().map(|u| u.completion_tokens),
+        total_tokens: result.usage.as_ref().map(|u| u.total_tokens),
+    });
+
+    let metadata = parse_metadata_response(&result.text);
     let now = chrono::Utc::now().to_rfc3339();
     let entry = ObjectMetadata {
         id: uuid::Uuid::new_v4().to_string(),
@@ -1316,12 +1655,10 @@ pub async fn generate_schema_metadata(
 ) -> Result<String, String> {
     let (pool, driver) = get_pool_and_driver(&state, &connection_id).await?;
     let ai_config = get_default_provider(&state).await?;
-    let driver_str = format!("{:?}", driver).to_lowercase();
     let generation_id = uuid::Uuid::new_v4().to_string();
     let conn_id = connection_id.clone();
     let schema = schema_name.clone();
 
-    // Gather all tables and routines in this schema
     let mut all_objects: Vec<(String, String, String)> = Vec::new();
     let tables = schema::list_tables(pool.clone(), &driver, &schema)
         .await
@@ -1336,103 +1673,30 @@ pub async fn generate_schema_metadata(
         all_objects.push((schema.clone(), r.name.clone(), r.routine_type.clone()));
     }
 
-    let total = all_objects.len();
+    // Filter out objects that already have metadata
+    {
+        let existing = state.metadata.lock().await;
+        all_objects.retain(|(sn, on, _)| {
+            !existing.iter().any(|e| {
+                e.connection_id == conn_id && e.schema_name == *sn && e.object_name == *on
+            })
+        });
+    }
 
-    tokio::spawn(async move {
-        let app_state = app_handle.state::<AppState>();
-        let mut generated_count = 0;
-
-        for (i, (schema_name, object_name, object_type)) in all_objects.iter().enumerate() {
-            let _ = app_handle.emit(
-                "metadata:progress",
-                MetadataProgressPayload {
-                    connection_id: conn_id.clone(),
-                    current: i + 1,
-                    total,
-                    object_name: object_name.clone(),
-                    status: "generating".to_string(),
-                },
-            );
-
-            let (columns, indexes) = if object_type == "table" || object_type == "view" {
-                let cols = schema::list_columns(pool.clone(), &driver, schema_name, object_name)
-                    .await
-                    .unwrap_or_default();
-                let idxs = schema::list_indexes(pool.clone(), &driver, schema_name, object_name)
-                    .await
-                    .unwrap_or_default();
-                (cols, idxs)
-            } else {
-                (Vec::new(), Vec::new())
-            };
-
-            let prompt =
-                build_object_prompt(object_name, object_type, schema_name, &columns, &indexes);
-
-            match client::call_ai_response(
-                &ai_config,
-                &prompt,
-                "generate_metadata",
-                Some(&driver_str),
-                None,
-            )
-            .await
-            {
-                Ok(response) => {
-                    let metadata = parse_metadata_response(&response);
-                    let now = chrono::Utc::now().to_rfc3339();
-                    let entry = ObjectMetadata {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        connection_id: conn_id.clone(),
-                        schema_name: schema_name.clone(),
-                        object_name: object_name.clone(),
-                        object_type: object_type.clone(),
-                        metadata,
-                        generated_at: now.clone(),
-                        updated_at: now,
-                    };
-
-                    let mut entries = app_state.metadata.lock().await;
-                    if let Some(existing) = entries.iter_mut().find(|e| {
-                        e.connection_id == conn_id
-                            && e.schema_name == *schema_name
-                            && e.object_name == *object_name
-                    }) {
-                        *existing = entry;
-                    } else {
-                        entries.push(entry);
-                    }
-                    drop(entries);
-                    generated_count += 1;
-                }
-                Err(err) => {
-                    eprintln!("Metadata generation error for {object_name}: {err}");
-                }
-            }
-
-            let _ = app_handle.emit(
-                "metadata:progress",
-                MetadataProgressPayload {
-                    connection_id: conn_id.clone(),
-                    current: i + 1,
-                    total,
-                    object_name: object_name.clone(),
-                    status: "complete".to_string(),
-                },
-            );
-        }
-
-        if let Err(e) = app_state.save_metadata().await {
-            eprintln!("Failed to save metadata: {e}");
-        }
-
+    if all_objects.is_empty() {
+        // Everything already has metadata — emit done immediately
         let _ = app_handle.emit(
             "metadata:done",
             MetadataDonePayload {
                 connection_id: conn_id,
-                total_generated: generated_count,
+                total_generated: 0,
             },
         );
+        return Ok(generation_id);
+    }
+
+    tokio::spawn(async move {
+        run_batched_metadata_generation(app_handle, pool, driver, ai_config, conn_id, all_objects).await;
     });
 
     Ok(generation_id)

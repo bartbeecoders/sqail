@@ -1,5 +1,44 @@
 [
   {
+    "version": "0.4.1",
+    "sections": [
+      {
+        "title": "SQL Formatting",
+        "items": [
+          "Stored procedure formatting: embedded SELECT statements now properly formatted with fields on separate lines, aligned AS aliases, and structured layout (previously flattened to a single line)",
+          "WHERE/ON clauses now break AND/OR conditions onto separate indented lines",
+          "Column alignment capped at 50 chars to avoid excessive whitespace from long expressions",
+          "Fixed false table alias prefix on function calls (ISNULL, COUNT, etc.) and string literals",
+          "New 'Format with AI' option in the Format dropdown — sends SQL to your AI provider for formatting",
+          "AI format diff preview: side-by-side Monaco diff editor with green/red highlighting, Accept/Reject buttons to apply or discard changes",
+          "SQL Formatting settings section: configurable indent size, uppercase keywords toggle, AND/OR new line toggle"
+        ]
+      },
+      {
+        "title": "Schema Tree",
+        "items": [
+          "Ctrl+scroll wheel font resizing for the object tree (8\u201324px range)",
+          "Tree font size setting added to Settings > General > Schema Tree",
+          "Procedures and Functions now displayed as separate categories in the tree"
+        ]
+      },
+      {
+        "title": "Editor",
+        "items": [
+          "Ctrl+scroll wheel font zoom (changed from Shift to Ctrl for standard convention)",
+          "Drag-and-drop support for routines (procedures/functions) from schema tree to editor"
+        ]
+      },
+      {
+        "title": "Settings",
+        "items": [
+          "Cleaner grid-based alignment of settings controls",
+          "Routine drop action setting: choose between opening definition or generating exec statement"
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.4.0",
     "sections": [
       {
@@ -37,6 +76,166 @@
           "macOS Gatekeeper install note with xattr workaround on Downloads page",
           "Brand guide, marketing strategy, and marketing plan documents",
           "README rewritten with five messaging pillars"
+        ]
+      }
+    ]
+  },
+  {
+    "version": "0.3.6",
+    "sections": [
+      {
+        "title": "macOS Build Fixes",
+        "items": [
+          "macOS release is now a true Universal binary (arm64 + x86_64) built via --target universal-apple-darwin — runs natively on both Apple Silicon and Intel Macs",
+          "Fixed misleading _x64.dmg filename on arm64 hosts: CI output is now sqail_<version>_<build>_universal.dmg",
+          "Ad-hoc codesign of the .app bundle after lipo, so every binary inside has a valid signature and will execute on arm64",
+          "Workaround documented for 'sqail is damaged and cannot be opened' Gatekeeper error: run xattr -cr /Applications/sqail.app once per install (proper Apple Developer ID signing + notarization still on the roadmap)"
+        ]
+      },
+      {
+        "title": "Portal (sqail.io)",
+        "items": [
+          "New 'Why sqail?' comparison table vs DBeaver, DataGrip, TablePlus, and Beekeeper Studio",
+          "macOS install-notes block on the download page with the xattr workaround, highlighted for visitors detected as macOS"
+        ]
+      },
+      {
+        "title": "Docs",
+        "items": [
+          "README rewritten with an elevator pitch, feature bullets keyed to the five messaging pillars, and a macOS install note",
+          "New marketing/brand-guide.md documenting the color palette, typography, voice, and messaging pillars"
+        ]
+      }
+    ]
+  },
+  {
+    "version": "0.3.5",
+    "sections": [
+      {
+        "title": "AI Assistant",
+        "items": [
+          "Prompt history in the AI command palette — last 10 prompts remembered, navigate with Up/Down arrow keys",
+          "AI prompts now include the active editor query as context when relevant"
+        ]
+      },
+      {
+        "title": "Editor",
+        "items": [
+          "Split editor view now mirrors the same file in both panes, allowing you to view different parts of a long query simultaneously",
+          "Split panes share a single Monaco model — edits in either pane are instantly reflected in the other"
+        ]
+      }
+    ]
+  },
+  {
+    "version": "0.3.4",
+    "sections": [
+      {
+        "title": "DbService Backend",
+        "items": [
+          "JWT authentication added to the DbService HTTP backend",
+          "Rust client now calls /api/connections/connect on pool open so subsequent query and metadata calls can reference connections by id",
+          "/api/connections/test and /api/connections/connect accept a saved connection id and resolve the connection string from the server's connection store",
+          "DbService Windows x64 self-contained release build in the GitHub pipeline, with a download link on the portal"
+        ]
+      },
+      {
+        "title": "Editor",
+        "items": [
+          "Fixed drag-drop of tables from a DbService connection producing 'undefined AS undefined FROM undefined.undefined' — the dbservice driver is now handled by the SELECT generator"
+        ]
+      },
+      {
+        "title": "Dev Tooling",
+        "items": [
+          "scripts/run.sh dev now launches the DbService alongside Tauri and tears it down on exit",
+          "scripts/run.sh dev frees ports 5100 (DbService) and 1420 (Vite) before starting to avoid 'address in use' errors"
+        ]
+      }
+    ]
+  },
+  {
+    "version": "0.3.3",
+    "sections": [
+      {
+        "title": "Multi-Connection Support",
+        "items": [
+          "Connect to multiple databases simultaneously — each connection maintains its own pool",
+          "Tabs are linked to connections: each tab remembers which connection it uses",
+          "Switching tabs automatically switches the active connection and reloads the schema tree",
+          "Connection color dot shown on each tab to indicate which database it belongs to",
+          "New tabs inherit the current active connection",
+          "Sidebar shows green dot for all connected databases, not just the active one"
+        ]
+      },
+      {
+        "title": "Saved Queries",
+        "items": [
+          "Loading a saved query opens a new tab (or switches to it if already open)",
+          "Duplicate name detection when saving — prompts to overwrite existing query",
+          "Tab name syncs with saved query name; custom tab names become the default save name",
+          "Saved queries remember the connection they were created with"
+        ]
+      },
+      {
+        "title": "Database Connections",
+        "items": [
+          "Database name dropdown for PostgreSQL and MySQL: fetches available databases when host, port, and user are set",
+          "Searchable combobox with type-ahead filtering for database selection"
+        ]
+      },
+      {
+        "title": "UI / UX",
+        "items": [
+          "Splash screen with animated logo, progress bar, and loading status on app startup"
+        ]
+      }
+    ]
+  },
+  {
+    "version": "0.3.2",
+    "sections": [
+      {
+        "title": "Database Connections",
+        "items": [
+          "Full native PostgreSQL support: replaced sqlx Any driver with native PgPool, MySqlPool, and SqlitePool for correct handling of all PostgreSQL types (uuid, jsonb, timestamp, numeric, interval, arrays, etc.)",
+          "Fixed schema introspection failing on PostgreSQL with 'Any driver does not support the Postgres type PgTypeInfo(Name)' error",
+          "Fixed swapped primary key / ordinal position columns in PostgreSQL column listing"
+        ]
+      },
+      {
+        "title": "Editor Tabs",
+        "items": [
+          "Right-click context menu on tabs: Close, Close other tabs, Close tabs to the right, Close all tabs, Rename",
+          "Drag a table from the schema tree onto the tab bar to open a new tab with a SELECT statement"
+        ]
+      },
+      {
+        "title": "Query Results",
+        "items": [
+          "Click a row to select it, Ctrl/Cmd+click for multi-select, Shift+click for range select",
+          "Selected row count shown in the toolbar",
+          "Right-click context menu: Copy (tab-separated), Copy as CSV, Copy as JSON, Copy as Markdown",
+          "Keyboard shortcuts: Ctrl+C to copy selected rows, Ctrl+A to select all"
+        ]
+      }
+    ]
+  },
+  {
+    "version": "0.3.1",
+    "sections": [
+      {
+        "title": "AI Providers",
+        "items": [
+          "OpenRouter model browser: fetches the full list of available models from openrouter.ai and shows a searchable dropdown in the AI provider settings",
+          "Disable SSL certificate verification per AI provider — resolves CRYPT_E_NO_REVOCATION_CHECK errors on corporate networks with TLS inspection",
+          "Warning shown in the provider form when SSL verification is disabled"
+        ]
+      },
+      {
+        "title": "Database Connections",
+        "items": [
+          "Windows / Integrated authentication for SQL Server connections via the integrated-auth-gssapi feature flag"
         ]
       }
     ]

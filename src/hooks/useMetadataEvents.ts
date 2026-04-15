@@ -5,6 +5,7 @@ import type {
   MetadataProgress,
   MetadataDone,
   MetadataError,
+  MetadataLogEntry,
 } from "../types/metadata";
 
 export function useMetadataEvents() {
@@ -26,6 +27,12 @@ export function useMetadataEvents() {
     unlisteners.push(
       listen<MetadataError>("metadata:error", (event) => {
         useMetadataStore.getState().setError(event.payload);
+      }),
+    );
+
+    unlisteners.push(
+      listen<MetadataLogEntry>("metadata:log", (event) => {
+        useMetadataStore.getState().addLogEntry(event.payload);
       }),
     );
 

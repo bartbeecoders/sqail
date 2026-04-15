@@ -1,5 +1,44 @@
 [
   {
+    "version": "0.4.1",
+    "sections": [
+      {
+        "title": "SQL Formatting",
+        "items": [
+          "Stored procedure formatting: embedded SELECT statements now properly formatted with fields on separate lines, aligned AS aliases, and structured layout (previously flattened to a single line)",
+          "WHERE/ON clauses now break AND/OR conditions onto separate indented lines",
+          "Column alignment capped at 50 chars to avoid excessive whitespace from long expressions",
+          "Fixed false table alias prefix on function calls (ISNULL, COUNT, etc.) and string literals",
+          "New 'Format with AI' option in the Format dropdown — sends SQL to your AI provider for formatting",
+          "AI format diff preview: side-by-side Monaco diff editor with green/red highlighting, Accept/Reject buttons to apply or discard changes",
+          "SQL Formatting settings section: configurable indent size, uppercase keywords toggle, AND/OR new line toggle"
+        ]
+      },
+      {
+        "title": "Schema Tree",
+        "items": [
+          "Ctrl+scroll wheel font resizing for the object tree (8\u201324px range)",
+          "Tree font size setting added to Settings > General > Schema Tree",
+          "Procedures and Functions now displayed as separate categories in the tree"
+        ]
+      },
+      {
+        "title": "Editor",
+        "items": [
+          "Ctrl+scroll wheel font zoom (changed from Shift to Ctrl for standard convention)",
+          "Drag-and-drop support for routines (procedures/functions) from schema tree to editor"
+        ]
+      },
+      {
+        "title": "Settings",
+        "items": [
+          "Cleaner grid-based alignment of settings controls",
+          "Routine drop action setting: choose between opening definition or generating exec statement"
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.4.0",
     "sections": [
       {

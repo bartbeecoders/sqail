@@ -5,6 +5,7 @@ import type {
   MetadataProgress,
   MetadataDone,
   MetadataError,
+  MetadataLogEntry,
 } from "../types/metadata";
 
 interface MetadataState {
@@ -28,6 +29,10 @@ interface MetadataState {
   updateEntry: (entry: ObjectMetadata) => Promise<void>;
   deleteAll: (connectionId: string) => Promise<void>;
 
+  logEntries: MetadataLogEntry[];
+  addLogEntry: (entry: MetadataLogEntry) => void;
+  clearLog: () => void;
+
   setProgress: (progress: MetadataProgress) => void;
   setDone: (done: MetadataDone) => void;
   setError: (error: MetadataError) => void;
@@ -46,6 +51,15 @@ export const useMetadataStore = create<MetadataState>((set, get) => ({
   progress: null,
   error: null,
   generatingKeys: new Set(),
+  logEntries: [],
+
+  addLogEntry: (entry) => {
+    set((s) => ({ logEntries: [...s.logEntries, entry] }));
+  },
+
+  clearLog: () => {
+    set({ logEntries: [] });
+  },
 
   loadMetadata: async (connectionId) => {
     try {
@@ -107,16 +121,16 @@ export const useMetadataStore = create<MetadataState>((set, get) => ({
         connectionId,
         schemaName,
       });
-      // The async backend will emit metadata:done which triggers loadMetadata
+      // The async backend will emit metadata:done which clears generatingKeys
     } catch (e) {
-      set({ generating: false, error: String(e) });
-    } finally {
+      // On error, clean up the key ourselves
       set((s) => {
         const next = new Set(s.generatingKeys);
         next.delete(schemaKey);
-        return { generatingKeys: next };
+        return { generatingKeys: next, generating: false, error: String(e) };
       });
     }
+    // Don't remove the key in finally — setDone (from metadata:done event) handles cleanup
   },
 
   updateEntry: async (entry) => {
@@ -145,6 +159,10 @@ export const useMetadataStore = create<MetadataState>((set, get) => ({
 
   setProgress: (progress) => {
     set({ progress });
+    // When a batch completes, reload entries so spinners disappear for finished objects
+    if (progress.status === "complete") {
+      get().loadMetadata(progress.connectionId);
+    }
   },
 
   setDone: (done) => {
@@ -158,10 +176,17 @@ export const useMetadataStore = create<MetadataState>((set, get) => ({
   },
 
   isGenerating: (schemaName, objectName) => {
-    const keys = get().generatingKeys;
+    const { generatingKeys: keys, entries } = get();
     if (objectName) {
-      // Check if this specific object or its schema is generating
-      return keys.has(`${schemaName}.${objectName}`) || keys.has(`${schemaName}:*`);
+      // Check if this specific object is generating
+      if (keys.has(`${schemaName}.${objectName}`)) return true;
+      // If schema-wide generation is running, only show generating for objects without metadata
+      if (keys.has(`${schemaName}:*`)) {
+        return !entries.some(
+          (e) => e.schemaName === schemaName && e.objectName === objectName,
+        );
+      }
+      return false;
     }
     // Check if the whole schema is generating
     return keys.has(`${schemaName}:*`);

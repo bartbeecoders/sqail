@@ -57,6 +57,30 @@ function toAliasLabel(name: string): string {
  *       [last_name] AS 'Last Name'
  *   FROM [dbo].[users]
  */
+/**
+ * Build a CALL / EXEC / SELECT statement for a stored routine.
+ */
+export function buildRoutineCallStatement(
+  schemaName: string,
+  routineName: string,
+  routineType: "procedure" | "function",
+  driver: Driver,
+): string {
+  const ref = `${quoteIdent(schemaName, driver)}.${quoteIdent(routineName, driver)}`;
+
+  if (routineType === "procedure") {
+    switch (driver) {
+      case "mssql":
+      case "dbservice":
+        return `EXEC ${ref};`;
+      default:
+        return `CALL ${ref}();`;
+    }
+  }
+  // function
+  return `SELECT ${ref}();`;
+}
+
 export function buildSelectStatement(
   schemaName: string,
   tableName: string,

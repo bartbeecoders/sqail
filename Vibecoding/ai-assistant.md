@@ -61,3 +61,21 @@ On a corporate network, the user might encounter a CRYPT_E_NO_REVOCATION_CHECK e
 Keep a prompt history of the last 10 prompts in the AI assitant dialog box.
 
 When a AI prompt is eneterd, always check if it applies to the active query in the editor. If it does, use the active query as context for the AI prompt.
+
+For the Z.ai provider:
+Let the user select from 2 endpoints:
+- https://api.z.ai/api/coding/paas/v4             (coding endpoint)
+- https://api.z.ai/api/paas/v4                    (general endpoint)  
+
+Let the user select from a list of models:
+- GLM-5.1
+- GLM-5V-Turbo
+- GLM-5
+- GLM-5-Turbo
+- GLM-4.7
+- GLM-4.6
+- GLM-4.5
+
+Format with ai works great. Can we add a preview that would show the reformatted sql next to the existing in the split pane ?
+Green and red colors for the preview?
+And a accept or reject button to apply the changes or discard them?

@@ -62,6 +62,19 @@ pub fn build_system_prompt(flow: &str, driver: Option<&str>, schema_context: Opt
                          - \"dependencies\": array of strings, objects this depends on inferred from structure and naming\n\n\
                          Respond with ONLY the raw JSON object. No markdown code fences, no explanation, no extra text.".to_string());
         }
+        "generate_batch_metadata" => {
+            parts.push("The user will provide the structure of MULTIPLE database objects (tables, views, functions, or procedures), \
+                         separated by '---'. For EACH object, generate documentation metadata.\n\n\
+                         Respond with a JSON ARRAY where each element has these exact fields:\n\
+                         - \"objectName\": string, the name of the object exactly as provided\n\
+                         - \"description\": string, 1-3 sentence description of the object's purpose\n\
+                         - \"columns\": array of {\"name\": string, \"description\": string} for each column or parameter\n\
+                         - \"exampleUsage\": string, one practical SQL example using this object\n\
+                         - \"relatedObjects\": array of strings, names of likely related tables/views inferred from naming, foreign keys, and conventions\n\
+                         - \"dependencies\": array of strings, objects this depends on inferred from structure and naming\n\n\
+                         The array MUST have one element per object in the same order as provided.\n\
+                         Respond with ONLY the raw JSON array. No markdown code fences, no explanation, no extra text.".to_string());
+        }
         _ => {}
     }
 

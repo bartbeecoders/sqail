@@ -19,7 +19,7 @@ import MetadataDetailModal from "./MetadataDetailModal";
 
 export default function MetadataPanel() {
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId);
-  const { entries, generating, progress, error, loadMetadata, generateAll, deleteAll } =
+  const { entries, generating, progress, error, loadMetadata, deleteAll } =
     useMetadataStore();
   const hasProvider = useAiStore((s) => s.providers.length > 0);
   const [selectedEntry, setSelectedEntry] = useState<ObjectMetadata | null>(null);
@@ -40,11 +40,6 @@ export default function MetadataPanel() {
       else next.add(type);
       return next;
     });
-  };
-
-  const handleGenerateAll = () => {
-    if (!activeConnectionId) return;
-    generateAll(activeConnectionId);
   };
 
   const handleDeleteAll = () => {
@@ -116,21 +111,13 @@ export default function MetadataPanel() {
         </div>
       )}
 
-      {/* Generate button */}
-      <div className="px-2 pb-2">
-        <button
-          onClick={handleGenerateAll}
-          disabled={generating || !hasProvider}
-          className="flex w-full items-center justify-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-[11px] font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-        >
-          {generating ? (
-            <Loader2 size={12} className="animate-spin" />
-          ) : (
-            <Sparkles size={12} />
-          )}
-          {generating ? "Generating..." : "Generate All Metadata"}
-        </button>
-      </div>
+      {/* Generation progress indicator */}
+      {generating && !progress && (
+        <div className="flex items-center justify-center gap-1.5 px-2 pb-2 text-[11px] text-muted-foreground">
+          <Loader2 size={12} className="animate-spin" />
+          Generating...
+        </div>
+      )}
 
       {/* Progress bar */}
       {generating && progress && (
@@ -152,9 +139,13 @@ export default function MetadataPanel() {
 
       {/* Object list */}
       {entries.length === 0 && !generating ? (
-        <div className="px-2 py-8 text-center text-[11px] text-muted-foreground">
+        <div className="px-2 py-6 text-center text-[11px] text-muted-foreground">
           <BookOpen size={24} className="mx-auto mb-2 opacity-30" />
-          No metadata generated yet
+          <p>No metadata generated yet</p>
+          <p className="mt-1.5 text-[10px] opacity-70">
+            Use the <Sparkles size={9} className="inline -mt-0.5" /> button on a schema or table in the tree,
+            or right-click an object and select "Generate Metadata"
+          </p>
         </div>
       ) : (
         <div className="overflow-y-auto px-1">

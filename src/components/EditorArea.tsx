@@ -2,9 +2,11 @@ import { useState, useRef, useCallback } from "react";
 import { Columns2 } from "lucide-react";
 import type { editor as monacoEditor } from "monaco-editor";
 import { cn } from "../lib/utils";
+import { useAiStore } from "../stores/aiStore";
 import EditorTabs from "./EditorTabs";
 import SqlEditor from "./SqlEditor";
 import SplitEditorPane from "./SplitEditorPane";
+import DiffPreview from "./DiffPreview";
 
 interface EditorAreaProps {
   onExecute?: (sql: string) => void;
@@ -17,6 +19,9 @@ export default function EditorArea({ onExecute, onFormat }: EditorAreaProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const dragging = useRef(false);
   const primaryEditorRef = useRef<monacoEditor.IStandaloneCodeEditor | null>(null);
+  const diffPreview = useAiStore((s) => s.diffPreview);
+  const acceptDiff = useAiStore((s) => s.acceptDiffPreview);
+  const rejectDiff = useAiStore((s) => s.closeDiffPreview);
 
   const toggleSplit = useCallback(() => {
     setSplit((prev) => !prev);
@@ -47,6 +52,20 @@ export default function EditorArea({ onExecute, onFormat }: EditorAreaProps) {
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
   }, []);
+
+  // Diff preview mode: replace the editor entirely
+  if (diffPreview) {
+    return (
+      <div className="flex flex-1 flex-col overflow-hidden">
+        <DiffPreview
+          original={diffPreview.original}
+          modified={diffPreview.modified}
+          onAccept={acceptDiff}
+          onReject={rejectDiff}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden">

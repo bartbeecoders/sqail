@@ -92,12 +92,21 @@ jobs:
 
       - name: Build deb
         run: pnpm tauri build --bundles deb --config src-tauri/tauri.ci.json
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Build AppImage
         run: pnpm tauri build --bundles appimage --config src-tauri/tauri.ci.json
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Build rpm
         run: pnpm tauri build --bundles rpm --config src-tauri/tauri.ci.json
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Build Arch package (pacman)
         run: |
@@ -177,6 +186,10 @@ jobs:
           for f in "$BUNDLE/appimage/"*.AppImage; do
             [ -f "$f" ] && cp "$f" "dist/releases/${PREFIX}_amd64.AppImage"
           done
+          # AppImage signature (for updater)
+          for f in "$BUNDLE/appimage/"*.AppImage.sig; do
+            [ -f "$f" ] && cp "$f" "dist/releases/${PREFIX}_amd64.AppImage.sig"
+          done
           # rpm
           for f in "$BUNDLE/rpm/"*.rpm; do
             [ -f "$f" ] && cp "$f" "dist/releases/${PREFIX}_amd64.rpm"
@@ -233,6 +246,9 @@ jobs:
 
       - name: Build NSIS + MSI
         run: pnpm tauri build --config src-tauri/tauri.ci.json
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Collect artifacts
         shell: bash
@@ -244,6 +260,10 @@ jobs:
           # NSIS
           for f in "$BUNDLE/nsis/"*.exe; do
             [ -f "$f" ] && cp "$f" "dist/releases/${PREFIX}_x64-setup.exe"
+          done
+          # NSIS signature (for updater)
+          for f in "$BUNDLE/nsis/"*.nsis.zip.sig; do
+            [ -f "$f" ] && cp "$f" "dist/releases/${PREFIX}_x64-setup.nsis.zip.sig"
           done
           # MSI
           for f in "$BUNDLE/msi/"*.msi; do
@@ -302,6 +322,9 @@ jobs:
 
       - name: Build universal DMG (x86_64 + aarch64)
         run: pnpm tauri build --target universal-apple-darwin --config src-tauri/tauri.ci.json
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Ad-hoc sign the .app bundle
         # Even without an Apple Developer ID, re-signing with `-` ad-hoc
@@ -332,6 +355,10 @@ jobs:
           # App bundle as tar.gz (universal)
           for f in "$BUNDLE/macos/"*.app; do
             [ -d "$f" ] && tar -czf "dist/releases/${PREFIX}_universal.app.tar.gz" -C "$BUNDLE/macos" "$(basename "$f")"
+          done
+          # macOS tar.gz signature (for updater)
+          for f in "$BUNDLE/macos/"*.tar.gz.sig; do
+            [ -f "$f" ] && cp "$f" "dist/releases/${PREFIX}_universal.app.tar.gz.sig"
           done
 
           ls -lh dist/releases/
@@ -380,6 +407,124 @@ jobs:
           name: dbservice-windows
           path: dist/releases/sqail_*_dbservice_*
           retention-days: 30
+
+  # ── Create GitHub release with updater manifest ────────────────────────
+  github-release:
+    needs: [prepare, build-linux, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate latest.json for Tauri updater
+        run: |
+          VERSION="${{ needs.prepare.outputs.app_version }}"
+          PREFIX="${{ needs.prepare.outputs.file_prefix }}"
+          DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          REPO="bartbeecoders/sqail"
+          TAG="v${VERSION}"
+          BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
+
+          # Read signature files (may not exist if signing key wasn't set)
+          LINUX_SIG=""
+          WINDOWS_SIG=""
+          MACOS_SIG=""
+          [ -f "artifacts/${PREFIX}_amd64.AppImage.sig" ] && LINUX_SIG=$(cat "artifacts/${PREFIX}_amd64.AppImage.sig")
+          [ -f "artifacts/${PREFIX}_x64-setup.nsis.zip.sig" ] && WINDOWS_SIG=$(cat "artifacts/${PREFIX}_x64-setup.nsis.zip.sig")
+          [ -f "artifacts/${PREFIX}_universal.app.tar.gz.sig" ] && MACOS_SIG=$(cat "artifacts/${PREFIX}_universal.app.tar.gz.sig")
+
+          # Extract release notes from releases.json
+          NOTES=$(python3 -c "
+          import json
+          with open('releases.json') as f:
+              releases = json.load(f)
+          r = next((r for r in releases if r['version'] == '${VERSION}'), None)
+          if r:
+              lines = []
+              for s in r['sections']:
+                  lines.append('### ' + s['title'])
+                  for item in s['items']:
+                      lines.append('- ' + item)
+                  lines.append('')
+              print('\n'.join(lines))
+          else:
+              print('Release ${VERSION}')
+          ")
+
+          cat > latest.json <<MANIFEST
+          {
+            "version": "${VERSION}",
+            "notes": $(echo "$NOTES" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))"),
+            "pub_date": "${DATE}",
+            "platforms": {
+              "linux-x86_64": {
+                "url": "${BASE_URL}/${PREFIX}_amd64.AppImage",
+                "signature": "${LINUX_SIG}"
+              },
+              "windows-x86_64": {
+                "url": "${BASE_URL}/${PREFIX}_x64-setup.exe",
+                "signature": "${WINDOWS_SIG}"
+              },
+              "darwin-aarch64": {
+                "url": "${BASE_URL}/${PREFIX}_universal.app.tar.gz",
+                "signature": "${MACOS_SIG}"
+              },
+              "darwin-x86_64": {
+                "url": "${BASE_URL}/${PREFIX}_universal.app.tar.gz",
+                "signature": "${MACOS_SIG}"
+              }
+            }
+          }
+          MANIFEST
+          # Strip leading whitespace from heredoc
+          sed -i 's/^          //' latest.json
+          echo "Generated latest.json:"
+          cat latest.json
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ needs.prepare.outputs.app_version }}"
+          TAG="v${VERSION}"
+          PREFIX="${{ needs.prepare.outputs.file_prefix }}"
+
+          # Collect all uploadable files
+          FILES=(latest.json)
+          for f in artifacts/${PREFIX}_*; do
+            [ -f "$f" ] && FILES+=("$f")
+          done
+
+          # Create or update the release
+          if gh release view "$TAG" &>/dev/null; then
+            gh release upload "$TAG" "${FILES[@]}" --clobber
+          else
+            # Extract notes for release body
+            NOTES=$(python3 -c "
+          import json
+          with open('releases.json') as f:
+              releases = json.load(f)
+          r = next((r for r in releases if r['version'] == '${VERSION}'), None)
+          if r:
+              lines = []
+              for s in r['sections']:
+                  lines.append('### ' + s['title'])
+                  for item in s['items']:
+                      lines.append('- ' + item)
+                  lines.append('')
+              print('\n'.join(lines))
+          else:
+              print('Release ${VERSION}')
+          ")
+            gh release create "$TAG" "${FILES[@]}" --title "$TAG" --notes "$NOTES"
+          fi
 
   # ── Upload binaries to VPS ─────────────────────────────────────────────
   deploy-binaries:

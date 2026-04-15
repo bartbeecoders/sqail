@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { X, RotateCcw, Settings, Keyboard, Info, Code2, Plus, Trash2, Pencil, Sparkles, Check } from "lucide-react";
+import { check } from "@tauri-apps/plugin-updater";
 import { cn } from "../lib/utils";
 import { useShortcutStore } from "../stores/shortcutStore";
 import { useSettingsStore } from "../stores/settingsStore";
@@ -781,6 +782,24 @@ import RELEASES_JSON from "../../releases.json";
 const RELEASES: Release[] = RELEASES_JSON;
 
 function AboutTab() {
+  const [updateStatus, setUpdateStatus] = useState<"idle" | "checking" | "available" | "up-to-date" | "error">("idle");
+  const [updateVersion, setUpdateVersion] = useState("");
+
+  const checkForUpdate = useCallback(async () => {
+    setUpdateStatus("checking");
+    try {
+      const update = await check();
+      if (update) {
+        setUpdateStatus("available");
+        setUpdateVersion(update.version);
+      } else {
+        setUpdateStatus("up-to-date");
+      }
+    } catch {
+      setUpdateStatus("error");
+    }
+  }, []);
+
   return (
     <div className="space-y-6">
       {/* Hero image */}
@@ -805,6 +824,28 @@ function AboutTab() {
       <p className="text-xs text-muted-foreground">
         A lightweight, cross-platform desktop SQL database editor with AI integration.
       </p>
+
+      {/* Update check */}
+      <div className="flex items-center gap-2">
+        <button
+          onClick={checkForUpdate}
+          disabled={updateStatus === "checking"}
+          className="rounded bg-primary px-3 py-1 text-[11px] font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+        >
+          {updateStatus === "checking" ? "Checking..." : "Check for Updates"}
+        </button>
+        {updateStatus === "up-to-date" && (
+          <span className="text-[11px] text-green-500">You're on the latest version.</span>
+        )}
+        {updateStatus === "available" && (
+          <span className="text-[11px] text-primary">
+            Version <strong>{updateVersion}</strong> is available! Close settings to see the update banner.
+          </span>
+        )}
+        {updateStatus === "error" && (
+          <span className="text-[11px] text-destructive">Failed to check for updates.</span>
+        )}
+      </div>
 
       <div className="h-px bg-border" />
 

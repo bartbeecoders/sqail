@@ -16,6 +16,7 @@ import AiPanel from "./components/AiPanel";
 import AiCommandPalette from "./components/AiCommandPalette";
 import InfoPanel from "./components/InfoPanel";
 import SettingsModal from "./components/SettingsModal";
+import UpdateChecker from "./components/UpdateChecker";
 import { useEditorStore } from "./stores/editorStore";
 import { useConnectionStore } from "./stores/connectionStore";
 import { useQueryStore } from "./stores/queryStore";
@@ -188,6 +189,7 @@ export default function App() {
   return (
     <div className="flex h-full flex-col">
       <TitleBar />
+      <UpdateChecker />
       <ResizeHandles />
       {!splashDone && <SplashScreen onComplete={() => setSplashDone(true)} />}
       <div className="flex flex-1 overflow-hidden">

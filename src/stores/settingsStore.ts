@@ -11,12 +11,18 @@ export interface AppSettings {
   editorWordWrap: boolean;
   editorLineNumbers: boolean;
 
+  // Schema Tree
+  treeFontSize: number;
+
   // Appearance
   theme: "system" | "light" | "dark";
 
   // Query
   defaultRowLimit: number;
   queryTimeoutSeconds: number;
+
+  // Behavior
+  routineDropAction: "definition" | "exec";
 }
 
 const DEFAULTS: AppSettings = {
@@ -26,9 +32,11 @@ const DEFAULTS: AppSettings = {
   editorMinimap: false,
   editorWordWrap: true,
   editorLineNumbers: true,
+  treeFontSize: 12,
   theme: "system",
   defaultRowLimit: 1000,
   queryTimeoutSeconds: 30,
+  routineDropAction: "definition",
 };
 
 function loadSettings(): AppSettings {

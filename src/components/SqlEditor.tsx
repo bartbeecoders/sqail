@@ -10,7 +10,7 @@ import { useAiStore } from "../stores/aiStore";
 import { useSettingsStore } from "../stores/settingsStore";
 import { sqlaiDark, sqlaiLight } from "../lib/monacoThemes";
 import { createSqlCompletionProvider } from "../lib/sqlCompletions";
-import { buildSelectStatement } from "../lib/sqlGenerate";
+import { buildSelectStatement, buildRoutineCallStatement } from "../lib/sqlGenerate";
 import { validateSql, toMonacoMarkers } from "../lib/sqlValidator";
 import type { ColumnInfo } from "../types/schema";
 import type { Driver } from "../types/connection";
@@ -237,7 +237,7 @@ export default function SqlEditor({ onExecute, onFormat, overrideTabId, editorRe
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [driver]);
 
-  // Shift + Mouse Wheel → zoom editor font size
+  // Ctrl + Mouse Wheel → zoom editor font size (issue #10)
   // Must attach to the editor's DOM directly and use capture phase
   // because Monaco intercepts wheel events internally.
   useEffect(() => {
@@ -246,11 +246,10 @@ export default function SqlEditor({ onExecute, onFormat, overrideTabId, editorRe
     const dom = editor.getDomNode();
     if (!dom) return;
     const handleWheel = (e: WheelEvent) => {
-      if (!e.shiftKey) return;
+      if (!e.ctrlKey) return;
       e.preventDefault();
       e.stopPropagation();
-      // Shift+wheel may swap deltaY↔deltaX depending on OS/browser
-      const raw = e.deltaY || e.deltaX;
+      const raw = e.deltaY;
       if (raw === 0) return;
       const delta = raw > 0 ? -1 : 1;
       const current = useSettingsStore.getState().editorFontSize;
@@ -264,7 +263,7 @@ export default function SqlEditor({ onExecute, onFormat, overrideTabId, editorRe
   });
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
-    if (e.dataTransfer.types.includes("application/sqlai-table")) {
+    if (e.dataTransfer.types.includes("application/sqlai-table") || e.dataTransfer.types.includes("application/sqlai-routine")) {
       e.preventDefault();
       e.dataTransfer.dropEffect = "copy";
       setDragOver(true);
@@ -275,81 +274,108 @@ export default function SqlEditor({ onExecute, onFormat, overrideTabId, editorRe
     setDragOver(false);
   }, []);
 
+  const insertSqlInEditor = useCallback((sql: string) => {
+    const editor = editorRef.current;
+    if (editor) {
+      const model = editor.getModel();
+      if (model) {
+        const currentContent = model.getValue();
+        const insertText = currentContent.length > 0 ? `\n${sql}` : sql;
+        const endLine = model.getLineCount();
+        const endCol = model.getLineMaxColumn(endLine);
+        editor.executeEdits("drag-drop", [
+          {
+            range: {
+              startLineNumber: endLine,
+              startColumn: endCol,
+              endLineNumber: endLine,
+              endColumn: endCol,
+            },
+            text: insertText,
+          },
+        ]);
+        editor.focus();
+        return;
+      }
+    }
+    // Fallback: append via store
+    const state = useEditorStore.getState();
+    const tab = state.getActiveTab();
+    if (tab) {
+      const newContent = tab.content ? `${tab.content}\n${sql}` : sql;
+      state.setContent(tab.id, newContent);
+    }
+  }, []);
+
   const handleDrop = useCallback(
     async (e: React.DragEvent) => {
       setDragOver(false);
-      const raw = e.dataTransfer.getData("application/sqlai-table");
-      if (!raw) return;
-      e.preventDefault();
 
-      const { schemaName, tableName } = JSON.parse(raw) as {
-        schemaName: string;
-        tableName: string;
-      };
-
-      // Get the active connection's driver
       const connStore = useConnectionStore.getState();
       const conn = connStore.connections.find(
         (c) => c.id === connStore.activeConnectionId,
       );
       if (!conn) return;
 
-      // Get columns — from store if already loaded, otherwise fetch
-      const schemaStore = useSchemaStore.getState();
-      const key = `${schemaName}.${tableName}`;
-      let cols = schemaStore.columns[key];
-      if (!cols) {
-        try {
-          cols = await invoke<ColumnInfo[]>("list_columns", {
-            connectionId: conn.id,
-            schemaName,
-            tableName,
-          });
-          // Also cache them in the store
-          schemaStore.loadColumns(conn.id, schemaName, tableName);
-        } catch {
-          cols = [];
+      // Handle table drop
+      const tableRaw = e.dataTransfer.getData("application/sqlai-table");
+      if (tableRaw) {
+        e.preventDefault();
+        const { schemaName, tableName } = JSON.parse(tableRaw) as {
+          schemaName: string;
+          tableName: string;
+        };
+
+        const schemaStore = useSchemaStore.getState();
+        const key = `${schemaName}.${tableName}`;
+        let cols = schemaStore.columns[key];
+        if (!cols) {
+          try {
+            cols = await invoke<ColumnInfo[]>("list_columns", {
+              connectionId: conn.id,
+              schemaName,
+              tableName,
+            });
+            schemaStore.loadColumns(conn.id, schemaName, tableName);
+          } catch {
+            cols = [];
+          }
         }
+
+        insertSqlInEditor(buildSelectStatement(schemaName, tableName, cols, conn.driver));
+        return;
       }
 
-      const sql = buildSelectStatement(schemaName, tableName, cols, conn.driver);
+      // Handle routine drop
+      const routineRaw = e.dataTransfer.getData("application/sqlai-routine");
+      if (routineRaw) {
+        e.preventDefault();
+        const { schemaName, routineName, routineType } = JSON.parse(routineRaw) as {
+          schemaName: string;
+          routineName: string;
+          routineType: "procedure" | "function";
+        };
 
-      // Insert at cursor position if editor is available
-      const editor = editorRef.current;
-      if (editor) {
-        const position = editor.getPosition();
-        const model = editor.getModel();
-        if (model && position) {
-          // If there's existing content, add a newline before
-          const currentContent = model.getValue();
-          const insertText = currentContent.length > 0 ? `\n${sql}` : sql;
-          const endLine = model.getLineCount();
-          const endCol = model.getLineMaxColumn(endLine);
-          editor.executeEdits("drag-drop", [
-            {
-              range: {
-                startLineNumber: endLine,
-                startColumn: endCol,
-                endLineNumber: endLine,
-                endColumn: endCol,
-              },
-              text: insertText,
-            },
-          ]);
-          editor.focus();
-          return;
+        const dropAction = useSettingsStore.getState().routineDropAction;
+        if (dropAction === "definition") {
+          try {
+            const definition = await invoke<string>("get_routine_definition", {
+              connectionId: conn.id,
+              schemaName,
+              routineName,
+              routineType,
+            });
+            insertSqlInEditor(definition);
+          } catch {
+            insertSqlInEditor(buildRoutineCallStatement(schemaName, routineName, routineType, conn.driver));
+          }
+        } else {
+          insertSqlInEditor(buildRoutineCallStatement(schemaName, routineName, routineType, conn.driver));
         }
-      }
-
-      // Fallback: append via store
-      const state = useEditorStore.getState();
-      const tab = state.getActiveTab();
-      if (tab) {
-        const newContent = tab.content ? `${tab.content}\n${sql}` : sql;
-        state.setContent(tab.id, newContent);
+        return;
       }
     },
-    [],
+    [insertSqlInEditor],
   );
 
   return (
@@ -363,7 +389,7 @@ export default function SqlEditor({ onExecute, onFormat, overrideTabId, editorRe
       {dragOver && (
         <div className="absolute inset-0 z-10 flex items-center justify-center bg-primary/5 pointer-events-none">
           <span className="rounded-md bg-background/90 px-3 py-1.5 text-xs font-medium text-muted-foreground shadow-sm border border-border">
-            Drop to generate SELECT statement
+            Drop to generate SQL statement
           </span>
         </div>
       )}

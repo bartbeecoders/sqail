@@ -177,6 +177,25 @@ function GeneralTab() {
         </div>
       </section>
 
+      {/* Schema Tree section */}
+      <section>
+        <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+          Schema Tree
+        </h3>
+        <div className="space-y-3">
+          <SettingRow label="Font Size">
+            <input
+              type="number"
+              min={8}
+              max={24}
+              value={settings.treeFontSize}
+              onChange={(e) => update("treeFontSize", Number(e.target.value))}
+              className="input w-20 text-center"
+            />
+          </SettingRow>
+        </div>
+      </section>
+
       {/* Appearance section */}
       <section>
         <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
@@ -233,6 +252,36 @@ function GeneralTab() {
         </div>
       </section>
 
+      {/* Behavior section */}
+      <section>
+        <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+          Behavior
+        </h3>
+        <div className="space-y-3">
+          <SettingRow label="Routine Drop Action">
+            <div className="flex gap-1">
+              {([
+                { value: "definition" as const, label: "Open Definition" },
+                { value: "exec" as const, label: "Generate Exec" },
+              ]).map((opt) => (
+                <button
+                  key={opt.value}
+                  onClick={() => update("routineDropAction", opt.value)}
+                  className={cn(
+                    "rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
+                    settings.routineDropAction === opt.value
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-muted text-muted-foreground hover:bg-accent",
+                  )}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </SettingRow>
+        </div>
+      </section>
+
       <div className="pt-2">
         <button onClick={settings.resetSettings} className="btn-secondary flex items-center gap-1 text-[10px]">
           <RotateCcw size={10} />
@@ -245,9 +294,9 @@ function GeneralTab() {
 
 function SettingRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="flex items-center justify-between">
+    <div className="grid grid-cols-[1fr_auto] items-center gap-4">
       <span className="text-xs text-foreground">{label}</span>
-      {children}
+      <div className="flex justify-end">{children}</div>
     </div>
   );
 }

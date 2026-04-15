@@ -12,6 +12,7 @@ import {
   FolderOpen,
   Folder,
   Cog,
+  FunctionSquare,
   AlertCircle,
   Sparkles,
   FileEdit,
@@ -24,6 +25,7 @@ import { useSchemaStore } from "../stores/schemaStore";
 import { useConnectionStore } from "../stores/connectionStore";
 import { useEditorStore } from "../stores/editorStore";
 import { useMetadataStore } from "../stores/metadataStore";
+import { useSettingsStore } from "../stores/settingsStore";
 import type { TableInfo, ColumnInfo, RoutineInfo } from "../types/schema";
 import type { Driver } from "../types/connection";
 import type { ObjectMetadata } from "../types/metadata";
@@ -180,6 +182,8 @@ export default function SchemaTree() {
   const [metadataModalEntry, setMetadataModalEntry] = useState<ObjectMetadata | null>(null);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const exportRef = useRef<HTMLDivElement>(null);
+  const treeRef = useRef<HTMLDivElement>(null);
+  const treeFontSize = useSettingsStore((s) => s.treeFontSize);
 
   const loadMetadata = useMetadataStore((s) => s.loadMetadata);
 
@@ -348,12 +352,12 @@ export default function SchemaTree() {
     return result;
   };
 
-  const getRoutines = (): { schema: string; items: RoutineInfo[] }[] => {
+  const getRoutinesOfType = (type: "procedure" | "function"): { schema: string; items: RoutineInfo[] }[] => {
     const result: { schema: string; items: RoutineInfo[] }[] = [];
     for (const schema of schemas) {
       const all = routines[schema.name];
       if (!all) continue;
-      let items = all;
+      let items = all.filter((r) => r.routineType === type);
       const schemaMatches = filterLower && schema.name.toLowerCase().includes(filterLower);
       if (filterLower && !schemaMatches) {
         items = items.filter((r) => r.name.toLowerCase().includes(filterLower));
@@ -372,8 +376,10 @@ export default function SchemaTree() {
     setShowExportMenu(false);
     const tGroups = getTablesOfType("table");
     const vGroups = getTablesOfType("view");
-    const rGroups = getRoutines();
-    const objects = collectExportObjects(tGroups, vGroups, rGroups, columns, indexes, getMetadataForObject);
+    const pGroups = getRoutinesOfType("procedure");
+    const fGroups = getRoutinesOfType("function");
+    const allRoutineGroups = [...pGroups, ...fGroups];
+    const objects = collectExportObjects(tGroups, vGroups, allRoutineGroups, columns, indexes, getMetadataForObject);
     const connName = activeConnection?.name ?? "database";
     try {
       await exportSchema(format, objects, `${connName}-schema`);
@@ -381,6 +387,27 @@ export default function SchemaTree() {
       console.error("Schema export failed:", e);
     }
   };
+
+  // Ctrl + Mouse Wheel → zoom tree font size (issue #11)
+  useEffect(() => {
+    const el = treeRef.current;
+    if (!el) return;
+    const handleWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const raw = e.deltaY;
+      if (raw === 0) return;
+      const delta = raw > 0 ? -1 : 1;
+      const current = useSettingsStore.getState().treeFontSize;
+      const next = Math.min(24, Math.max(8, current + delta));
+      if (next !== current) {
+        useSettingsStore.getState().updateSetting("treeFontSize", next);
+      }
+    };
+    el.addEventListener("wheel", handleWheel, { passive: false, capture: true });
+    return () => el.removeEventListener("wheel", handleWheel, { capture: true });
+  });
 
   if (!activeConnectionId) {
     return (
@@ -392,11 +419,12 @@ export default function SchemaTree() {
 
   const tableGroups = getTablesOfType("table");
   const viewGroups = getTablesOfType("view");
-  const routineGroups = getRoutines();
+  const procedureGroups = getRoutinesOfType("procedure");
+  const functionGroups = getRoutinesOfType("function");
   const hasMultipleSchemas = schemas.length > 1;
 
   return (
-    <div className="flex flex-col min-h-0 h-full text-xs">
+    <div ref={treeRef} className="flex flex-col min-h-0 h-full" style={{ fontSize: `${treeFontSize}px` }}>
       {/* Header with refresh + export */}
       <div className="flex items-center justify-between px-2 pb-1 pt-2">
         <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -558,14 +586,14 @@ export default function SchemaTree() {
         <CategoryNode
           label="Procedures"
           icon={Cog}
-          count={totalCount(routineGroups)}
+          count={totalCount(procedureGroups)}
           isExpanded={expandedCategories.has("procedures")}
           onToggle={() => toggleCategory("procedures")}
         >
-          {routineGroups.length === 0 && (
+          {procedureGroups.length === 0 && (
             <EmptyMessage filter={filter} label="procedures" />
           )}
-          {routineGroups.map(({ schema, items }) => (
+          {procedureGroups.map(({ schema, items }) => (
             <SchemaGroupNode
               key={schema}
               schemaName={schema}
@@ -584,6 +612,46 @@ export default function SchemaTree() {
                     name: routine.name,
                     routineType: routine.routineType,
                   })}
+                  connectionId={activeConnectionId}
+                  onShowMetadata={handleShowMetadata}
+                />
+              ))}
+            </SchemaGroupNode>
+          ))}
+        </CategoryNode>
+
+        {/* ── Functions ── */}
+        <CategoryNode
+          label="Functions"
+          icon={FunctionSquare}
+          count={totalCount(functionGroups)}
+          isExpanded={expandedCategories.has("functions")}
+          onToggle={() => toggleCategory("functions")}
+        >
+          {functionGroups.length === 0 && (
+            <EmptyMessage filter={filter} label="functions" />
+          )}
+          {functionGroups.map(({ schema, items }) => (
+            <SchemaGroupNode
+              key={schema}
+              schemaName={schema}
+              showSchema={hasMultipleSchemas}
+              isExpanded={expandedSchemaNodes.has(`functions:${schema}`)}
+              onToggle={() => toggleSchemaNode(`functions:${schema}`)}
+              connectionId={activeConnectionId}
+            >
+              {items.map((routine) => (
+                <RoutineNode
+                  key={routine.name}
+                  routine={routine}
+                  onContextMenu={(e) => openContextMenu(e, {
+                    kind: "routine",
+                    schemaName: routine.schema,
+                    name: routine.name,
+                    routineType: routine.routineType,
+                  })}
+                  connectionId={activeConnectionId}
+                  onShowMetadata={handleShowMetadata}
                 />
               ))}
             </SchemaGroupNode>
@@ -1041,19 +1109,66 @@ function TableNode({
 function RoutineNode({
   routine,
   onContextMenu,
+  connectionId,
+  onShowMetadata,
 }: {
   routine: RoutineInfo;
   onContextMenu: (e: React.MouseEvent) => void;
+  connectionId: string | null;
+  onShowMetadata: (schemaName: string, objectName: string) => void;
 }) {
+  const Icon = routine.routineType === "function" ? FunctionSquare : Cog;
+  const isObjectGenerating = useMetadataStore((s) => s.isGenerating(routine.schema, routine.name));
+  const hasMetadata = useMetadataStore((s) => !!s.getForObject(routine.schema, routine.name));
+
+  const handleGenerateMetadata = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (hasMetadata) {
+      onShowMetadata(routine.schema, routine.name);
+    } else if (connectionId) {
+      useMetadataStore.getState().generateSingle(
+        connectionId,
+        routine.schema,
+        routine.name,
+        routine.routineType,
+      );
+    }
+  };
+
+  const handleDragStart = (e: React.DragEvent) => {
+    e.dataTransfer.setData(
+      "application/sqlai-routine",
+      JSON.stringify({ schemaName: routine.schema, routineName: routine.name, routineType: routine.routineType }),
+    );
+    e.dataTransfer.effectAllowed = "copy";
+  };
+
   return (
     <div
-      className="flex items-center gap-1 rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-      title={`${routine.schema}.${routine.name} (${routine.routineType})`}
+      draggable
+      onDragStart={handleDragStart}
+      className="group flex items-center gap-1 rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-accent-foreground cursor-grab active:cursor-grabbing"
+      title={`${routine.schema}.${routine.name}`}
       onContextMenu={onContextMenu}
     >
-      <Cog size={11} className="shrink-0 opacity-60" />
-      <span className="truncate">{routine.name}</span>
-      <span className="ml-auto shrink-0 text-[9px] opacity-40">{routine.routineType}</span>
+      <Icon size={11} className="shrink-0 opacity-60" />
+      <span className="flex-1 truncate">{routine.name}</span>
+      {isObjectGenerating ? (
+        <Loader2 size={11} className="shrink-0 animate-spin text-muted-foreground" />
+      ) : (
+        <button
+          onClick={handleGenerateMetadata}
+          className={cn(
+            "shrink-0 rounded p-0.5",
+            hasMetadata
+              ? "text-emerald-500 hover:text-emerald-400"
+              : "text-muted-foreground/40 hover:text-muted-foreground opacity-0 group-hover:opacity-100",
+          )}
+          title={hasMetadata ? `View metadata for ${routine.name}` : `Generate metadata for ${routine.name}`}
+        >
+          <Sparkles size={11} />
+        </button>
+      )}
     </div>
   );
 }

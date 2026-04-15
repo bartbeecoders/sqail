@@ -2,6 +2,19 @@
 
 > The authoritative changelog lives in `releases.json` (consumed by both the in-app About tab and the portal). This file tracks selected highlights.
 
+## v0.4.2
+
+### Auto-Update
+- In-app auto-update: checks for new versions on startup, shows a banner when an update is available
+- One-click download, install, and restart from the update banner
+- Manual "Check for Updates" button in Settings > About
+- Download progress bar with percentage indicator
+
+### CI / Build
+- CI pipeline signs update bundles with TAURI_SIGNING_PRIVATE_KEY
+- New GitHub release job generates latest.json updater manifest and uploads all platform binaries
+- Helper script for generating updater signing key pair
+
 ## v0.4.1
 
 ### SQL Formatting

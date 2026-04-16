@@ -17,7 +17,7 @@ import AiCommandPalette from "./components/AiCommandPalette";
 import InfoPanel from "./components/InfoPanel";
 import SettingsModal from "./components/SettingsModal";
 import UpdateChecker from "./components/UpdateChecker";
-import { useEditorStore } from "./stores/editorStore";
+import { useEditorStore, getActiveEditorInstance } from "./stores/editorStore";
 import { useConnectionStore } from "./stores/connectionStore";
 import { useQueryStore } from "./stores/queryStore";
 import { useAiStore } from "./stores/aiStore";
@@ -150,6 +150,23 @@ export default function App() {
   }, []);
 
   const handleRunFromToolbar = useCallback(() => {
+    // If the editor has selected text, run only that; otherwise run full content
+    const editor = getActiveEditorInstance();
+    if (editor) {
+      const selection = editor.getSelection();
+      const model = editor.getModel();
+      if (model) {
+        const text =
+          selection && !selection.isEmpty()
+            ? model.getValueInRange(selection)
+            : model.getValue();
+        if (text.trim()) {
+          handleExecute(text.trim());
+          return;
+        }
+      }
+    }
+    // Fallback: use stored tab content
     const tab = useEditorStore.getState().getActiveTab();
     if (tab && tab.content.trim()) {
       handleExecute(tab.content.trim());

@@ -3,7 +3,7 @@ import Editor, { type OnMount, type BeforeMount } from "@monaco-editor/react";
 import type { editor as monacoEditor } from "monaco-editor";
 import { invoke } from "@tauri-apps/api/core";
 import { useDarkMode } from "../hooks/useDarkMode";
-import { useEditorStore } from "../stores/editorStore";
+import { useEditorStore, setActiveEditorInstance } from "../stores/editorStore";
 import { useConnectionStore } from "../stores/connectionStore";
 import { useSchemaStore } from "../stores/schemaStore";
 import { useAiStore } from "../stores/aiStore";
@@ -89,6 +89,10 @@ export default function SqlEditor({ onExecute, onFormat, overrideTabId, editorRe
       editorRef.current = editor;
       monacoRef.current = monaco;
       if (editorRefOut) editorRefOut.current = editor;
+      setActiveEditorInstance(editor);
+
+      // Clean up the global ref when this editor is disposed
+      editor.onDidDispose(() => setActiveEditorInstance(null));
 
       // Initial validation
       setTimeout(() => runValidation(), 100);

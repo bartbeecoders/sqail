@@ -26,6 +26,11 @@ interface ContextMenu {
   y: number;
 }
 
+interface SelectedCell {
+  rowIdx: number;
+  colIdx: number;
+}
+
 function formatCell(value: CellValue): React.ReactNode {
   if (value === null) {
     return <span className="italic text-muted-foreground/50">NULL</span>;
@@ -92,6 +97,10 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
   // Selection state: set of visible row indices (from tableRows, not original data)
   const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
   const lastClickedRow = useRef<number | null>(null);
+  // Single-cell selection (set by double-click, cleared by row click)
+  const [selectedCell, setSelectedCell] = useState<SelectedCell | null>(null);
+  // Drag-select state
+  const isDragging = useRef(false);
 
   // Context menu
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
@@ -105,6 +114,7 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
   useEffect(() => {
     setColWidths(columns.map(() => 150));
     setSelectedRows(new Set());
+    setSelectedCell(null);
     lastClickedRow.current = null;
   }, [columns]);
 
@@ -229,36 +239,74 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
   // Clear selection when filters/sorting change (visible row indices shift)
   useEffect(() => {
     setSelectedRows(new Set());
+    setSelectedCell(null);
     lastClickedRow.current = null;
   }, [sorting, columnFilters, globalFilter]);
 
-  const handleRowClick = useCallback(
+  const handleRowMouseDown = useCallback(
     (e: React.MouseEvent, visibleIdx: number) => {
-      setSelectedRows((prev) => {
-        const next = new Set(prev);
+      // Clear cell selection on row click
+      setSelectedCell(null);
 
-        if (e.shiftKey && lastClickedRow.current !== null) {
-          // Range select
-          const start = Math.min(lastClickedRow.current, visibleIdx);
-          const end = Math.max(lastClickedRow.current, visibleIdx);
+      if (e.shiftKey && lastClickedRow.current !== null) {
+        // Range select
+        setSelectedRows((prev) => {
+          const next = new Set(prev);
+          const start = Math.min(lastClickedRow.current!, visibleIdx);
+          const end = Math.max(lastClickedRow.current!, visibleIdx);
           for (let i = start; i <= end; i++) {
             next.add(i);
           }
-        } else if (e.ctrlKey || e.metaKey) {
-          // Toggle single row
+          return next;
+        });
+      } else if (e.ctrlKey || e.metaKey) {
+        // Toggle single row
+        setSelectedRows((prev) => {
+          const next = new Set(prev);
           if (next.has(visibleIdx)) {
             next.delete(visibleIdx);
           } else {
             next.add(visibleIdx);
           }
-        } else {
-          // Single select
-          next.clear();
-          next.add(visibleIdx);
-        }
-        return next;
-      });
+          return next;
+        });
+      } else {
+        // Single select + start drag
+        setSelectedRows(new Set([visibleIdx]));
+        isDragging.current = true;
+      }
       lastClickedRow.current = visibleIdx;
+    },
+    [],
+  );
+
+  const handleRowMouseEnter = useCallback(
+    (visibleIdx: number) => {
+      if (!isDragging.current || lastClickedRow.current === null) return;
+      const start = Math.min(lastClickedRow.current, visibleIdx);
+      const end = Math.max(lastClickedRow.current, visibleIdx);
+      const next = new Set<number>();
+      for (let i = start; i <= end; i++) {
+        next.add(i);
+      }
+      setSelectedRows(next);
+    },
+    [],
+  );
+
+  // Stop drag on mouseup anywhere
+  useEffect(() => {
+    const onMouseUp = () => { isDragging.current = false; };
+    document.addEventListener("mouseup", onMouseUp);
+    return () => document.removeEventListener("mouseup", onMouseUp);
+  }, []);
+
+  const handleCellDoubleClick = useCallback(
+    (e: React.MouseEvent, rowIdx: number, colIdx: number) => {
+      e.stopPropagation();
+      // Select single cell, deselect rows
+      setSelectedRows(new Set());
+      setSelectedCell({ rowIdx, colIdx });
     },
     [],
   );
@@ -313,7 +361,16 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
     setSelectedRows(all);
   }, [tableRows.length]);
 
-  // Keyboard: Ctrl+A to select all, Ctrl+C to copy
+  // Copy a single cell value to clipboard
+  const copyCellValue = useCallback(() => {
+    if (!selectedCell) return;
+    const row = tableRows[selectedCell.rowIdx]?.original;
+    if (!row) return;
+    const value = row[selectedCell.colIdx];
+    navigator.clipboard.writeText(cellToString(value));
+  }, [selectedCell, tableRows]);
+
+  // Keyboard: Ctrl+A to select all, Ctrl+C to copy, Escape to deselect cell
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (!parentRef.current?.contains(document.activeElement) &&
@@ -321,16 +378,25 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
 
       if ((e.ctrlKey || e.metaKey) && e.key === "a") {
         e.preventDefault();
+        setSelectedCell(null);
         selectAll();
       }
-      if ((e.ctrlKey || e.metaKey) && e.key === "c" && selectedRows.size > 0) {
-        e.preventDefault();
-        copyAs("tsv");
+      if ((e.ctrlKey || e.metaKey) && e.key === "c") {
+        if (selectedCell) {
+          e.preventDefault();
+          copyCellValue();
+        } else if (selectedRows.size > 0) {
+          e.preventDefault();
+          copyAs("tsv");
+        }
+      }
+      if (e.key === "Escape" && selectedCell) {
+        setSelectedCell(null);
       }
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [selectAll, copyAs, selectedRows.size]);
+  }, [selectAll, copyAs, selectedRows.size, selectedCell, copyCellValue]);
 
   const virtualizer = useVirtualizer({
     count: tableRows.length,
@@ -381,7 +447,12 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
             {filteredCount.toLocaleString()} of {totalRows.toLocaleString()}
           </span>
         )}
-        {selectedRows.size > 0 && (
+        {selectedCell && (
+          <span className="text-[10px] text-muted-foreground ml-auto">
+            Cell selected
+          </span>
+        )}
+        {!selectedCell && selectedRows.size > 0 && (
           <span className="text-[10px] text-muted-foreground ml-auto">
             {selectedRows.size} row{selectedRows.size !== 1 && "s"} selected
           </span>
@@ -493,7 +564,8 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
                     transform: `translateY(${virtualRow.start}px)`,
                     gridTemplateColumns,
                   }}
-                  onClick={(e) => handleRowClick(e, virtualRow.index)}
+                  onMouseDown={(e) => handleRowMouseDown(e, virtualRow.index)}
+                  onMouseEnter={() => handleRowMouseEnter(virtualRow.index)}
                   onContextMenu={(e) => handleContextMenu(e, virtualRow.index)}
                 >
                   {/* Row number */}
@@ -507,14 +579,23 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
                   >
                     {virtualRow.index + 1}
                   </div>
-                  {row.getVisibleCells().map((cell) => (
-                    <div
-                      key={cell.id}
-                      className="truncate border-r border-border px-2 py-1"
-                    >
-                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                    </div>
-                  ))}
+                  {row.getVisibleCells().map((cell, cellIdx) => {
+                    const isCellSelected =
+                      selectedCell?.rowIdx === virtualRow.index &&
+                      selectedCell?.colIdx === cellIdx;
+                    return (
+                      <div
+                        key={cell.id}
+                        className={cn(
+                          "truncate border-r border-border px-2 py-1",
+                          isCellSelected && "ring-2 ring-inset ring-primary bg-primary/15",
+                        )}
+                        onDoubleClick={(e) => handleCellDoubleClick(e, virtualRow.index, cellIdx)}
+                      >
+                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                      </div>
+                    );
+                  })}
                 </div>
               );
             })}
@@ -523,20 +604,31 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
       </div>
 
       {/* Context menu */}
-      {contextMenu && selectedRows.size > 0 && (
+      {contextMenu && (selectedRows.size > 0 || selectedCell) && (
         <div
           ref={contextRef}
           className="fixed z-50 min-w-52 rounded-md border border-border bg-background py-1 shadow-lg text-xs"
           style={{ left: contextMenu.x, top: contextMenu.y }}
         >
-          <CtxItem icon={Copy} label="Copy" shortcut="Ctrl+C" onClick={() => copyAs("tsv")} />
-          <CtxItem icon={ClipboardList} label="Copy as CSV" onClick={() => copyAs("csv")} />
-          <CtxItem icon={FileJson} label="Copy as JSON" onClick={() => copyAs("json")} />
-          <CtxItem icon={Table2} label="Copy as Markdown" onClick={() => copyAs("markdown")} />
-          <div className="my-1 border-t border-border" />
+          {selectedCell && (
+            <>
+              <CtxItem icon={Copy} label="Copy cell" shortcut="Ctrl+C" onClick={() => { copyCellValue(); setContextMenu(null); }} />
+              <div className="my-1 border-t border-border" />
+            </>
+          )}
+          {selectedRows.size > 0 && (
+            <>
+              <CtxItem icon={Copy} label={selectedCell ? "Copy row(s)" : "Copy"} shortcut={selectedCell ? undefined : "Ctrl+C"} onClick={() => copyAs("tsv")} />
+              <CtxItem icon={ClipboardList} label="Copy as CSV" onClick={() => copyAs("csv")} />
+              <CtxItem icon={FileJson} label="Copy as JSON" onClick={() => copyAs("json")} />
+              <CtxItem icon={Table2} label="Copy as Markdown" onClick={() => copyAs("markdown")} />
+              <div className="my-1 border-t border-border" />
+            </>
+          )}
           <CtxItem
             label={`Select all (${tableRows.length})`}
             onClick={() => {
+              setSelectedCell(null);
               selectAll();
               setContextMenu(null);
             }}

@@ -1,7 +1,20 @@
 import { create } from "zustand";
+import type { editor as monacoEditor } from "monaco-editor";
 import type { EditorTab } from "../types/editor";
 
 const STORAGE_KEY = "sqail_tabs";
+
+// Global ref to the active Monaco editor instance — used by the F5 shortcut
+// handler to read selected text without threading refs through the component tree.
+let _activeEditor: monacoEditor.IStandaloneCodeEditor | null = null;
+
+export function setActiveEditorInstance(ed: monacoEditor.IStandaloneCodeEditor | null) {
+  _activeEditor = ed;
+}
+
+export function getActiveEditorInstance(): monacoEditor.IStandaloneCodeEditor | null {
+  return _activeEditor;
+}
 
 function generateId(): string {
   return crypto.randomUUID();

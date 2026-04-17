@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use tokio::sync::Mutex;
 
+use crate::ai::inline::state::InlineAiState;
 use crate::ai::provider::{AiHistoryEntry, AiProviderConfig};
 use crate::ai::store::{AiHistoryStore, AiProviderStore};
 use crate::db::connections::ConnectionConfig;
@@ -31,6 +32,8 @@ pub struct AppState {
 
     pub metadata_store: MetadataStore,
     pub metadata: Mutex<Vec<ObjectMetadata>>,
+
+    pub inline_ai: InlineAiState,
 }
 
 impl AppState {
@@ -64,6 +67,7 @@ impl AppState {
             saved_queries: Mutex::new(saved_queries),
             metadata_store,
             metadata: Mutex::new(metadata),
+            inline_ai: InlineAiState::new(),
         }
     }
 

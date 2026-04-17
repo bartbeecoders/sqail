@@ -127,6 +127,21 @@ Driver support lives in `src-tauri/` and uses `sqlx` (Postgres, MySQL, SQLite) o
 3. Add connection form fields in the React side under `src/components/`
 4. Add a smoke test against a real database, not a mock
 
+## Working on the inline AI sidecar
+
+The inline AI feature (see `Vibecoding/inline-ai.md`) runs a local `llama-server` process next to the Tauri app. For development you build that binary once from source:
+
+```bash
+./scripts/fetch-llama-cpp.sh          # clones + builds llama.cpp with CUDA
+./scripts/fetch-inline-models.sh      # downloads the three catalog models (~16 GB total)
+```
+
+Both scripts cache everything under `.cache/inline-ai/` (gitignored). The Rust sidecar resolver finds the dev-built binary automatically. If you prefer a different build, set `SQAIL_LLAMA_SERVER_PATH=/path/to/your/llama-server` before launching.
+
+The CUDA build assumes you're on Linux x86_64 with CUDA 12.x + an NVIDIA GPU. For CPU-only or non-CUDA GPU development, edit the cmake flags in `scripts/fetch-llama-cpp.sh` (drop `-DGGML_CUDA=ON`) or pass a Vulkan prebuilt via `SQAIL_LLAMA_SERVER_PATH`.
+
+Release bundling via Tauri's `externalBin` is staged in `scripts/fetch-llama-binaries.sh` — the Windows/macOS prebuilts are on the Phase G punch-list and currently TODO.
+
 ## Adding an AI provider
 
 AI providers are pluggable. See the existing Claude/OpenAI/Minimax integrations for the pattern. New providers should:

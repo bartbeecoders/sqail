@@ -2,6 +2,20 @@
 
 > The authoritative changelog lives in `releases.json` (consumed by both the in-app About tab and the portal). This file tracks selected highlights.
 
+## Unreleased
+
+## v0.5.0
+
+### Inline AI completion
+- Ghost-text SQL completion powered by a local llama.cpp sidecar — no cloud calls, nothing leaves your machine
+- Opt-in: flip the toggle in **Settings → Inline AI** and pick a model
+- Three quantised GGUF models in the catalog: Qwen2.5-Coder-1.5B (low-end), Qwen2.5-Coder-3B (default), DeepSeek-Coder-V2-Lite 16B MoE (performance)
+- Token-budget-aware schema context keeps prompts lean for ~6 ms first-token latency on GPU
+- `Tab` to accept, `Esc` to dismiss; cursor moves and tab/connection switches cancel in-flight requests
+- Toolbar indicator shows sidecar state at a glance; click to open the Inline AI settings tab
+- Optional latency telemetry pane for debugging
+- Bundled `llama-server` binaries for Windows/macOS are a follow-up; today the feature runs against any OpenAI-compatible local endpoint (Ollama, LM Studio) or a user-supplied `llama-server` pointed at via `SQAIL_LLAMA_SERVER_PATH`
+
 ## v0.4.2
 
 ### Auto-Update

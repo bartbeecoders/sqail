@@ -1,6 +1,6 @@
 [package]
 name = "sqail"
-version = "0.4.2"
+version = "0.5.0"
 description = "A lightweight SQL database editor with AI integration"
 authors = ["sqail"]
 license = "MIT"
@@ -27,6 +27,7 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "tls-native-tls", "postgr
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 hex = "0.4"
+sha2 = "0.10"
 tiberius = { version = "0.12", default-features = false, features = ["tds73", "rustls"] }
 bb8 = "0.8"
 bb8-tiberius = "0.15"
@@ -46,6 +47,7 @@ tiberius = { version = "0.12", default-features = false, features = ["winauth"] 
 
 [target.'cfg(unix)'.dependencies]
 tiberius = { version = "0.12", default-features = false, features = ["integrated-auth-gssapi"] }
+libc = "0.2"
 
 [profile.release]
 strip = true

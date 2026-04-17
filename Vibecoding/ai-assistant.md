@@ -79,3 +79,16 @@ Let the user select from a list of models:
 Format with ai works great. Can we add a preview that would show the reformatted sql next to the existing in the split pane ?
 Green and red colors for the preview?
 And a accept or reject button to apply the changes or discard them?
+
+
+### Inline AI assistance (ghost-text completion)
+
+Separate feature from this command-palette assistant. Full architecture and
+implementation plan lives in [`inline-ai.md`](./inline-ai.md).
+
+Short answer: yes, a small local LLM (Qwen2.5-Coder-3B GGUF Q4_K_M) on the
+4080 Super, served via a bundled `llama-server` sidecar exposing the FIM
+`/infill` endpoint, hits sub-300 ms perceived latency and runs alongside the
+existing deterministic Monaco completions with no regressions. See
+`inline-ai.md` for the phased plan, performance budget, trigger gating,
+cancellation, and settings UX.

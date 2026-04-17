@@ -119,6 +119,15 @@ pub fn run() {
             commands::list_metadata,
             commands::update_metadata,
             commands::delete_all_metadata,
+            commands::inline_sidecar_status,
+            commands::inline_sidecar_start,
+            commands::inline_sidecar_stop,
+            commands::inline_model_list,
+            commands::inline_model_download,
+            commands::inline_model_cancel_download,
+            commands::inline_model_delete,
+            commands::inline_complete_start,
+            commands::inline_complete_cancel,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

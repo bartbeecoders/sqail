@@ -10,6 +10,7 @@ import { useAiStore } from "../stores/aiStore";
 import { useSettingsStore } from "../stores/settingsStore";
 import { sqlaiDark, sqlaiLight } from "../lib/monacoThemes";
 import { createSqlCompletionProvider } from "../lib/sqlCompletions";
+import { createInlineAiProvider } from "../lib/inlineAi";
 import { buildSelectStatement, buildRoutineCallStatement } from "../lib/sqlGenerate";
 import { validateSql, toMonacoMarkers } from "../lib/sqlValidator";
 import type { ColumnInfo } from "../types/schema";
@@ -60,8 +61,10 @@ export default function SqlEditor({ onExecute, onFormat, overrideTabId, editorRe
     monaco.editor.defineTheme("sqlai-dark", sqlaiDark);
     monaco.editor.defineTheme("sqlai-light", sqlaiLight);
     const completionProvider = createSqlCompletionProvider();
+    const inlineProvider = createInlineAiProvider();
     for (const lang of ["sql", "mysql", "pgsql"]) {
       monaco.languages.registerCompletionItemProvider(lang, completionProvider);
+      monaco.languages.registerInlineCompletionsProvider(lang, inlineProvider);
     }
   }, []);
 
@@ -415,6 +418,7 @@ export default function SqlEditor({ onExecute, onFormat, overrideTabId, editorRe
           tabSize,
           suggestOnTriggerCharacters: true,
           quickSuggestions: true,
+          inlineSuggest: { enabled: true },
           padding: { top: 8, bottom: 8 },
           renderLineHighlight: "line",
           smoothScrolling: true,

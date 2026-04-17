@@ -1743,3 +1743,164 @@ pub async fn delete_all_metadata(
     drop(entries);
     state.save_metadata().await
 }
+
+// ─── Inline AI (Phase B) ──────────────────────────────────────────────────
+//
+// These commands cover sidecar lifecycle + model catalog. The FIM
+// completion commands will land in Phase C.
+
+use crate::ai::inline::{
+    completer::{start_completion, CompletionRequest},
+    fim,
+    models as inline_models,
+    sidecar::{SidecarStatus, StartOptions},
+};
+
+#[tauri::command]
+pub async fn inline_sidecar_status(
+    state: State<'_, AppState>,
+) -> Result<SidecarStatus, String> {
+    Ok(state.inline_ai.sidecar.status().await)
+}
+
+#[tauri::command]
+pub async fn inline_sidecar_start(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    model_id: String,
+    ctx_size: Option<u32>,
+    cpu_only: Option<bool>,
+) -> Result<u16, String> {
+    let opts = StartOptions {
+        ctx_size: ctx_size.unwrap_or(4096),
+        n_gpu_layers: 999,
+        cpu_only: cpu_only.unwrap_or(false),
+    };
+    state
+        .inline_ai
+        .sidecar
+        .start(app, model_id, opts)
+        .await
+}
+
+#[tauri::command]
+pub async fn inline_sidecar_stop(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.inline_ai.sidecar.stop(app).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn inline_model_list(
+    app: AppHandle,
+) -> Result<Vec<inline_models::ModelListItem>, String> {
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(inline_models::list(&app_data).await)
+}
+
+#[tauri::command]
+pub async fn inline_model_download(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    model_id: String,
+) -> Result<String, String> {
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+
+    // Register / reuse a cancel token so a second `download` for the
+    // same id doesn't spawn a parallel download.
+    let cancel = {
+        let mut active = state.inline_ai.downloads.lock().await;
+        if active.contains_key(&model_id) {
+            return Err(format!("download already in progress for {model_id}"));
+        }
+        let notify = Arc::new(tokio::sync::Notify::new());
+        active.insert(model_id.clone(), notify.clone());
+        notify
+    };
+
+    let result =
+        inline_models::download(app.clone(), app_data, model_id.clone(), cancel).await;
+
+    // Always clear the cancel slot regardless of outcome.
+    state.inline_ai.downloads.lock().await.remove(&model_id);
+
+    result.map(|p| p.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub async fn inline_model_cancel_download(
+    state: State<'_, AppState>,
+    model_id: String,
+) -> Result<(), String> {
+    let active = state.inline_ai.downloads.lock().await;
+    match active.get(&model_id) {
+        Some(notify) => {
+            notify.notify_waiters();
+            Ok(())
+        }
+        None => Err(format!("no active download for {model_id}")),
+    }
+}
+
+#[tauri::command]
+pub async fn inline_model_delete(
+    app: AppHandle,
+    model_id: String,
+) -> Result<(), String> {
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    inline_models::delete(&app_data, &model_id).await
+}
+
+// ─── Inline AI FIM completion (Phase C) ───────────────────────────────────
+
+#[tauri::command]
+pub async fn inline_complete_start(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    prefix: String,
+    suffix: Option<String>,
+    n_predict: Option<i32>,
+    temperature: Option<f32>,
+) -> Result<String, String> {
+    // Resolve the active sidecar + its model.
+    let status = state.inline_ai.sidecar.status().await;
+    let (port, model_id) = match status {
+        SidecarStatus::Ready { port, model_id } => (port, model_id),
+        _ => return Err("sidecar not ready".into()),
+    };
+    let entry = inline_models::find(&model_id)
+        .ok_or_else(|| format!("model {model_id} missing from catalog"))?;
+
+    let mut cfg = fim::config_for(&entry);
+    if let Some(n) = n_predict {
+        cfg.n_predict = n;
+    }
+    if let Some(t) = temperature {
+        cfg.temperature = t;
+    }
+
+    let registry = state.inline_ai.completions.clone();
+    let request_id = start_completion(
+        app,
+        registry,
+        CompletionRequest {
+            prefix,
+            suffix: suffix.unwrap_or_default(),
+            port,
+            fim: cfg,
+        },
+    );
+    Ok(request_id)
+}
+
+#[tauri::command]
+pub async fn inline_complete_cancel(
+    state: State<'_, AppState>,
+    request_id: String,
+) -> Result<bool, String> {
+    let id = uuid::Uuid::parse_str(&request_id)
+        .map_err(|e| format!("bad request id: {e}"))?;
+    Ok(state.inline_ai.completions.cancel(id).await)
+}

@@ -15,7 +15,7 @@ import ResizablePanel from "./components/ResizablePanel";
 import AiPanel from "./components/AiPanel";
 import AiCommandPalette from "./components/AiCommandPalette";
 import InfoPanel from "./components/InfoPanel";
-import SettingsModal from "./components/SettingsModal";
+import SettingsModal, { type SettingsTab } from "./components/SettingsModal";
 import UpdateChecker from "./components/UpdateChecker";
 import { useEditorStore, getActiveEditorInstance } from "./stores/editorStore";
 import { useConnectionStore } from "./stores/connectionStore";
@@ -23,6 +23,7 @@ import { useQueryStore } from "./stores/queryStore";
 import { useAiStore } from "./stores/aiStore";
 import { useAiStream } from "./hooks/useAiStream";
 import { useMetadataEvents } from "./hooks/useMetadataEvents";
+import { useInlineAiLifecycle } from "./hooks/useInlineAiLifecycle";
 import { useGlobalShortcuts, type ShortcutHandlers } from "./hooks/useGlobalShortcuts";
 
 function loadUiState<T>(key: string, fallback: T): T {
@@ -36,7 +37,7 @@ function loadUiState<T>(key: string, fallback: T): T {
 export default function App() {
   const [splashDone, setSplashDone] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => loadUiState("sqail_sidebar_collapsed", false));
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState<SettingsTab | null>(null);
   const [connectionFormOpen, setConnectionFormOpen] = useState(false);
   const [infoPanelOpen, setInfoPanelOpen] = useState(() => loadUiState("sqail_info_panel_open", false));
   const aiPanelOpen = useAiStore((s) => s.panelOpen);
@@ -49,6 +50,7 @@ export default function App() {
 
   useAiStream();
   useMetadataEvents();
+  useInlineAiLifecycle();
 
   // Persist sidebar collapsed state
   useEffect(() => {
@@ -196,7 +198,7 @@ export default function App() {
       "new-connection": () => setConnectionFormOpen(true),
       "open-ai-palette": () => useAiStore.getState().openPalette(),
       "toggle-ai-panel": () => useAiStore.getState().togglePanel(),
-      "open-settings": () => setSettingsOpen(true),
+      "open-settings": () => setSettingsOpen("general"),
     }),
     [handleRunFromToolbar, handleFormat],
   );
@@ -224,7 +226,7 @@ export default function App() {
           onClear={handleClear}
           hasConnection={!!(useEditorStore.getState().getActiveTab()?.connectionId ?? activeConnectionId)}
           loading={loading}
-          onOpenSettings={() => setSettingsOpen(true)}
+          onOpenSettings={(tab) => setSettingsOpen(tab ?? "general")}
           infoPanelOpen={infoPanelOpen}
           onToggleInfoPanel={() => setInfoPanelOpen(!infoPanelOpen)}
         />
@@ -237,7 +239,12 @@ export default function App() {
       {infoPanelOpen && <InfoPanel onClose={() => setInfoPanelOpen(false)} />}
       {aiPanelOpen && <AiPanel />}
       <AiCommandPalette />
-      {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && (
+        <SettingsModal
+          initialTab={settingsOpen}
+          onClose={() => setSettingsOpen(null)}
+        />
+      )}
       </div>
     </div>
   );

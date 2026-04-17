@@ -31,7 +31,7 @@ interface CursorContext {
   referencedTables: ReferencedTable[];
 }
 
-interface ReferencedTable {
+export interface ReferencedTable {
   schema?: string;
   table: string;
   alias?: string;
@@ -320,7 +320,7 @@ const ALL_KEYWORDS = [
 // ── Helper utilities ─────────────────────────────────────────
 
 /** Strip string literals and comments, preserving character positions (replaced with spaces). */
-function stripStringsAndComments(text: string): string {
+export function stripStringsAndComments(text: string): string {
   let result = "";
   let inSQ = false, inDQ = false, inLC = false, inBC = false;
 
@@ -415,7 +415,7 @@ function findActiveClause(textBeforeCursor: string): string | null {
 }
 
 /** Extract table references (with aliases) from SQL text */
-function extractReferencedTables(text: string): ReferencedTable[] {
+export function extractReferencedTables(text: string): ReferencedTable[] {
   const tables: ReferencedTable[] = [];
 
   // Match: FROM/JOIN schema.table alias, FROM/JOIN table alias

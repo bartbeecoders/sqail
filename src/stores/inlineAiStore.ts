@@ -66,6 +66,24 @@ export interface CompletionTelemetry {
   preview: string;
 }
 
+/** Mirror of Rust-side `BinaryStatus`. */
+export interface BinaryStatus {
+  /** False on platforms where we don't (yet) offer a runtime download. */
+  supported: boolean;
+  installed: boolean;
+  path: string | null;
+  url: string | null;
+  releaseTag: string;
+}
+
+/** Narrower progress shape than the model downloader — there's only one binary. */
+export interface BinaryDownloadState {
+  downloaded: number;
+  total: number;
+  phase: "started" | "progress" | "extracting" | "completed" | "cancelled" | "error";
+  error?: string;
+}
+
 const TELEMETRY_CAPACITY = 20;
 
 interface InlineAiState extends InlineAiSettings {
@@ -73,6 +91,8 @@ interface InlineAiState extends InlineAiSettings {
   models: ModelListItem[];
   downloads: Record<string, DownloadState>;
   telemetry: CompletionTelemetry[];
+  binary: BinaryStatus;
+  binaryDownload: BinaryDownloadState | null;
 
   // Settings writers
   updateSetting: <K extends keyof InlineAiSettings>(
@@ -84,15 +104,20 @@ interface InlineAiState extends InlineAiSettings {
   // Runtime
   refreshModels: () => Promise<void>;
   refreshStatus: () => Promise<void>;
+  refreshBinary: () => Promise<void>;
   startSidecar: () => Promise<void>;
   stopSidecar: () => Promise<void>;
   downloadModel: (id: string) => Promise<void>;
   cancelDownload: (id: string) => Promise<void>;
   deleteModel: (id: string) => Promise<void>;
+  downloadBinary: () => Promise<void>;
+  cancelBinaryDownload: () => Promise<void>;
+  deleteBinary: () => Promise<void>;
 
   // Event adapters (called from useInlineAiLifecycle)
   applySidecarStatus: (s: SidecarState) => void;
   applyDownloadProgress: (p: { id: string } & DownloadState) => void;
+  applyBinaryDownloadProgress: (p: BinaryDownloadState) => void;
   recordCompletion: (sample: Omit<CompletionTelemetry, "at">) => void;
   clearTelemetry: () => void;
 }
@@ -111,12 +136,22 @@ function saveSettings(settings: InlineAiSettings): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
 }
 
+const INITIAL_BINARY: BinaryStatus = {
+  supported: true,
+  installed: false,
+  path: null,
+  url: null,
+  releaseTag: "",
+};
+
 export const useInlineAiStore = create<InlineAiState>((set, get) => ({
   ...loadSettings(),
   sidecar: { state: "stopped" },
   models: [],
   downloads: {},
   telemetry: [],
+  binary: INITIAL_BINARY,
+  binaryDownload: null,
 
   updateSetting: (key, value) => {
     set({ [key]: value } as Partial<InlineAiSettings>);
@@ -141,9 +176,13 @@ export const useInlineAiStore = create<InlineAiState>((set, get) => ({
     // Side effects: when flipping on, auto-start if the selected model
     // is ready on disk. When flipping off, stop the sidecar.
     if (!was) {
+      // Trigger a binary refresh so the settings UI can decide whether
+      // to show the "Download runtime" banner. The sidecar can't start
+      // without the binary — surfacing that state is the UX contract.
+      void get().refreshBinary();
       const { modelId, models } = get();
       const m = models.find((x) => x.id === modelId);
-      if (m?.downloaded && get().sidecar.state !== "ready") {
+      if (m?.downloaded && get().binary.installed && get().sidecar.state !== "ready") {
         try {
           await get().startSidecar();
         } catch {
@@ -170,6 +209,15 @@ export const useInlineAiStore = create<InlineAiState>((set, get) => ({
       set({ sidecar: status });
     } catch (e) {
       console.error("inline_sidecar_status failed:", e);
+    }
+  },
+
+  refreshBinary: async () => {
+    try {
+      const binary = await invoke<BinaryStatus>("inline_binary_status");
+      set({ binary });
+    } catch (e) {
+      console.error("inline_binary_status failed:", e);
     }
   },
 
@@ -221,6 +269,34 @@ export const useInlineAiStore = create<InlineAiState>((set, get) => ({
     }
   },
 
+  downloadBinary: async () => {
+    try {
+      // Mirrors downloadModel: starts a long-running invoke that drives
+      // `inline:binary-download-progress` events until it resolves.
+      await invoke("inline_binary_download");
+      await get().refreshBinary();
+    } catch (e) {
+      console.error("inline_binary_download failed:", e);
+    }
+  },
+
+  cancelBinaryDownload: async () => {
+    try {
+      await invoke("inline_binary_cancel_download");
+    } catch (e) {
+      console.error("inline_binary_cancel_download failed:", e);
+    }
+  },
+
+  deleteBinary: async () => {
+    try {
+      await invoke("inline_binary_delete");
+      await get().refreshBinary();
+    } catch (e) {
+      console.error("inline_binary_delete failed:", e);
+    }
+  },
+
   applySidecarStatus: (status) => {
     set({ sidecar: status });
   },
@@ -251,6 +327,14 @@ export const useInlineAiStore = create<InlineAiState>((set, get) => ({
     // On terminal states, refresh the catalog list so the downloaded flag flips.
     if (p.phase === "completed" || p.phase === "error" || p.phase === "cancelled") {
       void get().refreshModels();
+    }
+  },
+
+  applyBinaryDownloadProgress: (p) => {
+    set({ binaryDownload: p });
+    if (p.phase === "completed" || p.phase === "error" || p.phase === "cancelled") {
+      // Pick up the new on-disk state so the UI can flip the "Download" button off.
+      void get().refreshBinary();
     }
   },
 }));

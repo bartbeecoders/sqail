@@ -11,7 +11,8 @@ use tokio::net::TcpStream;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 
 use crate::ai::client;
-use crate::ai::provider::{AiHistoryEntry, AiProviderConfig};
+use crate::ai::inline::sidecar::SidecarStatus;
+use crate::ai::provider::{AiHistoryEntry, AiProviderConfig, AiProviderType};
 use crate::auth::entra;
 use crate::db::connections::{ConnectionConfig, Driver, MssqlAuthMethod};
 use crate::metadata::{ColumnMetadata, GeneratedMetadata, ObjectMetadata};
@@ -661,8 +662,14 @@ async fn get_default_provider(state: &State<'_, AppState>) -> Result<AiProviderC
         .ok_or_else(|| "No AI provider configured. Add one in AI settings.".to_string())
 }
 
+/// Sentinel id used by the frontend to request the running local inline
+/// AI sidecar as a virtual provider. There is no persisted config for this
+/// id — we synthesize one on the fly from the current sidecar status.
+const INLINE_LOCAL_PROVIDER_ID: &str = "inline-local";
+
 async fn get_provider(state: &State<'_, AppState>, provider_id: Option<String>) -> Result<AiProviderConfig, String> {
     match provider_id {
+        Some(id) if id == INLINE_LOCAL_PROVIDER_ID => build_inline_local_config(state).await,
         Some(id) => {
             let providers = state.ai_providers.lock().await;
             providers
@@ -672,6 +679,30 @@ async fn get_provider(state: &State<'_, AppState>, provider_id: Option<String>) 
                 .ok_or_else(|| format!("AI provider with id '{}' not found.", id))
         }
         None => get_default_provider(state).await,
+    }
+}
+
+async fn build_inline_local_config(
+    state: &State<'_, AppState>,
+) -> Result<AiProviderConfig, String> {
+    match state.inline_ai.sidecar.status().await {
+        SidecarStatus::Ready { model_id, port } => Ok(AiProviderConfig {
+            id: INLINE_LOCAL_PROVIDER_ID.to_string(),
+            name: format!("Local ({model_id})"),
+            // llama-server speaks OpenAI chat completions at /v1. The
+            // LmStudio streamer handles empty api_keys cleanly (no Bearer
+            // header), which matches what llama-server expects.
+            provider: AiProviderType::LmStudio,
+            api_key: String::new(),
+            model: model_id,
+            base_url: Some(format!("http://127.0.0.1:{port}/v1")),
+            is_default: false,
+            accept_invalid_certs: false,
+        }),
+        _ => Err(
+            "Local inline AI sidecar is not running. Enable inline AI and start the sidecar in Settings."
+                .to_string(),
+        ),
     }
 }
 
@@ -1750,10 +1781,11 @@ pub async fn delete_all_metadata(
 // completion commands will land in Phase C.
 
 use crate::ai::inline::{
+    binaries as inline_binaries,
     completer::{start_completion, CompletionRequest},
     fim,
     models as inline_models,
-    sidecar::{SidecarStatus, StartOptions},
+    sidecar::StartOptions,
 };
 
 #[tauri::command]
@@ -1851,6 +1883,60 @@ pub async fn inline_model_delete(
 ) -> Result<(), String> {
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
     inline_models::delete(&app_data, &model_id).await
+}
+
+// ─── Sidecar binary (llama-server) — runtime download ─────────────────────
+
+#[tauri::command]
+pub async fn inline_binary_status(
+    app: AppHandle,
+) -> Result<inline_binaries::BinaryStatus, String> {
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(inline_binaries::status(&app_data).await)
+}
+
+#[tauri::command]
+pub async fn inline_binary_download(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+
+    let cancel = {
+        let mut slot = state.inline_ai.binary_download.lock().await;
+        if slot.is_some() {
+            return Err("sidecar binary download already in progress".into());
+        }
+        let notify = Arc::new(tokio::sync::Notify::new());
+        *slot = Some(notify.clone());
+        notify
+    };
+
+    let result = inline_binaries::download(app.clone(), app_data, cancel).await;
+
+    *state.inline_ai.binary_download.lock().await = None;
+
+    result.map(|p| p.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub async fn inline_binary_cancel_download(
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let slot = state.inline_ai.binary_download.lock().await;
+    match slot.as_ref() {
+        Some(notify) => {
+            notify.notify_waiters();
+            Ok(())
+        }
+        None => Err("no active sidecar binary download".into()),
+    }
+}
+
+#[tauri::command]
+pub async fn inline_binary_delete(app: AppHandle) -> Result<(), String> {
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    inline_binaries::delete(&app_data).await
 }
 
 // ─── Inline AI FIM completion (Phase C) ───────────────────────────────────

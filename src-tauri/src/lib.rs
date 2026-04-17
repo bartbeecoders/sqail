@@ -126,6 +126,10 @@ pub fn run() {
             commands::inline_model_download,
             commands::inline_model_cancel_download,
             commands::inline_model_delete,
+            commands::inline_binary_status,
+            commands::inline_binary_download,
+            commands::inline_binary_cancel_download,
+            commands::inline_binary_delete,
             commands::inline_complete_start,
             commands::inline_complete_cancel,
         ])

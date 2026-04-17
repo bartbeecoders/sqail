@@ -515,13 +515,17 @@ Sized roughly for solo dev work; a focused ~2-week sprint for MVP.
   per platform) are a conscious non-goal for 0.5.0.
 
 ### Follow-ups tracked after 0.5.0
-- F1. Automated runtime download of `llama-server` (mirror `models.rs`
-  shape, `<app_data>/inline-ai/bin/`, platform-appropriate archive
-  from the official llama.cpp release assets).
+- [x] F1. Automated runtime download of `llama-server` — landed post-0.5.0.
+  `src-tauri/src/ai/inline/binaries.rs` mirrors `models.rs`, stages the
+  archive under `<app_data>/inline-ai/bin/`, extracts flattened
+  alongside the exe. Catalog: Windows x64 Vulkan `.zip`, macOS
+  arm64/x64 Metal `.tar.gz`, Linux x64 Vulkan `.tar.gz`, all pinned to
+  llama.cpp `b8815`.
 - F2. Fill in `scripts/fetch-llama-binaries.sh` for Windows / macOS
-  prebuilts and register them under `bundle.externalBin`.
+  prebuilts and register them under `bundle.externalBin` (optional —
+  F1 already solves the Windows UX problem without installer bloat).
 - F3. Extend `release.yml` with a `verify-inline-ai-binaries` step
-  once F1/F2 land, so CI catches missing artefacts before shipping.
+  once F2 lands, so CI catches missing artefacts before shipping.
 
 ---
 

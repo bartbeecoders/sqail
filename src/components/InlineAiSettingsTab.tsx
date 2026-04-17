@@ -1,4 +1,4 @@
-import { Download, Play, RotateCcw, Square, Trash2, Loader2 } from "lucide-react";
+import { Download, Play, RotateCcw, Square, Trash2, Loader2, AlertTriangle, CheckCircle2 } from "lucide-react";
 import { useMemo } from "react";
 
 import { cn } from "../lib/utils";
@@ -8,6 +8,14 @@ import {
   type ModelListItem,
   type DownloadState,
 } from "../stores/inlineAiStore";
+
+/** Shared shape for the model + binary progress bars. */
+interface ProgressSnapshot {
+  downloaded: number;
+  total: number;
+  phase: string;
+  error?: string;
+}
 
 /**
  * Settings tab for the inline-AI (ghost-text) feature. Renders:
@@ -41,9 +49,18 @@ export default function InlineAiSettingsTab() {
           </div>
           <Toggle checked={s.enabled} onChange={() => s.toggleEnabled()} />
         </div>
+        {s.enabled && !s.binary.installed && s.binary.supported && (
+          <BinaryBanner />
+        )}
         {s.enabled && selectedModel && !selectedModel.downloaded && (
           <OnboardingBanner model={selectedModel} />
         )}
+      </section>
+
+      {/* Sidecar runtime (llama-server binary) */}
+      <section>
+        <SectionHeader>Sidecar runtime</SectionHeader>
+        <SidecarRuntimePanel />
       </section>
 
       {/* Sidecar status */}
@@ -222,6 +239,123 @@ function formatTime(epochMs: number): string {
 }
 
 // ── Onboarding ────────────────────────────────────────────────────────────
+
+function BinaryBanner() {
+  const supported = useInlineAiStore((s) => s.binary.supported);
+  const progress = useInlineAiStore((s) => s.binaryDownload);
+  const downloadBinary = useInlineAiStore((s) => s.downloadBinary);
+  const busy =
+    !!progress &&
+    progress.phase !== "completed" &&
+    progress.phase !== "error" &&
+    progress.phase !== "cancelled";
+
+  if (!supported) {
+    return (
+      <div className="mt-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-[11px] text-amber-900 dark:text-amber-200">
+        Runtime download isn't available for this platform yet. Point at your own
+        <code className="mx-1 rounded bg-amber-500/20 px-1 font-mono">llama-server</code>
+        via <code className="mx-1 rounded bg-amber-500/20 px-1 font-mono">SQAIL_LLAMA_SERVER_PATH</code>.
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="text-[11px] font-medium text-amber-900 dark:text-amber-200">
+            The llama-server sidecar binary isn't installed yet.
+          </div>
+          <div className="mt-0.5 text-[11px] text-amber-800/80 dark:text-amber-200/80">
+            Downloads once from the official llama.cpp release — cached locally.
+          </div>
+        </div>
+        <button
+          onClick={() => downloadBinary()}
+          disabled={busy}
+          className="flex shrink-0 items-center gap-1 rounded-md bg-amber-500 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-amber-600 disabled:opacity-50"
+        >
+          {busy ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
+          {busy ? "Downloading" : "Download runtime"}
+        </button>
+      </div>
+      {busy && progress && <ProgressBar state={progress} className="mt-2" />}
+    </div>
+  );
+}
+
+function SidecarRuntimePanel() {
+  const binary = useInlineAiStore((s) => s.binary);
+  const progress = useInlineAiStore((s) => s.binaryDownload);
+  const downloadBinary = useInlineAiStore((s) => s.downloadBinary);
+  const cancelDownload = useInlineAiStore((s) => s.cancelBinaryDownload);
+  const deleteBinary = useInlineAiStore((s) => s.deleteBinary);
+
+  const busy =
+    !!progress &&
+    progress.phase !== "completed" &&
+    progress.phase !== "error" &&
+    progress.phase !== "cancelled";
+
+  if (!binary.supported) {
+    return (
+      <div className="rounded-md border border-border bg-muted/20 p-3 text-[11px] text-muted-foreground">
+        No bundled runtime for this platform. Set
+        <code className="mx-1 rounded bg-muted px-1 font-mono">SQAIL_LLAMA_SERVER_PATH</code>
+        to your own <code className="rounded bg-muted px-1 font-mono">llama-server</code> build.
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2 rounded-md border border-border bg-muted/20 p-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2 text-xs">
+          {binary.installed ? (
+            <CheckCircle2 size={13} className="text-emerald-500" />
+          ) : (
+            <AlertTriangle size={13} className="text-amber-500" />
+          )}
+          <div>
+            <div className="font-medium">
+              {binary.installed ? "Installed" : "Not installed"}
+              {binary.releaseTag && (
+                <span className="ml-1 text-[10px] font-normal text-muted-foreground">
+                  {binary.releaseTag}
+                </span>
+              )}
+            </div>
+            {binary.installed && binary.path && (
+              <div className="truncate text-[10px] text-muted-foreground" title={binary.path}>
+                {binary.path}
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="flex shrink-0 gap-1">
+          {binary.installed ? (
+            <SmallBtn onClick={() => deleteBinary()} variant="danger">
+              <Trash2 size={11} /> Delete
+            </SmallBtn>
+          ) : busy ? (
+            <SmallBtn onClick={() => cancelDownload()} variant="danger">
+              <Square size={11} /> Cancel
+            </SmallBtn>
+          ) : (
+            <SmallBtn onClick={() => downloadBinary()}>
+              <Download size={11} /> Download
+            </SmallBtn>
+          )}
+        </div>
+      </div>
+      {busy && progress && <ProgressBar state={progress} />}
+      {!busy && progress && progress.phase === "error" && (
+        <div className="text-[10px] text-destructive">{progress.error}</div>
+      )}
+    </div>
+  );
+}
 
 function OnboardingBanner({ model }: { model: ModelListItem }) {
   const progress = useInlineAiStore((s) => s.downloads[model.id]);
@@ -464,7 +598,7 @@ function ProgressBar({
   state,
   className,
 }: {
-  state: DownloadState;
+  state: ProgressSnapshot;
   className?: string;
 }) {
   const pct =

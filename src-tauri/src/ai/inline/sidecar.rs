@@ -23,6 +23,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Instant};
 
+use super::binaries as inline_binaries;
 use super::models::{self, ModelEntry};
 
 const HEALTH_INTERVAL: Duration = Duration::from_secs(5);
@@ -427,6 +428,15 @@ fn resolve_server_bin(app: &AppHandle) -> Option<PathBuf> {
         ] {
             if candidate.exists() {
                 return Some(candidate);
+            }
+        }
+    }
+
+    // Runtime-downloaded binary in <app_data>/inline-ai/bin/.
+    if let Ok(app_data) = app.path().app_data_dir() {
+        if let Some(p) = inline_binaries::expected_binary_path(&app_data) {
+            if p.exists() {
+                return Some(p);
             }
         }
     }

@@ -20,3 +20,26 @@ export function stripThinkingBlocks(text: string): string {
   }
   return result.trimStart();
 }
+
+/**
+ * Unwrap a response that is entirely one fenced code block
+ * (e.g. ```sql\nSELECT ...\n```). Local instruct models (Qwen-Coder,
+ * DeepSeek-Coder-V2) often do this even when the prompt says not to.
+ *
+ * Only strips when the fence *is* the whole response — mixed prose with
+ * embedded fenced blocks (explain / document flows) is left untouched.
+ * Handles the mid-stream case where the opening fence has arrived but
+ * the closing fence has not.
+ */
+export function stripWrappingCodeFence(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("```")) return text;
+
+  const closed = trimmed.match(/^```[a-zA-Z0-9_+-]*\n?([\s\S]*?)\n?```\s*$/);
+  if (closed) return closed[1];
+
+  const afterOpen = trimmed.replace(/^```[a-zA-Z0-9_+-]*\n?/, "");
+  if (!afterOpen.includes("```")) return afterOpen;
+
+  return text;
+}

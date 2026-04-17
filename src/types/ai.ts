@@ -6,7 +6,13 @@ export type AiProviderType =
   | "minimax"
   | "zai"
   | "claudeCodeCli"
-  | "lmStudio";
+  | "lmStudio"
+  | "inlineLocal";
+
+/** Sentinel provider id used for the synthesized "Local inline AI"
+ *  dropdown entry — the backend (`commands.rs`) recognises this id and
+ *  routes the request to the running llama-server sidecar. */
+export const INLINE_LOCAL_PROVIDER_ID = "inline-local";
 
 export interface AiProviderConfig {
   id: string;
@@ -50,6 +56,7 @@ export const AI_PROVIDER_LABELS: Record<AiProviderType, string> = {
   zai: "Z.ai",
   claudeCodeCli: "Claude Code CLI",
   lmStudio: "LM Studio",
+  inlineLocal: "Local (Inline AI)",
 };
 
 export const AI_FLOW_LABELS: Record<AiFlow, string> = {
@@ -81,6 +88,7 @@ const DEFAULT_MODELS: Record<AiProviderType, string> = {
   zai: "GLM-4.7",
   claudeCodeCli: "claude-sonnet-4-20250514",
   lmStudio: "local-model",
+  inlineLocal: "",
 };
 
 const DEFAULT_BASE_URLS: Partial<Record<AiProviderType, string>> = {

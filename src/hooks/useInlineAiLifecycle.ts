@@ -5,6 +5,7 @@ import { cancelAllInlineRequests } from "../lib/inlineAi";
 import { useConnectionStore } from "../stores/connectionStore";
 import {
   useInlineAiStore,
+  type BinaryDownloadState,
   type DownloadState,
   type SidecarState,
 } from "../stores/inlineAiStore";
@@ -37,8 +38,20 @@ export function useInlineAiLifecycle(): void {
       ),
     );
 
+    unlisteners.push(
+      listen<BinaryDownloadState>(
+        "inline:binary-download-progress",
+        (event) => {
+          useInlineAiStore
+            .getState()
+            .applyBinaryDownloadProgress(event.payload);
+        },
+      ),
+    );
+
     void store.refreshModels();
     void store.refreshStatus();
+    void store.refreshBinary();
 
     if (store.enabled && store.autoStart) {
       // Best-effort — the sidecar may fail if the model isn't downloaded,

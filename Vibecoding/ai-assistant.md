@@ -92,3 +92,5 @@ Short answer: yes, a small local LLM (Qwen2.5-Coder-3B GGUF Q4_K_M) on the
 existing deterministic Monaco completions with no regressions. See
 `inline-ai.md` for the phased plan, performance budget, trigger gating,
 cancellation, and settings UX.
+
+In the AI assistant, add the possibility to select the local ai (inline ai) as provider. Only when the inlina ai is enabled.

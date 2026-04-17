@@ -132,6 +132,17 @@ pub fn run() {
             commands::inline_binary_delete,
             commands::inline_complete_start,
             commands::inline_complete_cancel,
+            commands::training_check_env,
+            commands::training_preview_dataset,
+            commands::training_start,
+            commands::training_cancel,
+            commands::training_list_jobs,
+            commands::training_list_models,
+            commands::training_delete_model,
+            commands::training_read_log,
+            commands::training_convert_model,
+            commands::training_activate_model,
+            commands::training_deactivate_model,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

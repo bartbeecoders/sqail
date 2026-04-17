@@ -686,7 +686,7 @@ async fn build_inline_local_config(
     state: &State<'_, AppState>,
 ) -> Result<AiProviderConfig, String> {
     match state.inline_ai.sidecar.status().await {
-        SidecarStatus::Ready { model_id, port } => Ok(AiProviderConfig {
+        SidecarStatus::Ready { model_id, port, .. } => Ok(AiProviderConfig {
             id: INLINE_LOCAL_PROVIDER_ID.to_string(),
             name: format!("Local ({model_id})"),
             // llama-server speaks OpenAI chat completions at /v1. The
@@ -1802,11 +1802,37 @@ pub async fn inline_sidecar_start(
     model_id: String,
     ctx_size: Option<u32>,
     cpu_only: Option<bool>,
+    // Trained-model id to activate as LoRA. When set, the adapter is
+    // converted to GGUF on demand and llama-server is launched with
+    // `--lora <path>`.
+    trained_model_id: Option<String>,
 ) -> Result<u16, String> {
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+
+    let (lora_path, lora_model_id) = match &trained_model_id {
+        Some(id) if !id.is_empty() => {
+            let list = trained_models::list(&app_data).await;
+            let model = list
+                .into_iter()
+                .find(|m| &m.id == id)
+                .ok_or_else(|| format!("trained model not found: {id}"))?;
+            let path = crate::ai::training::convert::ensure_converted(
+                app.clone(),
+                &app_data,
+                &model,
+            )
+            .await?;
+            (Some(path), Some(model.id))
+        }
+        _ => (None, None),
+    };
+
     let opts = StartOptions {
         ctx_size: ctx_size.unwrap_or(4096),
         n_gpu_layers: 999,
         cpu_only: cpu_only.unwrap_or(false),
+        lora_path,
+        lora_model_id,
     };
     state
         .inline_ai
@@ -1953,7 +1979,7 @@ pub async fn inline_complete_start(
     // Resolve the active sidecar + its model.
     let status = state.inline_ai.sidecar.status().await;
     let (port, model_id) = match status {
-        SidecarStatus::Ready { port, model_id } => (port, model_id),
+        SidecarStatus::Ready { port, model_id, .. } => (port, model_id),
         _ => return Err("sidecar not ready".into()),
     };
     let entry = inline_models::find(&model_id)
@@ -1989,4 +2015,255 @@ pub async fn inline_complete_cancel(
     let id = uuid::Uuid::parse_str(&request_id)
         .map_err(|e| format!("bad request id: {e}"))?;
     Ok(state.inline_ai.completions.cancel(id).await)
+}
+
+// ─── Training (schema-tuned LoRA adapters) ────────────────────────────────
+
+use crate::ai::training::{
+    dataset::{DatasetOptions, DatasetStats},
+    env as training_env,
+    jobs as training_jobs,
+    models as trained_models,
+};
+
+#[tauri::command]
+pub async fn training_check_env() -> Result<training_env::EnvCheck, String> {
+    Ok(training_env::check().await)
+}
+
+#[tauri::command]
+pub async fn training_preview_dataset(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    connection_id: String,
+    options: Option<DatasetOptions>,
+) -> Result<DatasetStats, String> {
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let (pool, driver) = get_pool_and_driver(&state, &connection_id).await?;
+    let dialect = format!("{driver}");
+    let metadata = state.metadata.lock().await.clone();
+    let opts = options.unwrap_or_default();
+    training_jobs::preview(
+        pool,
+        driver,
+        &app_data,
+        &connection_id,
+        &dialect,
+        &opts,
+        &metadata,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn training_start(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    connection_id: String,
+    base_model_id: String,
+    options: Option<DatasetOptions>,
+    hyperparams: Option<training_jobs::TrainingHyperparams>,
+) -> Result<String, String> {
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let (pool, driver) = get_pool_and_driver(&state, &connection_id).await?;
+
+    let conns = state.connections.lock().await;
+    let conn = conns
+        .iter()
+        .find(|c| c.id == connection_id)
+        .cloned()
+        .ok_or_else(|| format!("Connection '{connection_id}' not found"))?;
+    drop(conns);
+
+    let (_entry, hf_id) = training_jobs::lookup_base(&base_model_id)
+        .ok_or_else(|| format!("unknown base model: {base_model_id}"))?;
+
+    let metadata = state.metadata.lock().await.clone();
+
+    // Script ships in `scripts/train_sql_lora.py` at the repo root. In a
+    // packaged build it lives next to the Tauri executable via
+    // bundle.resources; in dev we fall back to the project root.
+    let script_path = resolve_training_script(&app);
+
+    let args = training_jobs::StartArgs {
+        connection_id: connection_id.clone(),
+        connection_name: conn.name,
+        base_model_id: base_model_id.clone(),
+        base_model_hf_id: hf_id,
+        driver: driver.clone(),
+        dialect_label: format!("{driver}"),
+        pool,
+        metadata,
+        options: options.unwrap_or_default(),
+        hyperparams: hyperparams.unwrap_or_default(),
+    };
+
+    let training_state = state.training.clone();
+    let id = training_jobs::start(app, training_state, app_data, script_path, args).await;
+    Ok(id)
+}
+
+fn resolve_training_script(app: &AppHandle) -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("SQAIL_TRAINER_SCRIPT") {
+        let pb = std::path::PathBuf::from(p);
+        if pb.exists() {
+            return pb;
+        }
+    }
+    if let Ok(res) = app.path().resource_dir() {
+        let candidate = res.join("scripts").join("train_sql_lora.py");
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    // Dev fallback: walk up from CARGO_MANIFEST_DIR (= src-tauri) to
+    // the project root.
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest.parent().unwrap_or(&manifest).to_path_buf();
+    root.join("scripts").join("train_sql_lora.py")
+}
+
+#[tauri::command]
+pub async fn training_cancel(
+    state: State<'_, AppState>,
+    job_id: String,
+) -> Result<bool, String> {
+    Ok(training_jobs::cancel(&state.training, &job_id).await)
+}
+
+#[tauri::command]
+pub async fn training_list_jobs(
+    state: State<'_, AppState>,
+) -> Result<Vec<training_jobs::TrainingJob>, String> {
+    let jobs = state.training.jobs.lock().await;
+    let mut out: Vec<_> = jobs.values().cloned().collect();
+    out.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    Ok(out)
+}
+
+#[tauri::command]
+pub async fn training_list_models(
+    app: AppHandle,
+) -> Result<Vec<trained_models::TrainedModel>, String> {
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(trained_models::list(&app_data).await)
+}
+
+#[tauri::command]
+pub async fn training_delete_model(
+    app: AppHandle,
+    model_id: String,
+) -> Result<(), String> {
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    trained_models::delete(&app_data, &model_id).await
+}
+
+#[tauri::command]
+pub async fn training_read_log(
+    app: AppHandle,
+    connection_id: String,
+    job_id: String,
+) -> Result<String, String> {
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    training_jobs::read_log(&app_data, &connection_id, &job_id).await
+}
+
+/// Run `convert_lora_to_gguf.py` to materialise the GGUF adapter next
+/// to the peft checkpoint, without touching the sidecar. Useful when
+/// the user wants the file produced eagerly (e.g. to inspect or copy).
+#[tauri::command]
+pub async fn training_convert_model(
+    app: AppHandle,
+    model_id: String,
+) -> Result<String, String> {
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let model = trained_models::list(&app_data)
+        .await
+        .into_iter()
+        .find(|m| m.id == model_id)
+        .ok_or_else(|| format!("trained model not found: {model_id}"))?;
+    let path = crate::ai::training::convert::ensure_converted(
+        app.clone(),
+        &app_data,
+        &model,
+    )
+    .await?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Activate a trained adapter on the inline-AI sidecar. Converts to
+/// GGUF on demand, then (re)starts llama-server with `--lora`. The
+/// caller passes the current inline-AI tuning preferences so the
+/// user's ctx-size / cpu-only settings are honoured — otherwise we'd
+/// silently override them.
+#[tauri::command]
+pub async fn training_activate_model(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    model_id: String,
+    ctx_size: Option<u32>,
+    cpu_only: Option<bool>,
+) -> Result<u16, String> {
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let model = trained_models::list(&app_data)
+        .await
+        .into_iter()
+        .find(|m| m.id == model_id)
+        .ok_or_else(|| format!("trained model not found: {model_id}"))?;
+
+    let gguf_path = crate::ai::training::convert::ensure_converted(
+        app.clone(),
+        &app_data,
+        &model,
+    )
+    .await?;
+
+    let opts = StartOptions {
+        ctx_size: ctx_size.unwrap_or(4096),
+        n_gpu_layers: 999,
+        cpu_only: cpu_only.unwrap_or(false),
+        lora_path: Some(gguf_path),
+        lora_model_id: Some(model.id.clone()),
+    };
+    state
+        .inline_ai
+        .sidecar
+        .start(app, model.base_model_id, opts)
+        .await
+}
+
+/// Drop the LoRA and restart on the base model alone. Same
+/// ctx-size / cpu-only plumbing as `training_activate_model`.
+#[tauri::command]
+pub async fn training_deactivate_model(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ctx_size: Option<u32>,
+    cpu_only: Option<bool>,
+) -> Result<(), String> {
+    let status = state.inline_ai.sidecar.status().await;
+    let model_id = match status {
+        SidecarStatus::Ready { model_id, .. } | SidecarStatus::Starting { model_id, .. } => {
+            Some(model_id)
+        }
+        _ => None,
+    };
+    let Some(model_id) = model_id else {
+        state.inline_ai.sidecar.stop(app).await;
+        return Ok(());
+    };
+
+    let opts = StartOptions {
+        ctx_size: ctx_size.unwrap_or(4096),
+        n_gpu_layers: 999,
+        cpu_only: cpu_only.unwrap_or(false),
+        lora_path: None,
+        lora_model_id: None,
+    };
+    state
+        .inline_ai
+        .sidecar
+        .start(app, model_id, opts)
+        .await
+        .map(|_| ())
 }

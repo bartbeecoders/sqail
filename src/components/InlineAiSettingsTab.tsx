@@ -1,5 +1,5 @@
 import { Download, Play, RotateCcw, Square, Trash2, Loader2, AlertTriangle, CheckCircle2 } from "lucide-react";
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 
 import { cn } from "../lib/utils";
 import {
@@ -8,6 +8,7 @@ import {
   type ModelListItem,
   type DownloadState,
 } from "../stores/inlineAiStore";
+import { useTrainingStore } from "../stores/trainingStore";
 
 /** Shared shape for the model + binary progress bars. */
 interface ProgressSnapshot {
@@ -26,6 +27,18 @@ interface ProgressSnapshot {
  */
 export default function InlineAiSettingsTab() {
   const s = useInlineAiStore();
+  // Trained adapters come from the training store (single source of
+  // truth — `training:done` events refresh it at app level).
+  const trainedModels = useTrainingStore((x) => x.trainedModels);
+  const refreshTrainedModels = useTrainingStore(
+    (x) => x.refreshTrainedModels,
+  );
+  // Also re-pull the list every time this tab mounts so a user who
+  // just finished training sees the adapter immediately — no need to
+  // switch tabs.
+  useEffect(() => {
+    void refreshTrainedModels();
+  }, [refreshTrainedModels]);
   const selectedModel = s.models.find((m) => m.id === s.modelId);
 
   return (
@@ -82,10 +95,24 @@ export default function InlineAiSettingsTab() {
               <ModelRow
                 key={m.id}
                 model={m}
-                selected={m.id === s.modelId}
+                selected={m.id === s.modelId && s.trainedModelId === null}
                 progress={s.downloads[m.id]}
               />
             ))
+          )}
+          {trainedModels.length > 0 && (
+            <>
+              <div className="pt-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Your trained adapters
+              </div>
+              {trainedModels.map((tm) => (
+                <TrainedModelRow
+                  key={tm.id}
+                  adapter={tm}
+                  selected={s.trainedModelId === tm.id}
+                />
+              ))}
+            </>
           )}
         </div>
       </section>
@@ -483,7 +510,12 @@ function ModelRow({
             type="radio"
             name="inline-ai-model"
             checked={selected}
-            onChange={() => actions.updateSetting("modelId", model.id)}
+            onChange={() => {
+              actions.updateSetting("modelId", model.id);
+              // Picking the raw base clears any active adapter so the
+              // next sidecar restart goes back to the unadorned model.
+              actions.updateSetting("trainedModelId", null);
+            }}
             className="mt-0.5"
           />
           <div className="min-w-0 flex-1">
@@ -523,6 +555,70 @@ function ModelRow({
       {progress && !isTerminalSuccess(progress.phase) && (
         <ProgressBar state={progress} className="mt-2" />
       )}
+    </div>
+  );
+}
+
+function TrainedModelRow({
+  adapter,
+  selected,
+}: {
+  adapter: import("../types/training").TrainedModel;
+  selected: boolean;
+}) {
+  const actions = useInlineAiStore();
+  const baseExists = actions.models.some((m) => m.id === adapter.baseModelId);
+  const baseDownloaded =
+    actions.models.find((m) => m.id === adapter.baseModelId)?.downloaded ??
+    false;
+
+  return (
+    <div
+      className={cn(
+        "rounded-md border p-3 text-xs",
+        selected
+          ? "border-primary/50 bg-primary/5"
+          : "border-border bg-muted/10",
+      )}
+    >
+      <label className="flex cursor-pointer items-start gap-2">
+        <input
+          type="radio"
+          name="inline-ai-model"
+          checked={selected}
+          disabled={!baseExists || !baseDownloaded}
+          onChange={() => {
+            // Selecting an adapter implies using its base model — keep
+            // the two fields in sync so the sidecar boots the right
+            // pair on restart.
+            actions.updateSetting("modelId", adapter.baseModelId);
+            actions.updateSetting("trainedModelId", adapter.id);
+          }}
+          className="mt-0.5"
+        />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="font-medium">{adapter.displayName}</span>
+            <span className="rounded bg-indigo-500/15 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700 dark:text-indigo-300">
+              adapter
+            </span>
+            {adapter.ggufPath && (
+              <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-300">
+                GGUF ready
+              </span>
+            )}
+          </div>
+          <div className="mt-0.5 text-[11px] text-muted-foreground">
+            base <code>{adapter.baseModelId}</code> ·{" "}
+            {adapter.exampleCount} examples · {adapter.tableCount} tables
+            {!baseDownloaded && (
+              <span className="ml-1 text-warning">
+                · base model not downloaded
+              </span>
+            )}
+          </div>
+        </div>
+      </label>
     </div>
   );
 }

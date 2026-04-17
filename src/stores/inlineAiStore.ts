@@ -7,6 +7,10 @@ const STORAGE_KEY = "sqail_inline_ai_settings";
 export interface InlineAiSettings {
   enabled: boolean;
   modelId: string;
+  /** Trained-adapter id to apply on top of `modelId`, or `null` for the
+   *  raw base model. When set, `modelId` must match the adapter's base
+   *  (enforced by the picker). */
+  trainedModelId: string | null;
   autoStart: boolean;
   debounceMs: number;
   maxTokens: number;
@@ -26,6 +30,7 @@ export interface InlineAiSettings {
 const DEFAULTS: InlineAiSettings = {
   enabled: false,
   modelId: "qwen-coder-3b-q4",
+  trainedModelId: null,
   autoStart: true,
   debounceMs: 150,
   maxTokens: 48,
@@ -39,8 +44,8 @@ const DEFAULTS: InlineAiSettings = {
 /** Mirror of Rust-side `SidecarStatus`. */
 export type SidecarState =
   | { state: "stopped" }
-  | { state: "starting"; modelId: string }
-  | { state: "ready"; modelId: string; port: number }
+  | { state: "starting"; modelId: string; activeLoraId?: string }
+  | { state: "ready"; modelId: string; port: number; activeLoraId?: string }
   | { state: "error"; message: string };
 
 /** One entry in the model catalog with on-disk presence info. */
@@ -166,6 +171,7 @@ export const useInlineAiStore = create<InlineAiState>((set, get) => ({
     const toSave: InlineAiSettings = {
       enabled: snapshot.enabled,
       modelId: snapshot.modelId,
+      trainedModelId: snapshot.trainedModelId,
       autoStart: snapshot.autoStart,
       debounceMs: snapshot.debounceMs,
       maxTokens: snapshot.maxTokens,
@@ -230,12 +236,16 @@ export const useInlineAiStore = create<InlineAiState>((set, get) => ({
   },
 
   startSidecar: async () => {
-    const { modelId, ctxSize, cpuOnly } = get();
+    const { modelId, ctxSize, cpuOnly, trainedModelId } = get();
     try {
       await invoke("inline_sidecar_start", {
         modelId,
         ctxSize,
         cpuOnly,
+        // Only send `trainedModelId` when one is actually selected.
+        // Passing an empty string tripped the trained-model lookup
+        // earlier and broke plain-base starts.
+        ...(trainedModelId ? { trainedModelId } : {}),
       });
     } catch (e) {
       set({ sidecar: { state: "error", message: String(e) } });

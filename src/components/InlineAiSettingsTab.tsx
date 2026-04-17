@@ -156,6 +156,12 @@ export default function InlineAiSettingsTab() {
               onChange={(v) => s.updateSetting("cpuOnly", v)}
             />
           </Row>
+          <Row label="Use as default AI provider">
+            <Toggle
+              checked={s.useAsDefaultProvider}
+              onChange={(v) => s.updateSetting("useAsDefaultProvider", v)}
+            />
+          </Row>
           <Row label="Show latency telemetry">
             <Toggle
               checked={s.devMode}

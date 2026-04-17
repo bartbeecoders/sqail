@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+## v0.5.2
+
+### Inline AI
+- New **Use as default AI provider** toggle in Settings → Inline AI — when on (and inline AI is enabled + sidecar ready), the AI command palette routes flows with no explicit provider selection through the local sidecar instead of the persisted default
+
 ## v0.5.1
 
 ### Inline AI

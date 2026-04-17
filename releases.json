@@ -1,5 +1,16 @@
 [
   {
+    "version": "0.5.2",
+    "sections": [
+      {
+        "title": "Inline AI",
+        "items": [
+          "New 'Use as default AI provider' toggle in Settings \u2192 Inline AI \u2014 when on (and inline AI is enabled + sidecar ready), the AI command palette routes flows with no explicit provider selection through the local sidecar instead of the persisted default"
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.5.1",
     "sections": [
       {

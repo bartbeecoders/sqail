@@ -3,6 +3,21 @@ import { invoke } from "@tauri-apps/api/core";
 import type { AiProviderConfig, AiFlow, AiHistoryEntry, OpenRouterModel } from "../types/ai";
 import { useEditorStore } from "./editorStore";
 import { stripThinkingBlocks, stripWrappingCodeFence } from "../lib/stripThinking";
+import {
+  inlineIsEffectiveDefault,
+  selectVirtualInlineProvider,
+} from "../lib/inlineProvider";
+import { INLINE_LOCAL_PROVIDER_ID } from "../types/ai";
+
+/** Resolve the provider id to send to the backend for a flow.
+ *  - If the user explicitly picked a provider in the palette, honour that.
+ *  - Else if inline-as-default is active, route to the sidecar.
+ *  - Else null (backend picks the persisted default). */
+function resolveDispatchProviderId(selected: string | null): string | null {
+  if (selected) return selected;
+  if (inlineIsEffectiveDefault()) return INLINE_LOCAL_PROVIDER_ID;
+  return null;
+}
 
 /** Flows whose response should be bare SQL — strip a wrapping ```sql fence if present. */
 const SQL_RESPONSE_FLOWS: ReadonlySet<AiFlow> = new Set([
@@ -158,6 +173,10 @@ export const useAiStore = create<AiState>((set, get) => ({
   },
 
   getDefaultProvider: () => {
+    if (inlineIsEffectiveDefault()) {
+      const v = selectVirtualInlineProvider();
+      if (v) return v;
+    }
     const { providers } = get();
     return providers.find((p) => p.isDefault) ?? providers[0];
   },
@@ -195,7 +214,7 @@ export const useAiStore = create<AiState>((set, get) => ({
   },
 
   generateSql: async (prompt, schemaContext, driver) => {
-    const providerId = get().selectedProviderId;
+    const providerId = resolveDispatchProviderId(get().selectedProviderId);
     set({ streaming: true, currentResponse: "", error: null, currentFlow: "generate_sql" });
     try {
       const requestId = await invoke<string>("ai_generate_sql", { prompt, schemaContext, driver, providerId });
@@ -206,7 +225,7 @@ export const useAiStore = create<AiState>((set, get) => ({
   },
 
   explainQuery: async (sql, schemaContext, driver) => {
-    const providerId = get().selectedProviderId;
+    const providerId = resolveDispatchProviderId(get().selectedProviderId);
     set({ streaming: true, currentResponse: "", error: null, currentFlow: "explain" });
     try {
       const requestId = await invoke<string>("ai_explain_query", { sql, schemaContext, driver, providerId });
@@ -217,7 +236,7 @@ export const useAiStore = create<AiState>((set, get) => ({
   },
 
   optimizeQuery: async (sql, schemaContext, driver) => {
-    const providerId = get().selectedProviderId;
+    const providerId = resolveDispatchProviderId(get().selectedProviderId);
     set({ streaming: true, currentResponse: "", error: null, currentFlow: "optimize" });
     try {
       const requestId = await invoke<string>("ai_optimize_query", { sql, schemaContext, driver, providerId });
@@ -228,7 +247,7 @@ export const useAiStore = create<AiState>((set, get) => ({
   },
 
   generateDocs: async (schemaContext, driver) => {
-    const providerId = get().selectedProviderId;
+    const providerId = resolveDispatchProviderId(get().selectedProviderId);
     set({ streaming: true, currentResponse: "", error: null, currentFlow: "document" });
     try {
       const requestId = await invoke<string>("ai_generate_docs", { schemaContext, driver, providerId });
@@ -239,7 +258,7 @@ export const useAiStore = create<AiState>((set, get) => ({
   },
 
   formatSql: async (sql, schemaContext, driver) => {
-    const providerId = get().selectedProviderId;
+    const providerId = resolveDispatchProviderId(get().selectedProviderId);
     set({ streaming: true, currentResponse: "", error: null, currentFlow: "format_sql" });
     try {
       const requestId = await invoke<string>("ai_format_sql", { sql, schemaContext, driver, providerId });
@@ -250,7 +269,7 @@ export const useAiStore = create<AiState>((set, get) => ({
   },
 
   commentSql: async (sql, schemaContext, driver) => {
-    const providerId = get().selectedProviderId;
+    const providerId = resolveDispatchProviderId(get().selectedProviderId);
     set({ streaming: true, currentResponse: "", error: null, currentFlow: "comment_sql" });
     try {
       const requestId = await invoke<string>("ai_comment_sql", { sql, schemaContext, driver, providerId });
@@ -261,7 +280,7 @@ export const useAiStore = create<AiState>((set, get) => ({
   },
 
   fixQuery: async (sql, errorMessage, schemaContext, driver) => {
-    const providerId = get().selectedProviderId;
+    const providerId = resolveDispatchProviderId(get().selectedProviderId);
     set({ streaming: true, currentResponse: "", error: null, currentFlow: "fix_query" });
     try {
       const requestId = await invoke<string>("ai_fix_query", {

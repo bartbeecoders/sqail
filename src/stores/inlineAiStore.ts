@@ -15,6 +15,12 @@ export interface InlineAiSettings {
   ctxSize: number;
   /** When true, show a per-completion latency table in the settings tab. */
   devMode: boolean;
+  /**
+   * When true (and inline AI is enabled and the sidecar is ready), the AI
+   * assistant palette routes flows with no explicit provider selection
+   * through the local sidecar instead of the persisted default.
+   */
+  useAsDefaultProvider: boolean;
 }
 
 const DEFAULTS: InlineAiSettings = {
@@ -27,6 +33,7 @@ const DEFAULTS: InlineAiSettings = {
   cpuOnly: false,
   ctxSize: 4096,
   devMode: false,
+  useAsDefaultProvider: false,
 };
 
 /** Mirror of Rust-side `SidecarStatus`. */
@@ -166,6 +173,7 @@ export const useInlineAiStore = create<InlineAiState>((set, get) => ({
       cpuOnly: snapshot.cpuOnly,
       ctxSize: snapshot.ctxSize,
       devMode: snapshot.devMode,
+      useAsDefaultProvider: snapshot.useAsDefaultProvider,
     };
     saveSettings(toSave);
   },

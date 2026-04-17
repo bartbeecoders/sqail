@@ -14,10 +14,10 @@ import { useEditorStore } from "../stores/editorStore";
 import { useConnectionStore } from "../stores/connectionStore";
 import { useInlineAiStore } from "../stores/inlineAiStore";
 import { buildSchemaContext } from "../lib/schemaContext";
+import { buildVirtualInlineProvider } from "../lib/inlineProvider";
 import {
   AI_FLOW_LABELS,
   AI_PROVIDER_LABELS,
-  INLINE_LOCAL_PROVIDER_ID,
 } from "../types/ai";
 import type { AiFlow, AiHistoryEntry, AiProviderConfig } from "../types/ai";
 import { invoke } from "@tauri-apps/api/core";
@@ -95,20 +95,11 @@ export default function AiCommandPalette() {
   const inlineEnabled = useInlineAiStore((s) => s.enabled);
   const inlineSidecar = useInlineAiStore((s) => s.sidecar);
   const inlineModels = useInlineAiStore((s) => s.models);
-  const virtualInlineProvider = useMemo<AiProviderConfig | null>(() => {
-    if (!inlineEnabled) return null;
-    if (inlineSidecar.state !== "ready") return null;
-    const model = inlineModels.find((m) => m.id === inlineSidecar.modelId);
-    const label = model?.displayName ?? inlineSidecar.modelId;
-    return {
-      id: INLINE_LOCAL_PROVIDER_ID,
-      name: `Local (${label})`,
-      provider: "inlineLocal",
-      apiKey: "",
-      model: inlineSidecar.modelId,
-      isDefault: false,
-    };
-  }, [inlineEnabled, inlineSidecar, inlineModels]);
+  const inlineUseAsDefault = useInlineAiStore((s) => s.useAsDefaultProvider);
+  const virtualInlineProvider = useMemo<AiProviderConfig | null>(
+    () => buildVirtualInlineProvider(inlineEnabled, inlineSidecar, inlineModels),
+    [inlineEnabled, inlineSidecar, inlineModels],
+  );
 
   const displayProviders = useMemo<AiProviderConfig[]>(() => {
     return virtualInlineProvider
@@ -117,7 +108,10 @@ export default function AiCommandPalette() {
   }, [providers, virtualInlineProvider]);
 
   const hasProvider = displayProviders.length > 0;
-  const defaultProvider = getDefaultProvider();
+  const defaultProvider =
+    inlineUseAsDefault && virtualInlineProvider
+      ? virtualInlineProvider
+      : getDefaultProvider();
 
   // Load providers on mount
   useEffect(() => {

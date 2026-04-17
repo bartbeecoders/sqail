@@ -10,6 +10,7 @@
 //!
 //! Phase C (FIM completer) will land in `completer.rs` alongside these.
 
+pub mod binaries;
 pub mod completer;
 pub mod fim;
 pub mod models;

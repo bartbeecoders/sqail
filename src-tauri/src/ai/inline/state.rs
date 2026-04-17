@@ -14,6 +14,8 @@ pub struct InlineAiState {
     pub sidecar: Arc<SidecarManager>,
     /// Cancel flags for in-flight model downloads, keyed by model id.
     pub downloads: Mutex<HashMap<String, Arc<Notify>>>,
+    /// Cancel flag for the in-flight sidecar-binary download (if any).
+    pub binary_download: Mutex<Option<Arc<Notify>>>,
     /// Registry of in-flight FIM completion requests.
     pub completions: Arc<CompletionRegistry>,
 }
@@ -23,6 +25,7 @@ impl InlineAiState {
         Self {
             sidecar: Arc::new(SidecarManager::new()),
             downloads: Mutex::new(HashMap::new()),
+            binary_download: Mutex::new(None),
             completions: Arc::new(CompletionRegistry::new()),
         }
     }

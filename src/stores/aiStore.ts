@@ -2,7 +2,24 @@ import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import type { AiProviderConfig, AiFlow, AiHistoryEntry, OpenRouterModel } from "../types/ai";
 import { useEditorStore } from "./editorStore";
-import { stripThinkingBlocks } from "../lib/stripThinking";
+import { stripThinkingBlocks, stripWrappingCodeFence } from "../lib/stripThinking";
+
+/** Flows whose response should be bare SQL — strip a wrapping ```sql fence if present. */
+const SQL_RESPONSE_FLOWS: ReadonlySet<AiFlow> = new Set([
+  "generate_sql",
+  "optimize",
+  "format_sql",
+  "comment_sql",
+  "fix_query",
+]);
+
+function normalizeResponse(flow: AiFlow | null, text: string): string {
+  const stripped = stripThinkingBlocks(text);
+  if (flow && SQL_RESPONSE_FLOWS.has(flow)) {
+    return stripWrappingCodeFence(stripped);
+  }
+  return stripped;
+}
 
 interface PaletteOptions {
   flow?: AiFlow;
@@ -264,14 +281,18 @@ export const useAiStore = create<AiState>((set, get) => ({
     const state = get();
     if (state.currentRequestId === requestId) {
       const raw = state.currentResponse + chunk;
-      set({ currentResponse: stripThinkingBlocks(raw) });
+      set({ currentResponse: normalizeResponse(state.currentFlow, raw) });
     }
   },
 
   finishStream: (requestId, fullText) => {
     const state = get();
     if (state.currentRequestId === requestId) {
-      set({ streaming: false, currentResponse: stripThinkingBlocks(fullText), currentRequestId: null });
+      set({
+        streaming: false,
+        currentResponse: normalizeResponse(state.currentFlow, fullText),
+        currentRequestId: null,
+      });
     }
   },
 

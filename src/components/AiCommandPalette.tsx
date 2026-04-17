@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   Sparkles,
   Loader2,
@@ -12,9 +12,14 @@ import {
 import { useAiStore } from "../stores/aiStore";
 import { useEditorStore } from "../stores/editorStore";
 import { useConnectionStore } from "../stores/connectionStore";
+import { useInlineAiStore } from "../stores/inlineAiStore";
 import { buildSchemaContext } from "../lib/schemaContext";
-import { AI_FLOW_LABELS, AI_PROVIDER_LABELS } from "../types/ai";
-import type { AiFlow, AiHistoryEntry } from "../types/ai";
+import {
+  AI_FLOW_LABELS,
+  AI_PROVIDER_LABELS,
+  INLINE_LOCAL_PROVIDER_ID,
+} from "../types/ai";
+import type { AiFlow, AiHistoryEntry, AiProviderConfig } from "../types/ai";
 import { invoke } from "@tauri-apps/api/core";
 
 const PREFIX_COMMANDS: Record<string, AiFlow> = {
@@ -83,7 +88,35 @@ export default function AiCommandPalette() {
   const activeConn = connections.find((c) => c.id === activeConnectionId);
   const driver = activeConn?.driver ?? "";
 
-  const hasProvider = providers.length > 0;
+  // Expose the running local inline sidecar as a synthetic provider when
+  // inline AI is enabled AND the sidecar is actually Ready. The entry has
+  // no persistent config — the backend recognises its sentinel id and
+  // routes the request straight at `http://127.0.0.1:<port>/v1`.
+  const inlineEnabled = useInlineAiStore((s) => s.enabled);
+  const inlineSidecar = useInlineAiStore((s) => s.sidecar);
+  const inlineModels = useInlineAiStore((s) => s.models);
+  const virtualInlineProvider = useMemo<AiProviderConfig | null>(() => {
+    if (!inlineEnabled) return null;
+    if (inlineSidecar.state !== "ready") return null;
+    const model = inlineModels.find((m) => m.id === inlineSidecar.modelId);
+    const label = model?.displayName ?? inlineSidecar.modelId;
+    return {
+      id: INLINE_LOCAL_PROVIDER_ID,
+      name: `Local (${label})`,
+      provider: "inlineLocal",
+      apiKey: "",
+      model: inlineSidecar.modelId,
+      isDefault: false,
+    };
+  }, [inlineEnabled, inlineSidecar, inlineModels]);
+
+  const displayProviders = useMemo<AiProviderConfig[]>(() => {
+    return virtualInlineProvider
+      ? [...providers, virtualInlineProvider]
+      : providers;
+  }, [providers, virtualInlineProvider]);
+
+  const hasProvider = displayProviders.length > 0;
   const defaultProvider = getDefaultProvider();
 
   // Load providers on mount
@@ -304,9 +337,9 @@ export default function AiCommandPalette() {
             </span>
           )}
           <div className="flex-1" />
-          {providers.length > 0 && (
+          {displayProviders.length > 0 && (
             <ProviderDropdown
-              providers={providers}
+              providers={displayProviders}
               selectedId={selectedProviderId}
               defaultProvider={defaultProvider}
               onSelect={setSelectedProviderId}

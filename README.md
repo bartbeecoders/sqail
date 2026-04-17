@@ -43,7 +43,7 @@ On a desktop-class NVIDIA GPU (RTX 4080 Super) the default model hits **~6 ms fi
 
 Feature is **off by default** — you have to flip the toggle. Nothing is downloaded or run until you do.
 
-**v0.5.0 note:** prebuilt `llama-server` binaries for Windows/macOS are not yet bundled with the installer. Either point at an existing OpenAI-compatible local endpoint (Ollama, LM Studio) in the settings, or supply your own `llama-server` build via the `SQAIL_LLAMA_SERVER_PATH` env var. Linux users can run `./scripts/fetch-llama-cpp.sh` to build one with CUDA.
+**Sidecar runtime:** sqail fetches the `llama-server` binary from the official [llama.cpp release](https://github.com/ggml-org/llama.cpp/releases) on first enable — Windows Vulkan, macOS Metal (arm64 / x86_64), Linux Vulkan. Downloaded once into `<app_data>/inline-ai/bin/` and cached. Power users can override with `SQAIL_LLAMA_SERVER_PATH` (e.g. to run a CUDA build).
 
 ## Install
 

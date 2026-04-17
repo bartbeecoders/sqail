@@ -4,6 +4,15 @@
 
 ## Unreleased
 
+## v0.5.1
+
+### Inline AI
+- Sidecar runtime auto-download: first enable fetches the platform-appropriate `llama-server` (Windows Vulkan, macOS Metal, Linux Vulkan) from the upstream llama.cpp release and caches it under app-data — no manual install step
+- New **Sidecar runtime** row in Settings → Inline AI with status / Download / Delete / cancel
+- `SQAIL_LLAMA_SERVER_PATH` still overrides for power users who want CUDA or a custom build
+- AI assistant palette: new synthetic "Local (Inline AI)" provider entry appears when inline AI is enabled and the sidecar is ready — selects route through the running llama-server
+- Strips wrapping ```sql code fences from SQL-flow responses so local instruct models don't leak markdown into the editor
+
 ## v0.5.0
 
 ### Inline AI completion

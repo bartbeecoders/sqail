@@ -132,17 +132,24 @@ export default function InlineAiSettingsTab() {
             />
           </Row>
           <Row label="Context window (tokens)">
-            <select
-              value={s.ctxSize}
-              onChange={(e) =>
-                s.updateSetting("ctxSize", Number(e.target.value))
-              }
-              className="input w-28"
-            >
-              <option value={2048}>2048</option>
-              <option value={4096}>4096</option>
-              <option value={8192}>8192</option>
-            </select>
+            <div className="flex flex-col items-end gap-0.5">
+              <select
+                value={s.ctxSize}
+                onChange={(e) =>
+                  s.updateSetting("ctxSize", Number(e.target.value))
+                }
+                className="input w-28"
+              >
+                <option value={2048}>2048</option>
+                <option value={4096}>4096</option>
+                <option value={8192}>8192</option>
+                <option value={16384}>16384</option>
+                <option value={32768}>32768</option>
+              </select>
+              <span className="text-[10px] text-muted-foreground">
+                Restart sidecar to apply · higher = more VRAM
+              </span>
+            </div>
           </Row>
           <Row label="Auto-start sidecar on launch">
             <Toggle

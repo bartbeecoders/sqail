@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+## v0.5.3
+
+### Inline AI
+- Fix "Starting undefined" label during sidecar startup — the `Starting` variant of the Rust-side sidecar status was emitted with snake_case `model_id` while the frontend expected camelCase `modelId`. Applied `rename_all_fields = "camelCase"` to the enum so all variants convert consistently
+- Context window dropdown widened to 16384 / 32768 for users routing AI-assistant flows (explain / optimize / docs) through the local sidecar — the default 4096 overflows on schema-heavy prompts. Helper text notes that a sidecar restart is required to apply
+
 ## v0.5.2
 
 ### Inline AI

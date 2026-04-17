@@ -32,11 +32,14 @@ const MAX_RESTARTS: u32 = 3;
 
 /// State machine visible to the frontend.
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "state", rename_all = "camelCase")]
+#[serde(
+    tag = "state",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum SidecarStatus {
     Stopped,
     Starting { model_id: String },
-    #[serde(rename_all = "camelCase")]
     Ready { model_id: String, port: u16 },
     Error { message: String },
 }

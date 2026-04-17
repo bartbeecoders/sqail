@@ -1,5 +1,17 @@
 [
   {
+    "version": "0.5.3",
+    "sections": [
+      {
+        "title": "Inline AI",
+        "items": [
+          "Fix 'Starting undefined' label during sidecar startup \u2014 the Starting variant of the sidecar status was emitted with snake_case model_id while the frontend expected camelCase modelId",
+          "Context window dropdown widened to 16384 / 32768 for users routing AI-assistant flows (explain / optimize / docs) through the local sidecar; a sidecar restart is required to apply"
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.5.2",
     "sections": [
       {

@@ -423,6 +423,24 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Verify updater signatures are present
+        run: |
+          PREFIX="${{ needs.prepare.outputs.file_prefix }}"
+          missing=0
+          for f in \
+            "artifacts/${PREFIX}_amd64.AppImage.sig" \
+            "artifacts/${PREFIX}_x64-setup.nsis.zip.sig" \
+            "artifacts/${PREFIX}_universal.app.tar.gz.sig"; do
+            if [ ! -s "$f" ]; then
+              echo "::error::Missing updater signature: $f"
+              missing=$((missing + 1))
+            fi
+          done
+          if [ "$missing" -gt 0 ]; then
+            echo "::error::Updater signing is not configured. Set TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD secrets, or the release will ship a manifest with empty signatures that the client cannot parse (issue #34)."
+            exit 1
+          fi
+
       - name: Generate latest.json for Tauri updater
         run: |
           VERSION="${{ needs.prepare.outputs.app_version }}"
@@ -432,13 +450,11 @@ jobs:
           TAG="v${VERSION}"
           BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
 
-          # Read signature files (may not exist if signing key wasn't set)
-          LINUX_SIG=""
-          WINDOWS_SIG=""
-          MACOS_SIG=""
-          [ -f "artifacts/${PREFIX}_amd64.AppImage.sig" ] && LINUX_SIG=$(cat "artifacts/${PREFIX}_amd64.AppImage.sig")
-          [ -f "artifacts/${PREFIX}_x64-setup.nsis.zip.sig" ] && WINDOWS_SIG=$(cat "artifacts/${PREFIX}_x64-setup.nsis.zip.sig")
-          [ -f "artifacts/${PREFIX}_universal.app.tar.gz.sig" ] && MACOS_SIG=$(cat "artifacts/${PREFIX}_universal.app.tar.gz.sig")
+          # Signatures are verified present by the preceding step —
+          # reading them here is now infallible.
+          LINUX_SIG=$(cat "artifacts/${PREFIX}_amd64.AppImage.sig")
+          WINDOWS_SIG=$(cat "artifacts/${PREFIX}_x64-setup.nsis.zip.sig")
+          MACOS_SIG=$(cat "artifacts/${PREFIX}_universal.app.tar.gz.sig")
 
           # Extract release notes from releases.json
           NOTES=$(python3 -c "

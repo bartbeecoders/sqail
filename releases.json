@@ -1,5 +1,18 @@
 [
   {
+    "version": "0.5.4",
+    "sections": [
+      {
+        "title": "Auto-update (fix #34)",
+        "items": [
+          "Populate the updater public key in tauri.conf.json so installed apps can verify minisign signatures. The key was empty since v0.4.2, causing 'invalid encoding in minisign data' on Windows updates",
+          "CI hard-fails the release when any per-platform .sig file is missing, preventing the release pipeline from silently publishing a manifest with empty signatures",
+          "One-time action required: manually install v0.5.4 once \u2014 the auto-updater in older installs can't validate the new signature chain"
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.5.3",
     "sections": [
       {

@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "sqail",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "identifier": "dev.sqail",
   "build": {
     "frontendDist": "../dist",
@@ -33,7 +33,7 @@
       "endpoints": [
         "https://github.com/bartbeecoders/sqail/releases/latest/download/latest.json"
       ],
-      "pubkey": ""
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ5MjFDQTQ3OTJBRkZGNjMKUldSai82K1NSOG9oMlhuOU1DYzZzNzhkdVMrdW91S1lFbmo5NEZ2QXAvU21CVmVTdldyb1hrSG0K"
     }
   },
   "bundle": {

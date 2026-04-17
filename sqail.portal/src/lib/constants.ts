@@ -1,4 +1,4 @@
-export const VERSION = "0.5.3";
+export const VERSION = "0.5.4";
 export const BUILD_NUMBER = "20260411-1";
 export const GITHUB_URL = "https://github.com/bartbeecoders/sqail";
 

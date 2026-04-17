@@ -60,3 +60,9 @@ CLAUDE.md
 # Raw screenshot captures — framed versions are committed under
 # sqail.portal/public/screenshots/, raws are local-only.
 marketing/screenshots-raw/
+
+# Inline AI spike: llama.cpp binaries + GGUF models (multi-GB, downloaded on demand)
+.cache/
+
+# Python bytecode cache from benchmark scripts
+__pycache__/

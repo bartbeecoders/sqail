@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { X, RotateCcw, Settings, Keyboard, Info, Code2, Plus, Trash2, Pencil, Sparkles, Check } from "lucide-react";
+import { X, RotateCcw, Settings, Keyboard, Info, Code2, Plus, Trash2, Pencil, Sparkles, Check, Zap } from "lucide-react";
 import { check } from "@tauri-apps/plugin-updater";
 import { cn } from "../lib/utils";
 import { useShortcutStore } from "../stores/shortcutStore";
@@ -9,6 +9,7 @@ import { useAiStore } from "../stores/aiStore";
 import { AI_PROVIDER_LABELS } from "../types/ai";
 import type { AiProviderConfig } from "../types/ai";
 import AiProviderForm from "./AiProviderForm";
+import InlineAiSettingsTab from "./InlineAiSettingsTab";
 import {
   SHORTCUT_ACTIONS,
   CATEGORY_LABELS,
@@ -20,7 +21,13 @@ interface SettingsModalProps {
   initialTab?: SettingsTab;
 }
 
-type SettingsTab = "general" | "ai" | "shortcuts" | "snippets" | "about";
+export type SettingsTab =
+  | "general"
+  | "ai"
+  | "inline-ai"
+  | "shortcuts"
+  | "snippets"
+  | "about";
 
 export default function SettingsModal({ onClose, initialTab = "general" }: SettingsModalProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
@@ -55,6 +62,12 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Setti
               onClick={() => setActiveTab("ai")}
             />
             <TabButton
+              active={activeTab === "inline-ai"}
+              icon={<Zap size={14} />}
+              label="Inline AI"
+              onClick={() => setActiveTab("inline-ai")}
+            />
+            <TabButton
               active={activeTab === "shortcuts"}
               icon={<Keyboard size={14} />}
               label="Keyboard Shortcuts"
@@ -78,6 +91,7 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Setti
           <div className="flex-1 overflow-y-auto p-5">
             {activeTab === "general" && <GeneralTab />}
             {activeTab === "ai" && <AiProvidersTab />}
+            {activeTab === "inline-ai" && <InlineAiSettingsTab />}
             {activeTab === "shortcuts" && <ShortcutsTab />}
             {activeTab === "snippets" && <SnippetsTab />}
             {activeTab === "about" && <AboutTab />}

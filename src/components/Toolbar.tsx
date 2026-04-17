@@ -3,6 +3,8 @@ import { Play, AlignLeft, Trash2, Sparkles, Loader2, Settings, ChevronDown, Mess
 import { cn } from "../lib/utils";
 import { useAiStore } from "../stores/aiStore";
 import { useEditorStore } from "../stores/editorStore";
+import InlineAiIndicator from "./InlineAiIndicator";
+import type { SettingsTab } from "./SettingsModal";
 
 interface ToolbarProps {
   onRun?: () => void;
@@ -11,7 +13,7 @@ interface ToolbarProps {
   onClear?: () => void;
   hasConnection?: boolean;
   loading?: boolean;
-  onOpenSettings?: () => void;
+  onOpenSettings?: (initialTab?: SettingsTab) => void;
   infoPanelOpen?: boolean;
   onToggleInfoPanel?: () => void;
 }
@@ -83,6 +85,8 @@ export default function Toolbar({ onRun, onFormat, onFormatWithComments, onClear
       {/* Spacer to push settings to the right */}
       <div className="flex-1" />
 
+      <InlineAiIndicator onOpen={() => onOpenSettings?.("inline-ai")} />
+
       <button
         onClick={onToggleInfoPanel}
         className={cn(
@@ -96,7 +100,7 @@ export default function Toolbar({ onRun, onFormat, onFormatWithComments, onClear
         <BookOpen size={14} />
       </button>
       <button
-        onClick={onOpenSettings}
+        onClick={() => onOpenSettings?.()}
         className="flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
         title="Settings (Ctrl+,)"
       >

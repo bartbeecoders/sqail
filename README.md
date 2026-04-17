@@ -23,8 +23,27 @@ It speaks PostgreSQL, MySQL, SQLite, and Microsoft SQL Server today. It uses the
 - Schema browser, connection manager, and SSH tunnel support
 - AI command palette: format, explain, optimize, generate SQL from natural language
 - Multi-provider AI: Claude, OpenAI, Minimax, Z.ai, LM Studio, Claude Code CLI, OpenAI-compatible
+- **Inline AI completion** — ghost-text SQL suggestions from a local llama.cpp sidecar, opt-in, no cloud calls
 - Keyboard-first shortcuts, fully customizable
 - Privacy-respecting: credentials in local encrypted SurrealDB, no telemetry
+
+## Inline AI completion
+
+Ghost-text SQL suggestions powered by a local [llama.cpp](https://github.com/ggml-org/llama.cpp) sidecar — no network round-trips, nothing leaves your machine. Toggle it on in **Settings → Inline AI**, pick a model, and it starts suggesting completions as you type. Press `Tab` to accept, `Esc` to dismiss.
+
+Models are all Q4_K_M GGUF quants. Pick one from the catalog; it's downloaded once into your app-data dir and cached for life.
+
+| Tier | Model | VRAM | Download | Notes |
+| --- | --- | --- | --- | --- |
+| Default | Qwen2.5-Coder-3B | 2.5 GB | 2 GB | Fits any GPU ≥ 4 GB. Great quality across all our benchmarks. |
+| Performance | DeepSeek-Coder-V2-Lite (16B MoE) | 11 GB | 9.7 GB | Needs a 16 GB+ GPU. Slightly better quality, similar speed. |
+| Low-end / CPU | Qwen2.5-Coder-1.5B | 1.6 GB | 1.1 GB | Runs fine on CPU (~15 tok/s) when no GPU is available. |
+
+On a desktop-class NVIDIA GPU (RTX 4080 Super) the default model hits **~6 ms first-token latency** and **~200 tok/s** throughput — well under the budget for real-time ghost text. See [`Vibecoding/inline-ai-benchmarks.md`](./Vibecoding/inline-ai-benchmarks.md) for the full Phase A benchmark results, and [`Vibecoding/inline-ai.md`](./Vibecoding/inline-ai.md) for the architecture plan.
+
+Feature is **off by default** — you have to flip the toggle. Nothing is downloaded or run until you do.
+
+**v0.5.0 note:** prebuilt `llama-server` binaries for Windows/macOS are not yet bundled with the installer. Either point at an existing OpenAI-compatible local endpoint (Ollama, LM Studio) in the settings, or supply your own `llama-server` build via the `SQAIL_LLAMA_SERVER_PATH` env var. Linux users can run `./scripts/fetch-llama-cpp.sh` to build one with CUDA.
 
 ## Install
 

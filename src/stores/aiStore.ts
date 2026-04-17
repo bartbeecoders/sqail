@@ -2,18 +2,7 @@ import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import type { AiProviderConfig, AiFlow, AiHistoryEntry, OpenRouterModel } from "../types/ai";
 import { useEditorStore } from "./editorStore";
-
-/** Strip <think>...</think> blocks emitted by reasoning models. */
-function stripThinkingBlocks(text: string): string {
-  // Remove complete <think>...</think> blocks (greedy across newlines)
-  let result = text.replace(/<think>[\s\S]*?<\/think>/g, "");
-  // If there's an unclosed <think> tag (still streaming), hide everything from it onward
-  const openIdx = result.indexOf("<think>");
-  if (openIdx !== -1) {
-    result = result.slice(0, openIdx);
-  }
-  return result.trimStart();
-}
+import { stripThinkingBlocks } from "../lib/stripThinking";
 
 interface PaletteOptions {
   flow?: AiFlow;

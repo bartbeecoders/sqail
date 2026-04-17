@@ -1,5 +1,31 @@
 [
   {
+    "version": "0.6.0",
+    "sections": [
+      {
+        "title": "Database-Tuned LoRA Training",
+        "items": [
+          "New Settings \u2192 Model Training tab: pick a configured database connection, a base model from the inline-AI catalog, and kick off a LoRA fine-tune that learns your schema, generated metadata, and sample rows",
+          "Dataset builder (Rust) emits JSONL training corpus with schema-level examples, metadata-derived instructions, sample-row WHERE-clause pairs, and join heuristics \u2014 dialect-aware quoting and escaping",
+          "Python sidecar (scripts/train_sql_lora.py) runs the fine-tune on your local GPU using transformers + peft + trl + datasets; stdout is a JSONL progress stream consumed live by the UI",
+          "One-shot environment probe surfaces Python + CUDA + PyTorch + peft versions before you start a job",
+          "Live progress: per-job phase, token/step counters, streaming log pane, cancel button; completed adapters show up in the Trained Models catalog",
+          "Activate / deactivate an adapter on the running llama.cpp sidecar via --lora \u2014 no manual restart dance",
+          "Optional GGUF conversion so adapters can be shared across llama.cpp builds"
+        ]
+      },
+      {
+        "title": "Inline AI Model Catalog",
+        "items": [
+          "Expanded catalog: Qwen2.5-Coder-0.5B (CPU-friendly), Qwen2.5-Coder-7B / 14B (performance), Qwen3.5-9B / 27B, Qwen3-Coder-30B-A3B (MoE coder-specialist), and Qwen3.6-35B-A3B",
+          "All new entries ship with the FIM tokens llama.cpp's /infill endpoint needs for ghost-text \u2014 community GGUF mirrors (unsloth / bartowski) where no first-party repo exists",
+          "VRAM minimums wired up so the UI can hide models your GPU can't load",
+          "Sidecar spawn understands adapter-loaded runs \u2014 schema-context retriever and prompt builder keep prompt shape consistent with the fine-tune distribution so quality doesn't regress"
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.5.4",
     "sections": [
       {

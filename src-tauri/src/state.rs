@@ -4,6 +4,7 @@ use tokio::sync::Mutex;
 use crate::ai::inline::state::InlineAiState;
 use crate::ai::provider::{AiHistoryEntry, AiProviderConfig};
 use crate::ai::store::{AiHistoryStore, AiProviderStore};
+use crate::ai::training::state::TrainingState;
 use crate::db::connections::ConnectionConfig;
 use crate::db::store::ConnectionStore;
 use crate::metadata::{MetadataStore, ObjectMetadata};
@@ -34,6 +35,7 @@ pub struct AppState {
     pub metadata: Mutex<Vec<ObjectMetadata>>,
 
     pub inline_ai: InlineAiState,
+    pub training: TrainingState,
 }
 
 impl AppState {
@@ -68,6 +70,7 @@ impl AppState {
             metadata_store,
             metadata: Mutex::new(metadata),
             inline_ai: InlineAiState::new(),
+            training: TrainingState::new(),
         }
     }
 

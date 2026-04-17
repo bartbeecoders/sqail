@@ -156,7 +156,7 @@ export default function AiCommandPalette() {
 
   const handleSubmitFlow = async (flow: AiFlow, sql?: string) => {
     if (streaming || !hasProvider) return;
-    const schemaContext = buildSchemaContext();
+    const schemaContext = await buildSchemaContext();
     const editorSql = sql || getCurrentSql();
 
     switch (flow) {

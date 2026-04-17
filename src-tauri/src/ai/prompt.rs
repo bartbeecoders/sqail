@@ -11,15 +11,28 @@ pub fn build_system_prompt(flow: &str, driver: Option<&str>, schema_context: Opt
 
     if let Some(ctx) = schema_context {
         if !ctx.is_empty() {
-            parts.push(format!("Here is the database schema context:\n\n{ctx}"));
+            parts.push(format!(
+                "Here is the database schema context. This is the complete and authoritative \
+                 list of tables and columns available — treat it as the ONLY source of truth:\n\n{ctx}"
+            ));
         }
     }
 
     match flow {
         "generate_sql" => {
             parts.push("The user will describe what they want in natural language. \
-                         Respond with ONLY the SQL query, no explanation or markdown code fences. \
-                         Use the provided schema context to write accurate queries with correct table and column names.".to_string());
+                         Respond with ONLY the SQL query, no explanation or markdown code fences.\n\n\
+                         Column-grounding rules — these are strict:\n\
+                         1. Use ONLY table and column names that appear verbatim in the schema context above. \
+                         Do NOT invent, guess, or infer columns that are not listed, even if the column name \
+                         seems natural (e.g. created_at, updated_at, mfg_date, description).\n\
+                         2. If the schema context is empty or a relevant table is missing from it, prefer \
+                         `SELECT *` over guessing specific columns.\n\
+                         3. If the user's request implies a column that is NOT in the schema, either use \
+                         `SELECT *` or the closest column that IS in the schema — never fabricate one.\n\
+                         4. Before emitting the final SQL, silently verify that every column you reference \
+                         exists in the schema context for the table it is used with. If any column does not \
+                         exist there, remove it or replace it with `*`.".to_string());
         }
         "explain" => {
             parts.push("The user will provide a SQL query. Explain what it does in clear, \
@@ -48,9 +61,16 @@ pub fn build_system_prompt(flow: &str, driver: Option<&str>, schema_context: Opt
         "fix_query" => {
             parts.push("The user will provide a SQL query that failed and the error message returned by the database. \
                          Diagnose the cause of the error and return a corrected version of the query. \
-                         Use the schema context to verify table and column names. \
                          Return ONLY the corrected SQL query, no explanation or markdown code fences. \
-                         The corrected SQL must be ready to execute as-is.".to_string());
+                         The corrected SQL must be ready to execute as-is.\n\n\
+                         Column-grounding rules — these are strict:\n\
+                         1. Use ONLY table and column names that appear verbatim in the schema context above. \
+                         Do NOT invent or guess columns.\n\
+                         2. \"column does not exist\" errors almost always mean the column name in the failing \
+                         query is wrong. Replace it with the correct column from the schema context, or drop it \
+                         (prefer `SELECT *`) if no suitable column exists.\n\
+                         3. Before emitting the fix, silently verify that every column you reference exists in \
+                         the schema context for the table it is used with.".to_string());
         }
         "generate_metadata" => {
             parts.push("The user will provide the structure of a single database object (table, view, function, or procedure). \

@@ -9,6 +9,7 @@ import {
   type DownloadState,
   type SidecarState,
 } from "../stores/inlineAiStore";
+import { useTrainingStore } from "../stores/trainingStore";
 
 /**
  * Mount once (App level) to:
@@ -53,6 +54,17 @@ export function useInlineAiLifecycle(): void {
     void store.refreshStatus();
     void store.refreshBinary();
 
+    // Boot the training store at app-level too: fetch the adapter
+    // catalog up front and subscribe to `training:*` events so a job
+    // that completes while the Training tab is closed still updates
+    // the Inline AI model list's "Your trained adapters" section.
+    const trainingStore = useTrainingStore.getState();
+    void trainingStore.refreshTrainedModels();
+    let detachTraining: (() => void) | null = null;
+    void trainingStore.attachListeners().then((unlisten) => {
+      detachTraining = unlisten;
+    });
+
     if (store.enabled && store.autoStart) {
       // Best-effort — the sidecar may fail if the model isn't downloaded,
       // the settings UI surfaces the error from the state machine.
@@ -74,6 +86,9 @@ export function useInlineAiLifecycle(): void {
       if (state.modelId !== prev.modelId) {
         cancelAllInlineRequests("model-changed");
       }
+      if (state.trainedModelId !== prev.trainedModelId) {
+        cancelAllInlineRequests("adapter-changed");
+      }
       if (state.enabled !== prev.enabled && !state.enabled) {
         cancelAllInlineRequests("disabled");
       }
@@ -89,6 +104,7 @@ export function useInlineAiLifecycle(): void {
       unsubSidecar();
       unsubConn();
       unlisteners.forEach((p) => p.then((f) => f()).catch(() => {}));
+      detachTraining?.();
     };
   }, []);
 }

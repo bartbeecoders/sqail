@@ -39,9 +39,22 @@ const MAX_RESTARTS: u32 = 3;
 )]
 pub enum SidecarStatus {
     Stopped,
-    Starting { model_id: String },
-    Ready { model_id: String, port: u16 },
-    Error { message: String },
+    Starting {
+        model_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        active_lora_id: Option<String>,
+    },
+    Ready {
+        model_id: String,
+        port: u16,
+        /// Trained-model id of the currently-loaded LoRA adapter, if any.
+        /// `None` means the base model is serving unadorned.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        active_lora_id: Option<String>,
+    },
+    Error {
+        message: String,
+    },
 }
 
 impl SidecarStatus {
@@ -61,6 +74,14 @@ pub struct StartOptions {
     pub n_gpu_layers: i32,
     /// When true, launch with `--device none` to force CPU.
     pub cpu_only: bool,
+    /// Optional LoRA adapter to apply via `--lora <path>`. The path
+    /// must be a GGUF file produced by llama.cpp's
+    /// `convert_lora_to_gguf.py` — peft's native safetensors layout is
+    /// not readable by llama-server.
+    pub lora_path: Option<PathBuf>,
+    /// Trained-model id that produced the adapter above. Surfaced in
+    /// `SidecarStatus` so the UI can show which adapter is active.
+    pub lora_model_id: Option<String>,
 }
 
 impl Default for StartOptions {
@@ -69,6 +90,8 @@ impl Default for StartOptions {
             ctx_size: 4096,
             n_gpu_layers: 999,
             cpu_only: false,
+            lora_path: None,
+            lora_model_id: None,
         }
     }
 }
@@ -146,12 +169,30 @@ impl SidecarManager {
             inner.generation
         };
 
-        self.set_status(&app, SidecarStatus::Starting { model_id: model_id.clone() })
-            .await;
+        self.set_status(
+            &app,
+            SidecarStatus::Starting {
+                model_id: model_id.clone(),
+                active_lora_id: opts.lora_model_id.clone(),
+            },
+        )
+        .await;
 
+        let log_path = sidecar_log_path(&app_data);
         let (child, port) =
-            spawn_server(&server_bin, &model_path, &entry, &opts).await?;
-        wait_for_health(port).await?;
+            spawn_server(&server_bin, &model_path, &entry, &opts, &log_path).await?;
+        if let Err(e) = wait_for_health(port).await {
+            let tail = read_log_tail(&log_path, 30).await.unwrap_or_default();
+            return Err(if tail.is_empty() {
+                format!("{e} (sidecar log: {})", log_path.display())
+            } else {
+                format!(
+                    "{e}\n\nLast lines of sidecar log ({}):\n{}",
+                    log_path.display(),
+                    tail
+                )
+            });
+        }
 
         {
             let mut inner = self.inner.lock().await;
@@ -165,7 +206,11 @@ impl SidecarManager {
 
         self.set_status(
             &app,
-            SidecarStatus::Ready { model_id: model_id.clone(), port },
+            SidecarStatus::Ready {
+                model_id: model_id.clone(),
+                port,
+                active_lora_id: opts.lora_model_id.clone(),
+            },
         )
         .await;
 
@@ -279,13 +324,23 @@ impl SidecarManager {
 
             self.set_status(
                 &app,
-                SidecarStatus::Starting { model_id: entry.id.clone() },
+                SidecarStatus::Starting {
+                    model_id: entry.id.clone(),
+                    active_lora_id: opts.lora_model_id.clone(),
+                },
             )
             .await;
 
-            match spawn_server(&server_bin, &model_path, &entry, &opts).await {
+            let log_path = app
+                .path()
+                .app_data_dir()
+                .ok()
+                .map(|d| sidecar_log_path(&d))
+                .unwrap_or_else(|| PathBuf::from("sidecar.log"));
+            match spawn_server(&server_bin, &model_path, &entry, &opts, &log_path).await {
                 Ok((child, new_port)) => match wait_for_health(new_port).await {
                     Ok(()) => {
+                        let active_lora_id = opts.lora_model_id.clone();
                         let mut inner = self.inner.lock().await;
                         if inner.generation != generation {
                             return;
@@ -302,6 +357,7 @@ impl SidecarManager {
                             SidecarStatus::Ready {
                                 model_id: entry.id.clone(),
                                 port: new_port,
+                                active_lora_id,
                             },
                         )
                         .await;
@@ -323,8 +379,25 @@ async fn spawn_server(
     model_path: &Path,
     entry: &ModelEntry,
     opts: &StartOptions,
+    log_path: &Path,
 ) -> Result<(Child, u16), String> {
     let port = free_port()?;
+
+    // Truncate the log on each start and tee both stdout+stderr into it.
+    // llama-server is deliberately left noisy (no `--log-disable`) so a
+    // health-check timeout can surface the model-load reason.
+    if let Some(parent) = log_path.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(log_path)
+        .map_err(|e| format!("open sidecar log {}: {e}", log_path.display()))?;
+    let stderr_file = log_file
+        .try_clone()
+        .map_err(|e| format!("dup sidecar log fd: {e}"))?;
 
     let mut cmd = Command::new(bin);
     cmd.arg("-m")
@@ -334,11 +407,15 @@ async fn spawn_server(
         .args(["--ctx-size", &opts.ctx_size.to_string()])
         .args(["--parallel", "1"])
         .arg("--no-mmap")
-        .arg("--log-disable");
+        .stdout(log_file)
+        .stderr(stderr_file);
     if opts.cpu_only {
         cmd.args(["--device", "none"]);
     } else {
         cmd.args(["--n-gpu-layers", &opts.n_gpu_layers.to_string()]);
+    }
+    if let Some(lora) = &opts.lora_path {
+        cmd.args(["--lora", &lora.to_string_lossy()]);
     }
     cmd.kill_on_drop(true);
 
@@ -356,7 +433,22 @@ async fn spawn_server(
     // On Unix, run llama-server in its own process group so a drop-kill
     // tears the whole tree down even if it forks children (it doesn't
     // today, but we should be defensive).
-    #[cfg(unix)]
+    //
+    // On Linux, additionally ask the kernel to SIGTERM the child when
+    // its parent (this process) dies. `kill_on_drop` only fires when
+    // Drop actually runs — a hard kill (SIGKILL / crash / terminal
+    // closed) skips it and leaks llama-server, which then holds VRAM
+    // until reboot. PR_SET_PDEATHSIG makes the kernel do the cleanup
+    // for us regardless of how we die.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+            Ok(())
+        });
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
     unsafe {
         cmd.pre_exec(|| {
             libc::setsid();
@@ -451,6 +543,54 @@ fn resolve_server_bin(app: &AppHandle) -> Option<PathBuf> {
     }
 
     None
+}
+
+/// Where llama-server's stdout+stderr gets tee'd on each start. Stable
+/// location so the user (or the `Settings → Inline AI` tab) can tail
+/// the file.
+pub fn sidecar_log_path(app_data: &Path) -> PathBuf {
+    app_data.join("inline-ai").join("sidecar.log")
+}
+
+/// Read up to `n` non-empty lines from the tail of the sidecar log —
+/// used to enrich timeout errors so the user knows *why* llama-server
+/// didn't come up. Skips the GDB backtrace ggml prints on abort (it
+/// blows past our window and buries the actual error).
+async fn read_log_tail(path: &Path, n: usize) -> Result<String, String> {
+    let contents = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|e| format!("read sidecar log: {e}"))?;
+    let lines: Vec<&str> = contents
+        .lines()
+        .filter(|l| {
+            let t = l.trim();
+            if t.is_empty() {
+                return false;
+            }
+            // Drop the dozens-of-lines gdb backtrace ggml_abort() emits
+            // on crashes; the real "CUDA error …" / "failed to …" line
+            // sits above it and is what the user actually needs.
+            if t.starts_with('#') && t.contains(" in ") {
+                return false;
+            }
+            if t.starts_with('[')
+                && (t.contains("LWP")
+                    || t.contains("Thread ")
+                    || t.contains("Inferior "))
+            {
+                return false;
+            }
+            if t.starts_with("0x") && t.contains(" in ") {
+                return false;
+            }
+            if t.contains("debuginfod") || t.contains("GDB supports") {
+                return false;
+            }
+            true
+        })
+        .collect();
+    let start = lines.len().saturating_sub(n);
+    Ok(lines[start..].join("\n"))
 }
 
 fn dev_cache_bin() -> PathBuf {

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { X, RotateCcw, Settings, Keyboard, Info, Code2, Plus, Trash2, Pencil, Sparkles, Check, Zap } from "lucide-react";
+import { X, RotateCcw, Settings, Keyboard, Info, Code2, Plus, Trash2, Pencil, Sparkles, Check, Zap, GraduationCap } from "lucide-react";
 import { check } from "@tauri-apps/plugin-updater";
 import { cn } from "../lib/utils";
 import { useShortcutStore } from "../stores/shortcutStore";
@@ -10,6 +10,7 @@ import { AI_PROVIDER_LABELS } from "../types/ai";
 import type { AiProviderConfig } from "../types/ai";
 import AiProviderForm from "./AiProviderForm";
 import InlineAiSettingsTab from "./InlineAiSettingsTab";
+import TrainingSettingsTab from "./TrainingSettingsTab";
 import {
   SHORTCUT_ACTIONS,
   CATEGORY_LABELS,
@@ -25,6 +26,7 @@ export type SettingsTab =
   | "general"
   | "ai"
   | "inline-ai"
+  | "training"
   | "shortcuts"
   | "snippets"
   | "about";
@@ -34,7 +36,7 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Setti
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="flex h-[560px] w-full max-w-2xl flex-col rounded-lg border border-border bg-background shadow-xl">
+      <div className="flex h-[min(820px,92vh)] w-[min(1100px,94vw)] flex-col rounded-lg border border-border bg-background shadow-xl">
         {/* Header */}
         <div className="flex items-center justify-between border-b border-border px-5 py-3">
           <h2 className="text-sm font-semibold">Settings</h2>
@@ -48,7 +50,7 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Setti
 
         <div className="flex flex-1 overflow-hidden">
           {/* Sidebar tabs */}
-          <nav className="w-44 shrink-0 border-r border-border bg-muted/30 p-2">
+          <nav className="w-52 shrink-0 border-r border-border bg-muted/30 p-2">
             <TabButton
               active={activeTab === "general"}
               icon={<Settings size={14} />}
@@ -66,6 +68,12 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Setti
               icon={<Zap size={14} />}
               label="Inline AI"
               onClick={() => setActiveTab("inline-ai")}
+            />
+            <TabButton
+              active={activeTab === "training"}
+              icon={<GraduationCap size={14} />}
+              label="Model Training"
+              onClick={() => setActiveTab("training")}
             />
             <TabButton
               active={activeTab === "shortcuts"}
@@ -92,6 +100,7 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Setti
             {activeTab === "general" && <GeneralTab />}
             {activeTab === "ai" && <AiProvidersTab />}
             {activeTab === "inline-ai" && <InlineAiSettingsTab />}
+            {activeTab === "training" && <TrainingSettingsTab />}
             {activeTab === "shortcuts" && <ShortcutsTab />}
             {activeTab === "snippets" && <SnippetsTab />}
             {activeTab === "about" && <AboutTab />}

@@ -1,11 +1,32 @@
 //! Model catalog + downloader.
 //!
-//! The catalog is intentionally small. The Phase A benchmarks in
-//! `Vibecoding/inline-ai-benchmarks.md` settled it:
+//! The Qwen2.5-Coder family is the default spine — Phase A benchmarks in
+//! `Vibecoding/inline-ai-benchmarks.md` showed it as the strongest FIM
+//! code model at every size we care about, and every variant ships with
+//! the `tokenizer.ggml.fim_*` metadata that llama.cpp's `/infill`
+//! endpoint depends on. DeepSeek-Coder-V2-Lite is kept as an alternative
+//! high-VRAM performance pick.
 //!
-//! * **default** — Qwen2.5-Coder-3B Q4_K_M
-//! * **performance** — DeepSeek-Coder-V2-Lite Q4_K_M (gated on ≥16 GB VRAM)
-//! * **low-end / CPU** — Qwen2.5-Coder-1.5B Q4_K_M
+//! Size ladder (all Q4_K_M):
+//!
+//! * **low-end** — Qwen2.5-Coder-0.5B   (~400 MB, CPU-friendly)
+//! * **low-end** — Qwen2.5-Coder-1.5B   (~1.1 GB)
+//! * **default** — Qwen2.5-Coder-3B     (~2.1 GB)
+//! * **performance** — Qwen2.5-Coder-7B  (~4.7 GB)
+//! * **performance** — Qwen3.5-9B        (~5.3 GB, newer general instruct)
+//! * **performance** — Qwen2.5-Coder-14B (~9.0 GB)
+//! * **performance** — DeepSeek-Coder-V2-Lite (~10.4 GB, MoE)
+//! * **performance** — Qwen3.5-27B          (~15.6 GB)
+//! * **performance** — Qwen3-Coder-30B-A3B  (~17.3 GB, MoE coder)
+//! * **performance** — Qwen3.6-35B-A3B      (~19.9 GB, MoE)
+//!
+//! The Qwen3.5 / 3.6 / Qwen3-Coder entries use community mirrors
+//! (unsloth, bartowski) because Qwen hasn't published first-party GGUF
+//! repos for those variants. All three have `<|fim_prefix|>` /
+//! `<|fim_middle|>` / `<|fim_suffix|>` in the tokenizer, so
+//! llama.cpp's `/infill` endpoint works for ghost-text. Qwen3.5 is a
+//! general instruct model (not a coder-specialist) — chat/palette
+//! quality is very good, ghost-text FIM quality is untested.
 //!
 //! Download files live under `<app_data>/inline-ai/models/`. Downloads
 //! resume when partial (`.part` suffix) and verify SHA-256 when a digest
@@ -77,6 +98,16 @@ pub struct DownloadProgress {
 pub fn catalog() -> Vec<ModelEntry> {
     vec![
         ModelEntry {
+            id: "qwen-coder-0_5b-q4".into(),
+            display_name: "Qwen2.5-Coder-0.5B (Q4_K_M) — CPU".into(),
+            tier: "low-end".into(),
+            url: "https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-0.5b-instruct-q4_k_m.gguf".into(),
+            filename: "qwen2.5-coder-0.5b-instruct-q4_k_m.gguf".into(),
+            size_bytes: 397_807_744,
+            min_vram_mib: 700,
+            sha256: None,
+        },
+        ModelEntry {
             id: "qwen-coder-1_5b-q4".into(),
             display_name: "Qwen2.5-Coder-1.5B (Q4_K_M)".into(),
             tier: "low-end".into(),
@@ -97,6 +128,26 @@ pub fn catalog() -> Vec<ModelEntry> {
             sha256: None,
         },
         ModelEntry {
+            id: "qwen-coder-7b-q4".into(),
+            display_name: "Qwen2.5-Coder-7B (Q4_K_M) — performance".into(),
+            tier: "performance".into(),
+            url: "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/qwen2.5-coder-7b-instruct-q4_k_m.gguf".into(),
+            filename: "qwen2.5-coder-7b-instruct-q4_k_m.gguf".into(),
+            size_bytes: 4_683_073_984,
+            min_vram_mib: 5600,
+            sha256: None,
+        },
+        ModelEntry {
+            id: "qwen-coder-14b-q4".into(),
+            display_name: "Qwen2.5-Coder-14B (Q4_K_M) — performance".into(),
+            tier: "performance".into(),
+            url: "https://huggingface.co/Qwen/Qwen2.5-Coder-14B-Instruct-GGUF/resolve/main/qwen2.5-coder-14b-instruct-q4_k_m.gguf".into(),
+            filename: "qwen2.5-coder-14b-instruct-q4_k_m.gguf".into(),
+            size_bytes: 8_988_110_656,
+            min_vram_mib: 10240,
+            sha256: None,
+        },
+        ModelEntry {
             id: "deepseek-coder-v2-lite-q4".into(),
             display_name: "DeepSeek-Coder-V2-Lite (Q4_K_M) — performance".into(),
             tier: "performance".into(),
@@ -104,6 +155,53 @@ pub fn catalog() -> Vec<ModelEntry> {
             filename: "DeepSeek-Coder-V2-Lite-Instruct-Q4_K_M.gguf".into(),
             size_bytes: 10_400_000_000,
             min_vram_mib: 11500,
+            sha256: None,
+        },
+        // Qwen3.5 is a general-purpose instruct model with FIM tokens in
+        // its vocab. Community GGUF only — no first-party repo.
+        ModelEntry {
+            id: "qwen3_5-9b-q4".into(),
+            display_name: "Qwen3.5-9B (Q4_K_M) — performance".into(),
+            tier: "performance".into(),
+            url: "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q4_K_M.gguf".into(),
+            filename: "Qwen3.5-9B-Q4_K_M.gguf".into(),
+            size_bytes: 5_680_522_464,
+            min_vram_mib: 6400,
+            sha256: None,
+        },
+        ModelEntry {
+            id: "qwen3_5-27b-q4".into(),
+            display_name: "Qwen3.5-27B (Q4_K_M) — performance".into(),
+            tier: "performance".into(),
+            url: "https://huggingface.co/unsloth/Qwen3.5-27B-GGUF/resolve/main/Qwen3.5-27B-Q4_K_M.gguf".into(),
+            filename: "Qwen3.5-27B-Q4_K_M.gguf".into(),
+            size_bytes: 16_740_812_704,
+            min_vram_mib: 18432,
+            sha256: None,
+        },
+        // Qwen3-Coder is the current coder-specialist MoE. 30B total /
+        // ~3B active params → much faster than a dense 30B at inference.
+        ModelEntry {
+            id: "qwen3-coder-30b-a3b-q4".into(),
+            display_name: "Qwen3-Coder-30B-A3B (Q4_K_M) — performance".into(),
+            tier: "performance".into(),
+            url: "https://huggingface.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/resolve/main/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf".into(),
+            filename: "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf".into(),
+            size_bytes: 18_556_689_568,
+            min_vram_mib: 20480,
+            sha256: None,
+        },
+        // Qwen3.6 — newest MoE from Qwen, general instruct with FIM
+        // tokens in vocab. Using bartowski's mirror (slightly smaller
+        // file than unsloth's UD variant).
+        ModelEntry {
+            id: "qwen3_6-35b-a3b-q4".into(),
+            display_name: "Qwen3.6-35B-A3B (Q4_K_M) — performance".into(),
+            tier: "performance".into(),
+            url: "https://huggingface.co/bartowski/Qwen_Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen_Qwen3.6-35B-A3B-Q4_K_M.gguf".into(),
+            filename: "Qwen_Qwen3.6-35B-A3B-Q4_K_M.gguf".into(),
+            size_bytes: 21_391_448_384,
+            min_vram_mib: 23552,
             sha256: None,
         },
     ]

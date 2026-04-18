@@ -1,5 +1,38 @@
 [
   {
+    "version": "0.6.1",
+    "sections": [
+      {
+        "title": "Schema Diagram Tab",
+        "items": [
+          "New tab type \u2014 open via the tab bar \"+ \u25be\" menu \u2192 \"New schema diagram\" \u2014 renders an interactive SVG ER diagram with tables, primary keys, foreign keys, and relationship arrows",
+          "Drag-and-drop from the object browser: drop a table onto the canvas and sqail fetches its columns + its schema's foreign keys (cached per schema) and places the table at the drop point; re-dropping an existing table repositions it",
+          "Pan by dragging empty space, zoom-to-cursor on mouse wheel (deltaMode-aware, clamped for high-resolution touchpads), Fit to content, Reset view",
+          "Per-table header color + global color picker (table header / border / body / PK / FK / relationship / column text) with live updates",
+          "Annotations: rectangles, text, and lines \u2014 tool buttons auto-reset to \"select\" after each commit; interactive resize handles (8 for rects, endpoint handles for lines, width + diagonal font-scale for text) that stay constant-sized regardless of zoom",
+          "Snap-to-grid toggle (20px) applies to table drags, annotation moves, resize handles, and draft drawing; absolute-position tracking on table drags so snap doesn\u2019t drift",
+          "Delete / Backspace removes the selected annotation or hides the selected table from the diagram (respects input focus so typing in inspectors is unaffected)",
+          "Exports: PNG (canvas raster), SVG (cloned + viewBox-fitted), PDF (dependency-free \u2014 canvas-rastered JPEG embedded in a hand-built PDF), and .drawio (ER-style cells, edges, and annotations)",
+          "Table header shows \"schema.\" (dimmed) + \"name\" (bold) so multi-schema diagrams stay readable"
+        ]
+      },
+      {
+        "title": "Backend",
+        "items": [
+          "New list_foreign_keys Tauri command with dialect-specific SQL for Postgres (information_schema joins), MySQL (key_column_usage), SQLite (per-table pragma_foreign_key_list), and SQL Server (sys.foreign_keys); exposed to the frontend as ForeignKeyInfo"
+        ]
+      },
+      {
+        "title": "Portal",
+        "items": [
+          "Hero callout pills for the diagram feature and local LLM + LoRA training",
+          "Features section gains a sixth card (\"Visual\") for the diagramming feature; \"Smart\" rewritten to lead with the cloud-or-local choice",
+          "AI section adds a \"Local LLM & on-device fine-tuning\" subsection covering the llama.cpp sidecar, curated Qwen model catalog, and database-tuned LoRA training"
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.6.0",
     "sections": [
       {

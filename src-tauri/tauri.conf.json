@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "sqail",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "identifier": "dev.sqail",
   "build": {
     "frontendDist": "../dist",

@@ -1,4 +1,4 @@
-import { Bot, Sparkles, FileText, Wand2 } from "lucide-react";
+import { Bot, Cpu, FileText, GraduationCap, HardDrive, Sparkles, Wand2 } from "lucide-react";
 import { AI_PROVIDERS } from "../lib/constants";
 
 const AI_FEATURES = [
@@ -24,6 +24,27 @@ const AI_FEATURES = [
   },
 ];
 
+const LOCAL_AI_FEATURES = [
+  {
+    icon: <HardDrive size={20} />,
+    title: "100% offline inline AI",
+    description:
+      "A bundled llama.cpp sidecar runs GGUF models locally for ghost-text and assistant flows. Auto-download on first enable — Vulkan on Windows/Linux, Metal on macOS.",
+  },
+  {
+    icon: <Cpu size={20} />,
+    title: "Curated model catalog",
+    description:
+      "Qwen2.5-Coder 0.5B / 7B / 14B, Qwen3.5 9B / 27B, Qwen3-Coder 30B-A3B MoE, and Qwen3.6 35B-A3B — VRAM-gated so you only see models your GPU can actually load.",
+  },
+  {
+    icon: <GraduationCap size={20} />,
+    title: "Database-tuned LoRA fine-tuning",
+    description:
+      "Pick a connection + a base model, and sqail builds a JSONL corpus from your schema, metadata, and sample rows, then runs a LoRA fine-tune on your local GPU. Activate the adapter with one click — no restart.",
+  },
+];
+
 export default function AiSection() {
   return (
     <section id="ai" className="bg-bg-section py-24">
@@ -36,9 +57,9 @@ export default function AiSection() {
               <span className="text-brand-yellow">SQL intelligence</span>
             </h2>
             <p className="mb-8 text-text-muted">
-              SQaiL integrates with your favorite AI provider to supercharge your
-              database workflow. Write queries faster, understand complex SQL
-              instantly, and document your schema automatically.
+              Cloud or local — sqail works with your favorite AI provider, or
+              runs entirely on your machine. Write queries faster, understand
+              complex SQL instantly, and document your schema automatically.
             </p>
 
             <div className="space-y-5">
@@ -87,6 +108,42 @@ export default function AiSection() {
                 AI providers supported — from cloud APIs to local models
               </p>
             </div>
+          </div>
+        </div>
+
+        {/* Local AI + training */}
+        <div className="mt-20 border-t border-border pt-16">
+          <div className="mb-12 max-w-3xl">
+            <span className="mb-3 inline-flex items-center gap-2 rounded-full border border-brand-yellow/30 bg-brand-yellow/5 px-3 py-1 text-xs font-semibold text-brand-yellow">
+              New in 0.6
+            </span>
+            <h3 className="mb-3 text-2xl font-bold text-text-primary sm:text-3xl">
+              Local LLM &amp; on-device fine-tuning
+            </h3>
+            <p className="text-text-muted">
+              No API key, no round-trip, no vendor lock-in. Run open-weight
+              models on your own GPU — and teach one your specific schema with
+              a LoRA fine-tune kicked off from the Settings UI.
+            </p>
+          </div>
+
+          <div className="grid gap-6 md:grid-cols-3">
+            {LOCAL_AI_FEATURES.map((f) => (
+              <div
+                key={f.title}
+                className="rounded-xl border border-border bg-bg-primary p-6 transition-colors hover:border-brand-yellow/40"
+              >
+                <div className="mb-4 inline-flex rounded-lg bg-brand-yellow/10 p-2.5 text-brand-yellow">
+                  {f.icon}
+                </div>
+                <h4 className="mb-2 text-base font-semibold text-text-primary">
+                  {f.title}
+                </h4>
+                <p className="text-sm leading-relaxed text-text-muted">
+                  {f.description}
+                </p>
+              </div>
+            ))}
           </div>
         </div>
       </div>

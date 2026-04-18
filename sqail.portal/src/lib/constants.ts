@@ -1,5 +1,5 @@
-export const VERSION = "0.5.4";
-export const BUILD_NUMBER = "20260411-1";
+export const VERSION = "0.6.0";
+export const BUILD_NUMBER = "20260418-1";
 export const GITHUB_URL = "https://github.com/bartbeecoders/sqail";
 
 export type Platform = "windows" | "macos" | "linux";
@@ -97,8 +97,14 @@ export const FEATURES = [
   {
     icon: "Sparkles",
     title: "Smart",
-    headline: "AI that actually knows your schema.",
-    description: "Schema-aware autocomplete and NL-to-SQL with your tables injected as context. Bring your own key.",
+    headline: "Cloud AI or a local model — your call.",
+    description: "Schema-aware NL-to-SQL and inline completions, backed by your favorite API, a local llama.cpp sidecar, or a LoRA fine-tune trained on your own database.",
+  },
+  {
+    icon: "Network",
+    title: "Visual",
+    headline: "Drag-and-drop schema diagrams.",
+    description: "Drop tables from the object browser onto a canvas. Zoom, pan, recolor, annotate, and export as PNG, SVG, PDF, or .drawio — all in-app, no Graphviz install.",
   },
   {
     icon: "GitBranch",
@@ -110,7 +116,7 @@ export const FEATURES = [
     icon: "ShieldCheck",
     title: "Private",
     headline: "Your queries stay on your machine.",
-    description: "No telemetry. Credentials live in a local encrypted store. AI providers are only called when you configure them.",
+    description: "No telemetry. Credentials live in a local encrypted store. AI providers are only called when you configure them — and local mode stays fully offline.",
   },
   {
     icon: "Database",

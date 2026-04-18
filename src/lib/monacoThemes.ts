@@ -7,7 +7,7 @@ export const sqlaiDark: editor.IStandaloneThemeData = {
     { token: "keyword", foreground: "7c9cf5" },
     { token: "string", foreground: "a5d6a7" },
     { token: "number", foreground: "f5c27c" },
-    { token: "comment", foreground: "6a737d", fontStyle: "italic" },
+    { token: "comment", foreground: "6ee7b7", fontStyle: "italic" },
     { token: "operator", foreground: "c9d1d9" },
   ],
   colors: {
@@ -28,7 +28,7 @@ export const sqlaiLight: editor.IStandaloneThemeData = {
     { token: "keyword", foreground: "4338ca" },
     { token: "string", foreground: "16803c" },
     { token: "number", foreground: "b45309" },
-    { token: "comment", foreground: "9ca3af", fontStyle: "italic" },
+    { token: "comment", foreground: "059669", fontStyle: "italic" },
     { token: "operator", foreground: "374151" },
   ],
   colors: {

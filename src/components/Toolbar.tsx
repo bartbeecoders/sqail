@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Play, AlignLeft, Trash2, Sparkles, Loader2, Settings, ChevronDown, MessageSquareText, BookOpen, Wand2 } from "lucide-react";
+import { Play, AlignLeft, CheckCircle2, Trash2, Sparkles, Loader2, Settings, ChevronDown, MessageSquareText, BookOpen, Wand2 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { useAiStore } from "../stores/aiStore";
 import { useEditorStore } from "../stores/editorStore";
@@ -8,6 +8,8 @@ import type { SettingsTab } from "./SettingsModal";
 
 interface ToolbarProps {
   onRun?: () => void;
+  onValidate?: () => void;
+  validating?: boolean;
   onFormat?: () => void;
   onFormatWithComments?: () => void;
   onClear?: () => void;
@@ -53,7 +55,7 @@ function ToolbarButton({
   );
 }
 
-export default function Toolbar({ onRun, onFormat, onFormatWithComments, onClear, hasConnection, loading, onOpenSettings, infoPanelOpen, onToggleInfoPanel }: ToolbarProps) {
+export default function Toolbar({ onRun, onValidate, validating, onFormat, onFormatWithComments, onClear, hasConnection, loading, onOpenSettings, infoPanelOpen, onToggleInfoPanel }: ToolbarProps) {
   const openPalette = useAiStore((s) => s.openPalette);
 
   return (
@@ -65,6 +67,13 @@ export default function Toolbar({ onRun, onFormat, onFormatWithComments, onClear
         variant="primary"
         onClick={onRun}
         disabled={!hasConnection || loading}
+      />
+      <ToolbarButton
+        icon={validating ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
+        label={validating ? "Validating..." : "Validate"}
+        shortcut="Ctrl+Shift+V"
+        onClick={onValidate}
+        disabled={!hasConnection || validating}
       />
       <FormatSplitButton onFormat={onFormat} onFormatWithComments={onFormatWithComments} />
       <ToolbarButton

@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronDown, Network, Pin, Plus, SquarePen, X } from "lucide-react";
+import { ChevronDown, ExternalLink, Network, Pin, Plus, SquarePen, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { detachTab, isDetachedWindow } from "../lib/detach";
 import { buildSelectStatement, buildRoutineCallStatement } from "../lib/sqlGenerate";
 import { cn } from "../lib/utils";
 import { useConnectionStore } from "../stores/connectionStore";
@@ -15,6 +16,8 @@ interface TabContextMenu {
   y: number;
   tabId: string;
 }
+
+const TAB_DRAG_TYPE = "application/sqlai-tab";
 
 export default function EditorTabs() {
   const {
@@ -31,6 +34,7 @@ export default function EditorTabs() {
     renameTab,
     setConnectionId,
     togglePin,
+    reorderTabs,
   } = useEditorStore();
   const connections = useConnectionStore((s) => s.connections);
   const globalConnectionId = useConnectionStore((s) => s.activeConnectionId);
@@ -42,6 +46,10 @@ export default function EditorTabs() {
   const [dragOver, setDragOver] = useState(false);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const addMenuRef = useRef<HTMLDivElement>(null);
+  const [tabDragSrc, setTabDragSrc] = useState<string | null>(null);
+  const [tabDropIndicator, setTabDropIndicator] = useState<
+    { id: string; side: "before" | "after" } | null
+  >(null);
 
   const commitRename = (id: string) => {
     const trimmed = editValue.trim();
@@ -202,11 +210,25 @@ export default function EditorTabs() {
     return (
       <div
         key={tab.id}
+        draggable={!isEditing}
         className={cn(
-          "group flex cursor-pointer items-center gap-1 rounded-t-md px-3 py-1 text-xs transition-colors",
+          "group relative flex cursor-pointer items-center gap-1 rounded-t-md px-3 py-1.5 text-xs transition-colors",
           isActive
-            ? "bg-background text-foreground border-x border-t border-border"
-            : "text-muted-foreground hover:text-foreground hover:bg-muted",
+            ? cn(
+                "bg-background text-foreground font-semibold",
+                "border-x border-t-2 border-border",
+                tab.kind === "diagram"
+                  ? "border-t-emerald-500"
+                  : "border-t-primary",
+                // Lift the active tab 1px to cover the bottom border of the tab strip
+                "-mb-px shadow-[0_-1px_0_0_var(--color-border)]",
+              )
+            : cn(
+                "text-muted-foreground hover:text-foreground hover:bg-muted/70",
+                tab.kind === "diagram" &&
+                  "bg-emerald-500/5 text-emerald-700 dark:text-emerald-400 border-b-2 border-b-emerald-500/60",
+              ),
+          tabDragSrc === tab.id && "opacity-40",
         )}
         onClick={() => setActiveTab(tab.id)}
         onDoubleClick={() => {
@@ -218,7 +240,54 @@ export default function EditorTabs() {
           e.preventDefault();
           setContextMenu({ x: e.clientX, y: e.clientY, tabId: tab.id });
         }}
+        onDragStart={(e) => {
+          e.dataTransfer.setData(TAB_DRAG_TYPE, tab.id);
+          e.dataTransfer.effectAllowed = "move";
+          setTabDragSrc(tab.id);
+        }}
+        onDragEnd={() => {
+          setTabDragSrc(null);
+          setTabDropIndicator(null);
+        }}
+        onDragOver={(e) => {
+          if (!e.dataTransfer.types.includes(TAB_DRAG_TYPE)) return;
+          e.preventDefault();
+          e.stopPropagation();
+          e.dataTransfer.dropEffect = "move";
+          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+          const side: "before" | "after" =
+            e.clientX - rect.left < rect.width / 2 ? "before" : "after";
+          setTabDropIndicator((prev) =>
+            prev && prev.id === tab.id && prev.side === side
+              ? prev
+              : { id: tab.id, side },
+          );
+        }}
+        onDrop={(e) => {
+          if (!e.dataTransfer.types.includes(TAB_DRAG_TYPE)) return;
+          e.preventDefault();
+          e.stopPropagation();
+          const fromId = e.dataTransfer.getData(TAB_DRAG_TYPE);
+          const indicator = tabDropIndicator ?? { id: tab.id, side: "before" };
+          if (fromId && fromId !== tab.id) {
+            reorderTabs(fromId, indicator.id, indicator.side);
+          }
+          setTabDragSrc(null);
+          setTabDropIndicator(null);
+        }}
       >
+        {tabDropIndicator?.id === tab.id && tabDropIndicator.side === "before" && (
+          <span className="pointer-events-none absolute -left-px top-0 h-full w-0.5 rounded-full bg-primary" />
+        )}
+        {tabDropIndicator?.id === tab.id && tabDropIndicator.side === "after" && (
+          <span className="pointer-events-none absolute -right-px top-0 h-full w-0.5 rounded-full bg-primary" />
+        )}
+        {tab.kind === "diagram" && (
+          <Network
+            size={11}
+            className="shrink-0 text-emerald-600 dark:text-emerald-400"
+          />
+        )}
         {conn && (
           <span
             className="h-2 w-2 shrink-0 rounded-full"
@@ -401,6 +470,29 @@ export default function EditorTabs() {
               requestAnimationFrame(() => inputRef.current?.select());
             }}
           />
+          {!isDetachedWindow() && (
+            <>
+              <div className="my-1 border-t border-border" />
+              <ContextItem
+                label="Move to new window"
+                disabled={tabs.length <= 1}
+                icon={<ExternalLink size={11} />}
+                onClick={async () => {
+                  const toDetach = tabs.find((t) => t.id === contextMenu.tabId);
+                  closeContextMenu();
+                  if (!toDetach) return;
+                  try {
+                    await detachTab(toDetach);
+                    // Only remove the tab from this window once the new
+                    // window was created successfully.
+                    closeTab(toDetach.id);
+                  } catch (e) {
+                    console.error("Failed to detach tab:", e);
+                  }
+                }}
+              />
+            </>
+          )}
         </div>
       )}
     </div>
@@ -411,22 +503,25 @@ function ContextItem({
   label,
   onClick,
   disabled,
+  icon,
 }: {
   label: string;
   onClick: () => void;
   disabled?: boolean;
+  icon?: React.ReactNode;
 }) {
   return (
     <button
       onClick={disabled ? undefined : onClick}
       disabled={disabled}
       className={cn(
-        "flex w-full items-center px-3 py-1 text-left text-xs",
+        "flex w-full items-center gap-2 px-3 py-1 text-left text-xs",
         disabled
           ? "text-muted-foreground/40 cursor-default"
           : "hover:bg-accent hover:text-accent-foreground",
       )}
     >
+      {icon}
       {label}
     </button>
   );

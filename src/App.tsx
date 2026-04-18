@@ -4,6 +4,7 @@ import type { FormatOptions } from "./lib/sqlFormat";
 import { useMetadataStore } from "./stores/metadataStore";
 import { useSettingsStore } from "./stores/settingsStore";
 import { saveQuery, saveQueryAs, openQuery } from "./lib/fileOps";
+import { validateQuery } from "./lib/validateQuery";
 import TitleBar from "./components/TitleBar";
 import ResizeHandles from "./components/ResizeHandles";
 import SplashScreen from "./components/SplashScreen";
@@ -69,6 +70,9 @@ export default function App() {
 
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId);
   const activeTabId = useEditorStore((s) => s.activeTabId);
+  const activeTabKind = useEditorStore(
+    (s) => s.tabs.find((t) => t.id === s.activeTabId)?.kind,
+  );
   const loading = useQueryStore((s) => s.loading);
   const executeQuery = useQueryStore((s) => s.executeQuery);
 
@@ -151,6 +155,59 @@ export default function App() {
     useEditorStore.getState().clearActiveTab();
   }, []);
 
+  const [validateStatus, setValidateStatus] = useState<
+    | { kind: "idle" }
+    | { kind: "validating" }
+    | { kind: "ok"; note?: string }
+    | { kind: "error"; message: string }
+  >({ kind: "idle" });
+
+  const handleValidate = useCallback(async () => {
+    // Use selection if there is one, otherwise full tab content.
+    const editor = getActiveEditorInstance();
+    let sql = "";
+    if (editor) {
+      const selection = editor.getSelection();
+      const model = editor.getModel();
+      if (model) {
+        sql =
+          selection && !selection.isEmpty()
+            ? model.getValueInRange(selection)
+            : model.getValue();
+      }
+    }
+    if (!sql.trim()) {
+      const tab = useEditorStore.getState().getActiveTab();
+      sql = tab?.content ?? "";
+    }
+    if (!sql.trim()) return;
+
+    const tab = useEditorStore.getState().getActiveTab();
+    const connId = tab?.connectionId ?? activeConnectionId;
+    if (!connId) {
+      setValidateStatus({ kind: "error", message: "No active connection" });
+      return;
+    }
+    setValidateStatus({ kind: "validating" });
+    try {
+      const result = await validateQuery(connId, sql.trim());
+      if (result.ok) {
+        setValidateStatus({ kind: "ok", note: result.note ?? undefined });
+      } else {
+        setValidateStatus({ kind: "error", message: result.error ?? "Invalid SQL" });
+      }
+    } catch (e) {
+      setValidateStatus({ kind: "error", message: String(e) });
+    }
+  }, [activeConnectionId]);
+
+  // Auto-dismiss the validation toast after a few seconds.
+  useEffect(() => {
+    if (validateStatus.kind === "idle" || validateStatus.kind === "validating") return;
+    const t = setTimeout(() => setValidateStatus({ kind: "idle" }), 4500);
+    return () => clearTimeout(t);
+  }, [validateStatus]);
+
   const handleRunFromToolbar = useCallback(() => {
     // If the editor has selected text, run only that; otherwise run full content
     const editor = getActiveEditorInstance();
@@ -179,6 +236,7 @@ export default function App() {
   const shortcutHandlers: ShortcutHandlers = useMemo(
     () => ({
       "run-query": handleRunFromToolbar,
+      "validate-query": handleValidate,
       "format-query": handleFormat,
       "new-tab": () => {
         const connId = useConnectionStore.getState().activeConnectionId;
@@ -200,7 +258,7 @@ export default function App() {
       "toggle-ai-panel": () => useAiStore.getState().togglePanel(),
       "open-settings": () => setSettingsOpen("general"),
     }),
-    [handleRunFromToolbar, handleFormat],
+    [handleRunFromToolbar, handleFormat, handleValidate],
   );
 
   useGlobalShortcuts(shortcutHandlers);
@@ -221,6 +279,8 @@ export default function App() {
       <div className="flex flex-1 flex-col overflow-hidden">
         <Toolbar
           onRun={handleRunFromToolbar}
+          onValidate={handleValidate}
+          validating={validateStatus.kind === "validating"}
           onFormat={handleFormat}
           onFormatWithComments={handleFormatWithComments}
           onClear={handleClear}
@@ -230,11 +290,30 @@ export default function App() {
           infoPanelOpen={infoPanelOpen}
           onToggleInfoPanel={() => setInfoPanelOpen(!infoPanelOpen)}
         />
-        <ResizablePanel
-          top={<EditorArea onExecute={handleExecute} onFormat={handleFormat} />}
-          bottom={<ResultsPane />}
-          defaultRatio={0.6}
-        />
+        {(validateStatus.kind === "ok" || validateStatus.kind === "error") && (
+          <div
+            className={`fixed right-4 top-14 z-50 max-w-md rounded-md border px-3 py-2 text-xs shadow-lg ${
+              validateStatus.kind === "ok"
+                ? "border-success/40 bg-success/10 text-success"
+                : "border-destructive/40 bg-destructive/10 text-destructive"
+            }`}
+          >
+            {validateStatus.kind === "ok"
+              ? validateStatus.note
+                ? `SQL validation skipped: ${validateStatus.note}`
+                : "SQL is valid."
+              : `Invalid SQL: ${validateStatus.message}`}
+          </div>
+        )}
+        {activeTabKind === "diagram" ? (
+          <EditorArea onExecute={handleExecute} onFormat={handleFormat} />
+        ) : (
+          <ResizablePanel
+            top={<EditorArea onExecute={handleExecute} onFormat={handleFormat} />}
+            bottom={<ResultsPane />}
+            defaultRatio={0.6}
+          />
+        )}
       </div>
       {infoPanelOpen && <InfoPanel onClose={() => setInfoPanelOpen(false)} />}
       {aiPanelOpen && <AiPanel />}

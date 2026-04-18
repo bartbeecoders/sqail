@@ -500,6 +500,16 @@ pub async fn list_foreign_keys(
 }
 
 #[tauri::command]
+pub async fn validate_query(
+    state: State<'_, AppState>,
+    connection_id: String,
+    sql: String,
+) -> Result<crate::validate::ValidationResult, String> {
+    let (pool, driver) = get_pool_and_driver(&state, &connection_id).await?;
+    Ok(crate::validate::validate(pool, &driver, &sql).await)
+}
+
+#[tauri::command]
 pub async fn get_view_definition(
     state: State<'_, AppState>,
     connection_id: String,

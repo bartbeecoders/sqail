@@ -156,7 +156,8 @@
       "Bash(curl -sL \"https://huggingface.co/api/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF\")",
       "Bash(curl -sL \"https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct/raw/main/tokenizer_config.json\")",
       "Bash(curl -sL \"https://huggingface.co/api/models/unsloth/Qwen3.6-35B-A3B-GGUF\")",
-      "Bash(curl -sL \"https://huggingface.co/api/models/bartowski/Qwen_Qwen3.6-35B-A3B-GGUF\")"
+      "Bash(curl -sL \"https://huggingface.co/api/models/bartowski/Qwen_Qwen3.6-35B-A3B-GGUF\")",
+      "Bash(echo \"exit: $?\")"
     ]
   }
 }

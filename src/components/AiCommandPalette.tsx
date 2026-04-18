@@ -9,6 +9,7 @@ import {
   ChevronDown,
   Columns2,
 } from "lucide-react";
+import { cn } from "../lib/utils";
 import { useAiStore } from "../stores/aiStore";
 import { useEditorStore } from "../stores/editorStore";
 import { useConnectionStore } from "../stores/connectionStore";
@@ -56,6 +57,9 @@ export default function AiCommandPalette() {
     paletteError,
     streaming,
     currentResponse,
+    validationStatus,
+    validationMessage,
+    autoFixAttempts,
     currentFlow,
     error,
     providers,
@@ -419,6 +423,30 @@ export default function AiCommandPalette() {
               <pre className="whitespace-pre-wrap text-xs leading-relaxed text-foreground">
                 {currentResponse}
               </pre>
+            )}
+            {currentResponse && !streaming && validationStatus !== "idle" && (
+              <div
+                className={cn(
+                  "mt-2 rounded-md border px-2 py-1.5 text-[10px]",
+                  validationStatus === "valid" && "border-success/40 bg-success/10 text-success",
+                  validationStatus === "skipped" && "border-border bg-muted/60 text-muted-foreground",
+                  validationStatus === "invalid" && "border-destructive/40 bg-destructive/10 text-destructive",
+                  validationStatus === "validating" && "border-border bg-muted/60 text-muted-foreground",
+                )}
+              >
+                {validationStatus === "validating" && "Validating SQL against the database…"}
+                {validationStatus === "valid" && "SQL validated against the database."}
+                {validationStatus === "skipped" &&
+                  (validationMessage ?? "Validation skipped.")}
+                {validationStatus === "invalid" && (
+                  <>
+                    Invalid SQL: {validationMessage}
+                    {autoFixAttempts > 0 && (
+                      <span className="opacity-70"> — auto-fix attempted.</span>
+                    )}
+                  </>
+                )}
+              </div>
             )}
             {streaming && !currentResponse && (
               <div className="flex items-center gap-2 text-xs text-muted-foreground">

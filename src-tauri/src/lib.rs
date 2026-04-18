@@ -9,6 +9,7 @@ mod query;
 mod query_history;
 mod schema;
 mod state;
+mod validate;
 
 use ai::store::{AiHistoryStore, AiProviderStore};
 use db::store::ConnectionStore;
@@ -85,6 +86,7 @@ pub fn run() {
             commands::list_indexes,
             commands::list_routines,
             commands::list_foreign_keys,
+            commands::validate_query,
             commands::get_view_definition,
             commands::get_routine_definition,
             commands::start_entra_login,

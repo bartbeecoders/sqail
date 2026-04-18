@@ -94,3 +94,6 @@ existing deterministic Monaco completions with no regressions. See
 cancellation, and settings UX.
 
 In the AI assistant, add the possibility to select the local ai (inline ai) as provider. Only when the inlina ai is enabled.
+
+When the AI assitant generates a query, check if the query is valid sql. If it is not valid sql, let the assistant know and ask it to correct the query.
+Also is there a way to validate the query before executing it?

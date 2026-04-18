@@ -2,8 +2,10 @@ import { create } from "zustand";
 import type { editor as monacoEditor } from "monaco-editor";
 import type { EditorTab } from "../types/editor";
 import { defaultDiagramState, type DiagramState } from "../types/diagram";
+import { consumeHandoffTab, isDetachedWindow, tabStorageKey } from "../lib/detach";
 
-const STORAGE_KEY = "sqail_tabs";
+const STORAGE_KEY = tabStorageKey();
+const DETACHED = isDetachedWindow();
 
 // Global ref to the active Monaco editor instance — used by the F5 shortcut
 // handler to read selected text without threading refs through the component tree.
@@ -26,6 +28,14 @@ function createTab(index: number): EditorTab {
 }
 
 function loadTabs(): { tabs: EditorTab[]; activeTabId: string } {
+  // Detached windows boot from a one-shot handoff payload and are otherwise
+  // in-memory only — closing the window destroys the tab.
+  if (DETACHED) {
+    const handoff = consumeHandoffTab();
+    if (handoff) return { tabs: [handoff], activeTabId: handoff.id };
+    const tab = createTab(1);
+    return { tabs: [tab], activeTabId: tab.id };
+  }
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
@@ -47,6 +57,7 @@ interface EditorState {
   addTabWithContent: (title: string, content: string) => void;
   addDiagramTab: (title: string, schemaName: string, connectionId?: string) => void;
   updateDiagram: (id: string, updater: (d: DiagramState) => DiagramState) => void;
+  reorderTabs: (fromId: string, toId: string, side: "before" | "after") => void;
   closeTab: (id: string) => void;
   closeOtherTabs: (id: string) => void;
   closeTabsToRight: (id: string) => void;
@@ -67,6 +78,9 @@ export const useEditorStore = create<EditorState>((set, get) => {
   const initial = loadTabs();
 
   const persist = () => {
+    // Detached windows are intentionally in-memory only — closing the window
+    // discards the tab.
+    if (DETACHED) return;
     const { tabs, activeTabId } = get();
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ tabs, activeTabId }));
   };
@@ -114,6 +128,23 @@ export const useEditorStore = create<EditorState>((set, get) => {
           return { ...t, diagram: updater(t.diagram) };
         }),
       }));
+      persist();
+    },
+
+    reorderTabs: (fromId, toId, side) => {
+      if (fromId === toId) return;
+      const { tabs } = get();
+      const fromIdx = tabs.findIndex((t) => t.id === fromId);
+      const toIdx = tabs.findIndex((t) => t.id === toId);
+      if (fromIdx < 0 || toIdx < 0) return;
+      const reordered = [...tabs];
+      const [moving] = reordered.splice(fromIdx, 1);
+      // Recompute the target index after removal.
+      const anchor = reordered.findIndex((t) => t.id === toId);
+      if (anchor < 0) return;
+      const insertAt = side === "before" ? anchor : anchor + 1;
+      reordered.splice(insertAt, 0, moving);
+      set({ tabs: reordered });
       persist();
     },
 

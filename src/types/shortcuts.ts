@@ -9,6 +9,7 @@ export interface ShortcutAction {
 export const SHORTCUT_ACTIONS: ShortcutAction[] = [
   // Editor
   { id: "run-query", label: "Run Query", defaultKey: "F5", category: "editor" },
+  { id: "validate-query", label: "Validate Query", defaultKey: "Ctrl+Shift+V", category: "editor" },
   { id: "format-query", label: "Format Query", defaultKey: "Ctrl+Shift+F", category: "editor" },
   { id: "new-tab", label: "New Tab", defaultKey: "Ctrl+N", category: "editor" },
   { id: "close-tab", label: "Close Tab", defaultKey: "Ctrl+W", category: "editor" },

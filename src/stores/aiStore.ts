@@ -2,12 +2,14 @@ import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import type { AiProviderConfig, AiFlow, AiHistoryEntry, OpenRouterModel } from "../types/ai";
 import { useEditorStore } from "./editorStore";
+import { useConnectionStore } from "./connectionStore";
 import { stripThinkingBlocks, stripWrappingCodeFence } from "../lib/stripThinking";
 import {
   inlineIsEffectiveDefault,
   selectVirtualInlineProvider,
 } from "../lib/inlineProvider";
 import { INLINE_LOCAL_PROVIDER_ID } from "../types/ai";
+import { validateQuery, type ValidationResult } from "../lib/validateQuery";
 
 /** Resolve the provider id to send to the backend for a flow.
  *  - If the user explicitly picked a provider in the palette, honour that.
@@ -27,6 +29,15 @@ const SQL_RESPONSE_FLOWS: ReadonlySet<AiFlow> = new Set([
   "comment_sql",
   "fix_query",
 ]);
+
+/** Flows whose SQL response we should round-trip validate (and auto-fix if invalid). */
+const VALIDATED_FLOWS: ReadonlySet<AiFlow> = new Set([
+  "generate_sql",
+  "optimize",
+  "fix_query",
+]);
+
+const MAX_AUTO_FIX_ATTEMPTS = 1;
 
 function normalizeResponse(flow: AiFlow | null, text: string): string {
   const stripped = stripThinkingBlocks(text);
@@ -51,6 +62,14 @@ interface AiState {
   currentResponse: string;
   currentFlow: AiFlow | null;
   error: string | null;
+
+  // Validation + auto-fix state for SQL-producing flows
+  validationStatus: "idle" | "validating" | "valid" | "invalid" | "skipped";
+  validationMessage: string | null;
+  /** Remembered context for the last SQL-producing call, used to replay fix_query. */
+  lastSchemaContext: string;
+  lastDriver: string;
+  autoFixAttempts: number;
 
   // Command palette state
   paletteOpen: boolean;
@@ -113,6 +132,12 @@ export const useAiStore = create<AiState>((set, get) => ({
   currentResponse: "",
   currentFlow: null,
   error: null,
+
+  validationStatus: "idle",
+  validationMessage: null,
+  lastSchemaContext: "",
+  lastDriver: "",
+  autoFixAttempts: 0,
 
   paletteOpen: false,
   paletteFlow: null,
@@ -201,6 +226,10 @@ export const useAiStore = create<AiState>((set, get) => ({
       selectedProviderId: null,
       currentResponse: "",
       error: null,
+      // Fresh exchange — reset validation + auto-fix counter.
+      validationStatus: "idle",
+      validationMessage: null,
+      autoFixAttempts: 0,
     }),
   closePalette: () =>
     set({ paletteOpen: false, paletteFlow: null, paletteSql: "", paletteError: "" }),
@@ -215,7 +244,16 @@ export const useAiStore = create<AiState>((set, get) => ({
 
   generateSql: async (prompt, schemaContext, driver) => {
     const providerId = resolveDispatchProviderId(get().selectedProviderId);
-    set({ streaming: true, currentResponse: "", error: null, currentFlow: "generate_sql" });
+    set({
+      streaming: true,
+      currentResponse: "",
+      error: null,
+      currentFlow: "generate_sql",
+      lastSchemaContext: schemaContext,
+      lastDriver: driver,
+      validationStatus: "idle",
+      validationMessage: null,
+    });
     try {
       const requestId = await invoke<string>("ai_generate_sql", { prompt, schemaContext, driver, providerId });
       set({ currentRequestId: requestId });
@@ -237,7 +275,16 @@ export const useAiStore = create<AiState>((set, get) => ({
 
   optimizeQuery: async (sql, schemaContext, driver) => {
     const providerId = resolveDispatchProviderId(get().selectedProviderId);
-    set({ streaming: true, currentResponse: "", error: null, currentFlow: "optimize" });
+    set({
+      streaming: true,
+      currentResponse: "",
+      error: null,
+      currentFlow: "optimize",
+      lastSchemaContext: schemaContext,
+      lastDriver: driver,
+      validationStatus: "idle",
+      validationMessage: null,
+    });
     try {
       const requestId = await invoke<string>("ai_optimize_query", { sql, schemaContext, driver, providerId });
       set({ currentRequestId: requestId });
@@ -281,7 +328,16 @@ export const useAiStore = create<AiState>((set, get) => ({
 
   fixQuery: async (sql, errorMessage, schemaContext, driver) => {
     const providerId = resolveDispatchProviderId(get().selectedProviderId);
-    set({ streaming: true, currentResponse: "", error: null, currentFlow: "fix_query" });
+    set({
+      streaming: true,
+      currentResponse: "",
+      error: null,
+      currentFlow: "fix_query",
+      lastSchemaContext: schemaContext,
+      lastDriver: driver,
+      validationStatus: "idle",
+      validationMessage: null,
+    });
     try {
       const requestId = await invoke<string>("ai_fix_query", {
         sql,
@@ -306,12 +362,51 @@ export const useAiStore = create<AiState>((set, get) => ({
 
   finishStream: (requestId, fullText) => {
     const state = get();
-    if (state.currentRequestId === requestId) {
-      set({
-        streaming: false,
-        currentResponse: normalizeResponse(state.currentFlow, fullText),
-        currentRequestId: null,
-      });
+    if (state.currentRequestId !== requestId) return;
+    const normalized = normalizeResponse(state.currentFlow, fullText);
+    const flow = state.currentFlow;
+    set({
+      streaming: false,
+      currentResponse: normalized,
+      currentRequestId: null,
+    });
+
+    // Fire-and-forget: round-trip validate SQL-producing flows; if invalid and
+    // we haven't used our one auto-fix yet, automatically feed the error back
+    // to the AI via ai_fix_query.
+    if (flow && VALIDATED_FLOWS.has(flow) && normalized.trim().length > 0) {
+      const connId = useConnectionStore.getState().activeConnectionId;
+      if (!connId) {
+        set({ validationStatus: "idle", validationMessage: null });
+        return;
+      }
+      set({ validationStatus: "validating", validationMessage: null });
+      validateQuery(connId, normalized)
+        .then((result: ValidationResult) => {
+          const cur = get();
+          // Ignore the response if another exchange has started meanwhile.
+          if (cur.currentResponse !== normalized) return;
+          if (result.ok) {
+            set({
+              validationStatus: result.note ? "skipped" : "valid",
+              validationMessage: result.note ?? null,
+            });
+            return;
+          }
+          const errMsg = result.error ?? "Unknown validation error";
+          set({ validationStatus: "invalid", validationMessage: errMsg });
+
+          // Auto-fix (at most once per exchange)
+          if (cur.autoFixAttempts < MAX_AUTO_FIX_ATTEMPTS) {
+            set({ autoFixAttempts: cur.autoFixAttempts + 1 });
+            // Re-run through the fix flow with the validation error as context.
+            get().fixQuery(normalized, errMsg, cur.lastSchemaContext, cur.lastDriver);
+          }
+        })
+        .catch((e) => {
+          // Don't block the user if validation itself errors (e.g., disconnect).
+          set({ validationStatus: "skipped", validationMessage: String(e) });
+        });
     }
   },
 

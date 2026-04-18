@@ -262,8 +262,8 @@ jobs:
             [ -f "$f" ] && cp "$f" "dist/releases/${PREFIX}_x64-setup.exe"
           done
           # NSIS signature (for updater)
-          for f in "$BUNDLE/nsis/"*.nsis.zip.sig; do
-            [ -f "$f" ] && cp "$f" "dist/releases/${PREFIX}_x64-setup.nsis.zip.sig"
+          for f in "$BUNDLE/nsis/"*-setup.exe.sig; do
+            [ -f "$f" ] && cp "$f" "dist/releases/${PREFIX}_x64-setup.exe.sig"
           done
           # MSI
           for f in "$BUNDLE/msi/"*.msi; do
@@ -429,7 +429,7 @@ jobs:
           missing=0
           for f in \
             "artifacts/${PREFIX}_amd64.AppImage.sig" \
-            "artifacts/${PREFIX}_x64-setup.nsis.zip.sig" \
+            "artifacts/${PREFIX}_x64-setup.exe.sig" \
             "artifacts/${PREFIX}_universal.app.tar.gz.sig"; do
             if [ ! -s "$f" ]; then
               echo "::error::Missing updater signature: $f"
@@ -453,7 +453,7 @@ jobs:
           # Signatures are verified present by the preceding step —
           # reading them here is now infallible.
           LINUX_SIG=$(cat "artifacts/${PREFIX}_amd64.AppImage.sig")
-          WINDOWS_SIG=$(cat "artifacts/${PREFIX}_x64-setup.nsis.zip.sig")
+          WINDOWS_SIG=$(cat "artifacts/${PREFIX}_x64-setup.exe.sig")
           MACOS_SIG=$(cat "artifacts/${PREFIX}_universal.app.tar.gz.sig")
 
           # Extract release notes from releases.json

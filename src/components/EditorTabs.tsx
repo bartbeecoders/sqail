@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { Pin, Plus, X } from "lucide-react";
+import { ChevronDown, Network, Pin, Plus, SquarePen, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { buildSelectStatement, buildRoutineCallStatement } from "../lib/sqlGenerate";
 import { cn } from "../lib/utils";
@@ -22,6 +22,7 @@ export default function EditorTabs() {
     activeTabId,
     addTab,
     addTabWithContent,
+    addDiagramTab,
     closeTab,
     closeOtherTabs,
     closeTabsToRight,
@@ -39,6 +40,8 @@ export default function EditorTabs() {
   const [contextMenu, setContextMenu] = useState<TabContextMenu | null>(null);
   const contextRef = useRef<HTMLDivElement>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const addMenuRef = useRef<HTMLDivElement>(null);
 
   const commitRename = (id: string) => {
     const trimmed = editValue.trim();
@@ -65,6 +68,28 @@ export default function EditorTabs() {
       document.removeEventListener("keydown", onKeyDown);
     };
   }, [contextMenu, closeContextMenu]);
+
+  useEffect(() => {
+    if (!addMenuOpen) return;
+    const onMouseDown = (e: MouseEvent) => {
+      if (addMenuRef.current && !addMenuRef.current.contains(e.target as Node)) {
+        setAddMenuOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setAddMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onMouseDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [addMenuOpen]);
+
+  const openSchemaDiagramTab = useCallback(() => {
+    addDiagramTab("Diagram", "", globalConnectionId ?? undefined);
+  }, [addDiagramTab, globalConnectionId]);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     if (e.dataTransfer.types.includes("application/sqlai-table") || e.dataTransfer.types.includes("application/sqlai-routine")) {
@@ -270,20 +295,54 @@ export default function EditorTabs() {
       )}
       <div className="flex min-h-8 flex-wrap items-end gap-x-px gap-y-0.5 px-1 py-0.5">
         {unpinnedTabs.map(renderTab)}
-        <button
-          onClick={() => {
-            addTab();
-            // Assign current connection to the new tab
-            if (globalConnectionId) {
-              const newTab = useEditorStore.getState().getActiveTab();
-              if (newTab) setConnectionId(newTab.id, globalConnectionId);
-            }
-          }}
-          className="mb-0.5 ml-1 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-          title="New tab (Ctrl+N)"
-        >
-          <Plus size={12} />
-        </button>
+        <div ref={addMenuRef} className="relative mb-0.5 ml-1 flex">
+          <button
+            onClick={() => {
+              addTab();
+              if (globalConnectionId) {
+                const newTab = useEditorStore.getState().getActiveTab();
+                if (newTab) setConnectionId(newTab.id, globalConnectionId);
+              }
+            }}
+            className="rounded-l rounded-r-none p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+            title="New SQL tab (Ctrl+N)"
+          >
+            <Plus size={12} />
+          </button>
+          <button
+            onClick={() => setAddMenuOpen((v) => !v)}
+            className="rounded-l-none rounded-r border-l border-border/60 px-0.5 py-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+            title="New tab options"
+          >
+            <ChevronDown size={10} />
+          </button>
+          {addMenuOpen && (
+            <div className="absolute left-0 top-full z-30 mt-0.5 min-w-44 rounded-md border border-border bg-background py-1 shadow-lg text-xs">
+              <button
+                onClick={() => {
+                  setAddMenuOpen(false);
+                  addTab();
+                  if (globalConnectionId) {
+                    const newTab = useEditorStore.getState().getActiveTab();
+                    if (newTab) setConnectionId(newTab.id, globalConnectionId);
+                  }
+                }}
+                className="flex w-full items-center gap-2 px-3 py-1.5 hover:bg-accent hover:text-accent-foreground"
+              >
+                <SquarePen size={11} /> New SQL tab
+              </button>
+              <button
+                onClick={() => {
+                  setAddMenuOpen(false);
+                  openSchemaDiagramTab();
+                }}
+                className="flex w-full items-center gap-2 px-3 py-1.5 hover:bg-accent hover:text-accent-foreground"
+              >
+                <Network size={11} /> New schema diagram
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       {contextMenu && (

@@ -34,11 +34,20 @@ export default function Hero() {
             </span>
           </h1>
 
-          <p className="mb-8 max-w-lg text-lg leading-relaxed text-text-muted">
+          <p className="mb-6 max-w-lg text-lg leading-relaxed text-text-muted">
             A lightweight, cross-platform desktop SQL editor with built-in AI.
             Connect to PostgreSQL, MySQL, SQLite, or SQL Server — and let AI
             help you write, explain, and optimize your queries.
           </p>
+
+          <div className="mb-8 flex flex-wrap gap-2">
+            <span className="rounded-full border border-brand-cyan/30 bg-brand-cyan/5 px-3 py-1 text-xs font-medium text-brand-cyan">
+              New: drag-and-drop schema diagrams
+            </span>
+            <span className="rounded-full border border-brand-yellow/30 bg-brand-yellow/5 px-3 py-1 text-xs font-medium text-brand-yellow">
+              Local LLM + LoRA fine-tuning
+            </span>
+          </div>
 
           <div className="flex flex-wrap gap-4">
             <a

@@ -3,9 +3,11 @@ import { Columns2 } from "lucide-react";
 import type { editor as monacoEditor } from "monaco-editor";
 import { cn } from "../lib/utils";
 import { useAiStore } from "../stores/aiStore";
+import { useEditorStore } from "../stores/editorStore";
 import EditorTabs from "./EditorTabs";
 import SqlEditor from "./SqlEditor";
 import SplitEditorPane from "./SplitEditorPane";
+import SchemaDiagram from "./SchemaDiagram";
 import DiffPreview from "./DiffPreview";
 
 interface EditorAreaProps {
@@ -22,6 +24,8 @@ export default function EditorArea({ onExecute, onFormat }: EditorAreaProps) {
   const diffPreview = useAiStore((s) => s.diffPreview);
   const acceptDiff = useAiStore((s) => s.acceptDiffPreview);
   const rejectDiff = useAiStore((s) => s.closeDiffPreview);
+  const activeTab = useEditorStore((s) => s.tabs.find((t) => t.id === s.activeTabId));
+  const isDiagramTab = activeTab?.kind === "diagram";
 
   const toggleSplit = useCallback(() => {
     setSplit((prev) => !prev);
@@ -73,21 +77,25 @@ export default function EditorArea({ onExecute, onFormat }: EditorAreaProps) {
         <div className="flex-1">
           <EditorTabs />
         </div>
-        <button
-          onClick={toggleSplit}
-          className={cn(
-            "mr-1 rounded p-1 transition-colors",
-            split
-              ? "bg-primary/10 text-primary"
-              : "text-muted-foreground hover:bg-accent hover:text-foreground",
-          )}
-          title={split ? "Close split view" : "Split editor"}
-        >
-          <Columns2 size={14} />
-        </button>
+        {!isDiagramTab && (
+          <button
+            onClick={toggleSplit}
+            className={cn(
+              "mr-1 rounded p-1 transition-colors",
+              split
+                ? "bg-primary/10 text-primary"
+                : "text-muted-foreground hover:bg-accent hover:text-foreground",
+            )}
+            title={split ? "Close split view" : "Split editor"}
+          >
+            <Columns2 size={14} />
+          </button>
+        )}
       </div>
 
-      {split ? (
+      {isDiagramTab && activeTab ? (
+        <SchemaDiagram tabId={activeTab.id} />
+      ) : split ? (
         <div ref={containerRef} className="flex flex-1 overflow-hidden">
           <div style={{ flex: `${splitRatio} 1 0%` }} className="flex min-w-0 flex-col overflow-hidden">
             <SqlEditor onExecute={onExecute} onFormat={onFormat} editorRefOut={primaryEditorRef} />

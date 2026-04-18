@@ -4,6 +4,7 @@ import {
   GitBranch,
   ShieldCheck,
   Database,
+  Network,
 } from "lucide-react";
 import { FEATURES } from "../lib/constants";
 
@@ -13,13 +14,15 @@ const ICON_MAP: Record<string, React.ReactNode> = {
   GitBranch: <GitBranch size={24} />,
   ShieldCheck: <ShieldCheck size={24} />,
   Database: <Database size={24} />,
+  Network: <Network size={24} />,
 };
 
 // Smart and Private use yellow per brand-guide §3 ("yellow owns intelligence / AI").
-// Fast, Free, Universal use cyan.
+// Fast, Free, Universal, Visual use cyan.
 const ACCENT_MAP: Record<string, "cyan" | "yellow"> = {
   Fast: "cyan",
   Smart: "yellow",
+  Visual: "cyan",
   Free: "cyan",
   Private: "yellow",
   Universal: "cyan",
@@ -31,7 +34,7 @@ export default function Features() {
       <div className="mx-auto max-w-6xl px-6">
         <div className="mb-16 text-center">
           <h2 className="mb-4 text-3xl font-bold text-text-primary sm:text-4xl">
-            Five things sqail does well
+            Six things sqail does well
           </h2>
           <p className="mx-auto max-w-2xl text-text-muted">
             Everything else is intentionally out of scope. We'd rather ship one

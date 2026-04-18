@@ -37,3 +37,10 @@ Make it look professional and modern. Use the image-gen plugin to generate the s
 Can you change the app icon to the 'snail' like image.
 
 Add a marketing folder with a marketing plan and a marketing strategy.
+
+
+Update the portal to highlight the new features and improvements.
+
+- new diagraming feature
+- Local LLM support
+- Local LLM training and fine-tuning

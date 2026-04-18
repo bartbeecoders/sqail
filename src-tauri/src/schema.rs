@@ -46,6 +46,19 @@ pub struct RoutineInfo {
     pub routine_type: String, // "function" or "procedure"
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForeignKeyInfo {
+    pub constraint_name: String,
+    pub source_schema: String,
+    pub source_table: String,
+    pub source_column: String,
+    pub target_schema: String,
+    pub target_table: String,
+    pub target_column: String,
+    pub ordinal: i32,
+}
+
 // ── PostgreSQL ──────────────────────────────────────────────
 
 async fn pg_schemas(pool: &sqlx::PgPool) -> Result<Vec<SchemaInfo>, String> {
@@ -964,5 +977,180 @@ pub async fn get_routine_definition(
         Driver::Sqlite => Err("SQLite does not support stored routines".to_string()),
         Driver::Mssql => mssql_routine_definition(get_mssql_pool(&pool)?, schema, name).await,
         Driver::Dbservice => Err("Routine definitions not supported via DbService".to_string()),
+    }
+}
+
+// ── Foreign keys ────────────────────────────────────────────
+
+async fn pg_foreign_keys(pool: &sqlx::PgPool, schema: &str) -> Result<Vec<ForeignKeyInfo>, String> {
+    let rows = sqlx::query(
+        "SELECT tc.constraint_name, \
+                kcu.table_schema, kcu.table_name, kcu.column_name, kcu.ordinal_position, \
+                ccu.table_schema AS target_schema, ccu.table_name AS target_table, ccu.column_name AS target_column \
+         FROM information_schema.table_constraints tc \
+         JOIN information_schema.key_column_usage kcu \
+           ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema \
+         JOIN information_schema.constraint_column_usage ccu \
+           ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema \
+         WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = $1 \
+         ORDER BY tc.constraint_name, kcu.ordinal_position",
+    )
+    .bind(schema)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(rows
+        .iter()
+        .map(|r| ForeignKeyInfo {
+            constraint_name: r.get(0),
+            source_schema: r.get(1),
+            source_table: r.get(2),
+            source_column: r.get(3),
+            ordinal: r.get::<i32, _>(4),
+            target_schema: r.get(5),
+            target_table: r.get(6),
+            target_column: r.get(7),
+        })
+        .collect())
+}
+
+async fn mysql_foreign_keys(
+    pool: &sqlx::MySqlPool,
+    schema: &str,
+) -> Result<Vec<ForeignKeyInfo>, String> {
+    let rows = sqlx::query(
+        "SELECT constraint_name, table_schema, table_name, column_name, ordinal_position, \
+                referenced_table_schema, referenced_table_name, referenced_column_name \
+         FROM information_schema.key_column_usage \
+         WHERE referenced_table_name IS NOT NULL AND table_schema = ? \
+         ORDER BY constraint_name, ordinal_position",
+    )
+    .bind(schema)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(rows
+        .iter()
+        .map(|r| ForeignKeyInfo {
+            constraint_name: r.get(0),
+            source_schema: r.get(1),
+            source_table: r.get(2),
+            source_column: r.get(3),
+            ordinal: r.get::<i32, _>(4),
+            target_schema: r.get(5),
+            target_table: r.get(6),
+            target_column: r.get(7),
+        })
+        .collect())
+}
+
+async fn sqlite_foreign_keys(
+    pool: &sqlx::SqlitePool,
+    _schema: &str,
+) -> Result<Vec<ForeignKeyInfo>, String> {
+    // Enumerate tables, then query pragma_foreign_key_list per table.
+    let table_rows = sqlx::query(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let mut result = Vec::new();
+    for tr in &table_rows {
+        let table_name: String = tr.get(0);
+        let sql = format!(
+            "SELECT id, seq, \"table\", \"from\", \"to\" FROM pragma_foreign_key_list('{}')",
+            table_name.replace('\'', "''")
+        );
+        let fk_rows = sqlx::query(&sql)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        for fr in &fk_rows {
+            let fk_id: i32 = fr.get(0);
+            let seq: i32 = fr.get(1);
+            let target_table: String = fr.get(2);
+            let source_column: String = fr.get(3);
+            let target_column: Option<String> = fr.try_get(4).ok();
+            result.push(ForeignKeyInfo {
+                constraint_name: format!("{}__fk{}", table_name, fk_id),
+                source_schema: "main".to_string(),
+                source_table: table_name.clone(),
+                source_column,
+                ordinal: seq + 1,
+                target_schema: "main".to_string(),
+                target_table,
+                target_column: target_column.unwrap_or_default(),
+            });
+        }
+    }
+    Ok(result)
+}
+
+async fn mssql_foreign_keys(
+    pool: &bb8::Pool<bb8_tiberius::ConnectionManager>,
+    schema: &str,
+) -> Result<Vec<ForeignKeyInfo>, String> {
+    let mut conn = pool.get().await.map_err(|e| e.to_string())?;
+    let query = format!(
+        "SELECT fk.name, SCHEMA_NAME(fk.schema_id), OBJECT_NAME(fk.parent_object_id), pc.name, \
+                fkc.constraint_column_id, OBJECT_SCHEMA_NAME(fk.referenced_object_id), \
+                OBJECT_NAME(fk.referenced_object_id), rc.name \
+         FROM sys.foreign_keys fk \
+         JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id \
+         JOIN sys.columns pc ON fkc.parent_object_id = pc.object_id AND fkc.parent_column_id = pc.column_id \
+         JOIN sys.columns rc ON fkc.referenced_object_id = rc.object_id AND fkc.referenced_column_id = rc.column_id \
+         WHERE SCHEMA_NAME(fk.schema_id) = '{}' \
+         ORDER BY fk.name, fkc.constraint_column_id",
+        schema.replace('\'', "''")
+    );
+    let rows = conn
+        .simple_query(&query)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_first_result()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(rows
+        .iter()
+        .filter_map(|r| {
+            let name = r.get::<&str, _>(0)?;
+            let src_schema = r.get::<&str, _>(1).unwrap_or(schema);
+            let src_table = r.get::<&str, _>(2)?;
+            let src_column = r.get::<&str, _>(3)?;
+            let ordinal = r.get::<i32, _>(4).unwrap_or(0);
+            let tgt_schema = r.get::<&str, _>(5).unwrap_or("dbo");
+            let tgt_table = r.get::<&str, _>(6)?;
+            let tgt_column = r.get::<&str, _>(7)?;
+            Some(ForeignKeyInfo {
+                constraint_name: name.to_string(),
+                source_schema: src_schema.to_string(),
+                source_table: src_table.to_string(),
+                source_column: src_column.to_string(),
+                ordinal,
+                target_schema: tgt_schema.to_string(),
+                target_table: tgt_table.to_string(),
+                target_column: tgt_column.to_string(),
+            })
+        })
+        .collect())
+}
+
+pub async fn list_foreign_keys(
+    pool: DbPool,
+    driver: &Driver,
+    schema: &str,
+) -> Result<Vec<ForeignKeyInfo>, String> {
+    match driver {
+        Driver::Postgres => pg_foreign_keys(get_pg_pool(&pool)?, schema).await,
+        Driver::Mysql => mysql_foreign_keys(get_mysql_pool(&pool)?, schema).await,
+        Driver::Sqlite => sqlite_foreign_keys(get_sqlite_pool(&pool)?, schema).await,
+        Driver::Mssql => mssql_foreign_keys(get_mssql_pool(&pool)?, schema).await,
+        Driver::Dbservice => Ok(Vec::new()),
     }
 }

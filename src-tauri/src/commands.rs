@@ -18,7 +18,7 @@ use crate::db::connections::{ConnectionConfig, Driver, MssqlAuthMethod};
 use crate::metadata::{ColumnMetadata, GeneratedMetadata, ObjectMetadata};
 use crate::pool::DbPool;
 use crate::query::{self, QueryResponse};
-use crate::schema::{self, ColumnInfo, IndexInfo, RoutineInfo, SchemaInfo, TableInfo};
+use crate::schema::{self, ColumnInfo, ForeignKeyInfo, IndexInfo, RoutineInfo, SchemaInfo, TableInfo};
 use crate::state::AppState;
 
 #[tauri::command]
@@ -487,6 +487,16 @@ pub async fn list_routines(
 ) -> Result<Vec<RoutineInfo>, String> {
     let (pool, driver) = get_pool_and_driver(&state, &connection_id).await?;
     schema::list_routines(pool, &driver, &schema_name).await
+}
+
+#[tauri::command]
+pub async fn list_foreign_keys(
+    state: State<'_, AppState>,
+    connection_id: String,
+    schema_name: String,
+) -> Result<Vec<ForeignKeyInfo>, String> {
+    let (pool, driver) = get_pool_and_driver(&state, &connection_id).await?;
+    schema::list_foreign_keys(pool, &driver, &schema_name).await
 }
 
 #[tauri::command]

@@ -1,3 +1,7 @@
+import type { DiagramState } from "./diagram";
+
+export type EditorTabKind = "sql" | "diagram";
+
 export interface EditorTab {
   id: string;
   title: string;
@@ -6,4 +10,6 @@ export interface EditorTab {
   savedQueryId?: string;
   connectionId?: string;
   pinned?: boolean;
+  kind?: EditorTabKind; // default "sql"
+  diagram?: DiagramState; // present when kind === "diagram"
 }

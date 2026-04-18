@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { editor as monacoEditor } from "monaco-editor";
 import type { EditorTab } from "../types/editor";
+import { defaultDiagramState, type DiagramState } from "../types/diagram";
 
 const STORAGE_KEY = "sqail_tabs";
 
@@ -44,6 +45,8 @@ interface EditorState {
 
   addTab: () => void;
   addTabWithContent: (title: string, content: string) => void;
+  addDiagramTab: (title: string, schemaName: string, connectionId?: string) => void;
+  updateDiagram: (id: string, updater: (d: DiagramState) => DiagramState) => void;
   closeTab: (id: string) => void;
   closeOtherTabs: (id: string) => void;
   closeTabsToRight: (id: string) => void;
@@ -87,6 +90,30 @@ export const useEditorStore = create<EditorState>((set, get) => {
       const { tabs } = get();
       const tab: EditorTab = { id: generateId(), title, content };
       set({ tabs: [...tabs, tab], activeTabId: tab.id });
+      persist();
+    },
+
+    addDiagramTab: (title, schemaName, connectionId) => {
+      const { tabs } = get();
+      const tab: EditorTab = {
+        id: generateId(),
+        title,
+        content: "",
+        kind: "diagram",
+        diagram: defaultDiagramState(schemaName),
+        connectionId,
+      };
+      set({ tabs: [...tabs, tab], activeTabId: tab.id });
+      persist();
+    },
+
+    updateDiagram: (id, updater) => {
+      set((s) => ({
+        tabs: s.tabs.map((t) => {
+          if (t.id !== id || t.kind !== "diagram" || !t.diagram) return t;
+          return { ...t, diagram: updater(t.diagram) };
+        }),
+      }));
       persist();
     },
 

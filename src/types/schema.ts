@@ -28,3 +28,14 @@ export interface RoutineInfo {
   schema: string;
   routineType: "function" | "procedure";
 }
+
+export interface ForeignKeyInfo {
+  constraintName: string;
+  sourceSchema: string;
+  sourceTable: string;
+  sourceColumn: string;
+  targetSchema: string;
+  targetTable: string;
+  targetColumn: string;
+  ordinal: number;
+}

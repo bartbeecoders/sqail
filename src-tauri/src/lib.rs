@@ -84,6 +84,7 @@ pub fn run() {
             commands::list_columns,
             commands::list_indexes,
             commands::list_routines,
+            commands::list_foreign_keys,
             commands::get_view_definition,
             commands::get_routine_definition,
             commands::start_entra_login,

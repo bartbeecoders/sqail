@@ -14,6 +14,7 @@ use crate::ai::client;
 use crate::ai::inline::sidecar::SidecarStatus;
 use crate::ai::provider::{AiHistoryEntry, AiProviderConfig, AiProviderType};
 use crate::auth::entra;
+use crate::crypto::{self, CryptoEnvelope};
 use crate::db::connections::{ConnectionConfig, Driver, MssqlAuthMethod};
 use crate::metadata::{ColumnMetadata, GeneratedMetadata, ObjectMetadata};
 use crate::pool::DbPool;
@@ -2287,3 +2288,24 @@ pub async fn training_deactivate_model(
         .await
         .map(|_| ())
 }
+
+// ============================================================================
+// .sqail file crypto
+// ============================================================================
+
+#[tauri::command]
+pub fn sqail_encrypt_secret(
+    plaintext: String,
+    passphrase: Option<String>,
+) -> Result<CryptoEnvelope, String> {
+    crypto::encrypt(&plaintext, passphrase.as_deref())
+}
+
+#[tauri::command]
+pub fn sqail_decrypt_secret(
+    envelope: CryptoEnvelope,
+    passphrase: Option<String>,
+) -> Result<String, String> {
+    crypto::decrypt(&envelope, passphrase.as_deref())
+}
+

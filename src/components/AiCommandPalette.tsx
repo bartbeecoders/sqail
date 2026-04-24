@@ -49,6 +49,9 @@ const SQL_CONTEXT_FLOWS: AiFlow[] = [
   "fix_query",
 ];
 
+/** Shared empty array so the selector fallback stays referentially stable. */
+const EMPTY_PROMPT_HISTORY: string[] = [];
+
 export default function AiCommandPalette() {
   const {
     paletteOpen,
@@ -66,8 +69,6 @@ export default function AiCommandPalette() {
     selectedProviderId,
     setSelectedProviderId,
     closePalette,
-    promptHistory,
-    addToPromptHistory,
     generateSql,
     explainQuery,
     optimizeQuery,
@@ -86,6 +87,15 @@ export default function AiCommandPalette() {
   const draftRef = useRef("");
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const responseRef = useRef<HTMLDivElement>(null);
+
+  // Per-tab palette recency: refreshed on each open so ArrowUp/Down walks the
+  // active tab's own prompt stack. Select the raw field (stable reference)
+  // and fall back to a shared empty array so `useSyncExternalStore` never sees
+  // a new snapshot on each call.
+  const tabPromptHistory = useEditorStore(
+    (s) => s.tabs.find((t) => t.id === s.activeTabId)?.promptHistory,
+  );
+  const promptHistory = tabPromptHistory ?? EMPTY_PROMPT_HISTORY;
 
   const activeConnectionId = useConnectionStore((s) => s.activeConnectionId);
   const connections = useConnectionStore((s) => s.connections);
@@ -201,7 +211,10 @@ export default function AiCommandPalette() {
     const text = prompt.trim();
     if (!text) return;
 
-    addToPromptHistory(text);
+    {
+      const tab = useEditorStore.getState().getActiveTab();
+      if (tab) useEditorStore.getState().addPromptToTab(tab.id, text);
+    }
     setHistoryIndex(-1);
     draftRef.current = "";
 
@@ -241,17 +254,31 @@ export default function AiCommandPalette() {
   const prevStreamingRef = useRef(streaming);
   useEffect(() => {
     if (prevStreamingRef.current && !streaming && currentResponse && !error && paletteOpen) {
+      const promptForEntry = currentFlow === "generate_sql" ? prompt : getCurrentSql();
+      const timestamp = new Date().toISOString();
       const entry: AiHistoryEntry = {
         id: crypto.randomUUID(),
-        timestamp: new Date().toISOString(),
+        timestamp,
         flow: currentFlow!,
-        prompt: currentFlow === "generate_sql" ? prompt : getCurrentSql(),
+        prompt: promptForEntry,
         response: currentResponse,
         connectionId: activeConnectionId ?? undefined,
       };
       invoke("save_ai_history_entry", { entry })
         .then(() => useAiStore.getState().loadHistory())
         .catch((e) => console.error("Failed to save history:", e));
+
+      // Also record the exchange on the active tab so it can be bundled
+      // into a `.sqail` file when the user saves.
+      const tab = useEditorStore.getState().getActiveTab();
+      if (tab && currentFlow) {
+        useEditorStore.getState().appendAiHistoryEntry(tab.id, {
+          timestamp,
+          flow: currentFlow,
+          prompt: promptForEntry,
+          response: currentResponse,
+        });
+      }
     }
     prevStreamingRef.current = streaming;
     // eslint-disable-next-line react-hooks/exhaustive-deps

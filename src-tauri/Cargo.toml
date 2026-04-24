@@ -28,6 +28,10 @@ chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 hex = "0.4"
 sha2 = "0.10"
+aes-gcm = "0.10"
+argon2 = "0.5"
+rand = "0.8"
+base64 = "0.22"
 tiberius = { version = "0.12", default-features = false, features = ["tds73", "rustls"] }
 bb8 = "0.8"
 bb8-tiberius = "0.15"

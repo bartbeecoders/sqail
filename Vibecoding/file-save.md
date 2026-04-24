@@ -27,3 +27,7 @@ Projects can also be saved as sqail files.
 Use human readable json structure for sqail files.
 Encode binary data as base64 strings.
 Encrypt connection strings and other sensitive data.
+
+
+As this is a big modification, it should be implemented in a separate branch.
+Plan it out carefully and implement it in stages.

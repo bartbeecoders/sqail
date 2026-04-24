@@ -14,6 +14,7 @@ import {
   TableProperties,
   Clock,
   Bookmark,
+  FolderGit2,
 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { useConnectionStore } from "../stores/connectionStore";
@@ -24,7 +25,8 @@ import ConnectionForm from "./ConnectionForm";
 import SchemaTree from "./SchemaTree";
 import QueryHistoryPanel from "./QueryHistoryPanel";
 import SavedQueriesPanel from "./SavedQueriesPanel";
-type BottomTab = "schema" | "history" | "saved";
+import ProjectPanel from "./ProjectPanel";
+type BottomTab = "schema" | "history" | "saved" | "project";
 
 interface SidebarProps {
   collapsed: boolean;
@@ -393,6 +395,7 @@ export default function Sidebar({ collapsed, onToggle, externalFormOpen, onExter
                 { id: "schema" as const, icon: TableProperties, label: "Schema" },
                 { id: "history" as const, icon: Clock, label: "History" },
                 { id: "saved" as const, icon: Bookmark, label: "Saved" },
+                { id: "project" as const, icon: FolderGit2, label: "Project" },
               ]).map(({ id, icon: Icon, label }) => (
                 <button
                   key={id}
@@ -415,6 +418,7 @@ export default function Sidebar({ collapsed, onToggle, externalFormOpen, onExter
                 <QueryHistoryPanel onSaveQuery={handleSaveFromHistory} />
               )}
               {bottomTab === "saved" && <SavedQueriesPanel />}
+              {bottomTab === "project" && <ProjectPanel />}
             </div>
           </div>
         )}

@@ -1,8 +1,11 @@
 import { create } from "zustand";
 import type { editor as monacoEditor } from "monaco-editor";
 import type { EditorTab } from "../types/editor";
+import type { SqailPromptEntry } from "../types/sqailFile";
 import { defaultDiagramState, type DiagramState } from "../types/diagram";
 import { consumeHandoffTab, isDetachedWindow, tabStorageKey } from "../lib/detach";
+
+const PROMPT_RECENCY_LIMIT = 10;
 
 const STORAGE_KEY = tabStorageKey();
 const DETACHED = isDetachedWindow();
@@ -56,6 +59,8 @@ interface EditorState {
   addTab: () => void;
   addTabWithContent: (title: string, content: string) => void;
   addDiagramTab: (title: string, schemaName: string, connectionId?: string) => void;
+  /** Add a fully-specified tab (used when restoring from a `.sqail` file). */
+  addRestoredTab: (descriptor: Omit<EditorTab, "id">) => EditorTab;
   updateDiagram: (id: string, updater: (d: DiagramState) => DiagramState) => void;
   reorderTabs: (fromId: string, toId: string, side: "before" | "after") => void;
   closeTab: (id: string) => void;
@@ -69,6 +74,10 @@ interface EditorState {
   setConnectionId: (id: string, connectionId: string | undefined) => void;
   setSavedQueryId: (id: string, savedQueryId: string) => void;
   togglePin: (id: string) => void;
+  /** Append to the tab's palette recency (dedupes consecutive; caps at 10). */
+  addPromptToTab: (id: string, prompt: string) => void;
+  /** Append a rich AI exchange to the tab's per-file history. */
+  appendAiHistoryEntry: (id: string, entry: SqailPromptEntry) => void;
   findTabBySavedQueryId: (savedQueryId: string) => EditorTab | undefined;
   getActiveTab: () => EditorTab | undefined;
   clearActiveTab: () => void;
@@ -119,6 +128,14 @@ export const useEditorStore = create<EditorState>((set, get) => {
       };
       set({ tabs: [...tabs, tab], activeTabId: tab.id });
       persist();
+    },
+
+    addRestoredTab: (descriptor) => {
+      const { tabs } = get();
+      const tab: EditorTab = { id: generateId(), ...descriptor };
+      set({ tabs: [...tabs, tab], activeTabId: tab.id });
+      persist();
+      return tab;
     },
 
     updateDiagram: (id, updater) => {
@@ -234,6 +251,30 @@ export const useEditorStore = create<EditorState>((set, get) => {
     togglePin: (id) => {
       set((s) => ({
         tabs: s.tabs.map((t) => (t.id === id ? { ...t, pinned: !t.pinned } : t)),
+      }));
+      persist();
+    },
+
+    addPromptToTab: (id, prompt) => {
+      set((s) => ({
+        tabs: s.tabs.map((t) => {
+          if (t.id !== id) return t;
+          const existing = t.promptHistory ?? [];
+          if (existing[existing.length - 1] === prompt) return t;
+          const updated = [...existing, prompt].slice(-PROMPT_RECENCY_LIMIT);
+          return { ...t, promptHistory: updated };
+        }),
+      }));
+      persist();
+    },
+
+    appendAiHistoryEntry: (id, entry) => {
+      set((s) => ({
+        tabs: s.tabs.map((t) => {
+          if (t.id !== id) return t;
+          const existing = t.aiHistory ?? [];
+          return { ...t, aiHistory: [...existing, entry] };
+        }),
       }));
       persist();
     },

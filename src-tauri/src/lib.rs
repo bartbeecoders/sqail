@@ -1,6 +1,7 @@
 mod ai;
 mod auth;
 mod commands;
+mod crypto;
 mod db;
 mod dbservice;
 mod metadata;
@@ -51,6 +52,7 @@ pub fn run() {
                 .app_data_dir()
                 .expect("failed to resolve app data dir");
             eprintln!("App data dir: {}", app_data_dir.display());
+            crypto::init(&app_data_dir);
             let store =
                 ConnectionStore::new(app_data_dir.clone()).expect("failed to create connection store");
             let ai_provider_store = AiProviderStore::new(&app_data_dir);
@@ -146,6 +148,8 @@ pub fn run() {
             commands::training_convert_model,
             commands::training_activate_model,
             commands::training_deactivate_model,
+            commands::sqail_encrypt_secret,
+            commands::sqail_decrypt_secret,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

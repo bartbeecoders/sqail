@@ -1,5 +1,42 @@
 [
   {
+    "version": "0.6.2",
+    "sections": [
+      {
+        "title": "File Save & Load (.sqail format)",
+        "items": [
+          "New `.sqail` file format \u2014 human-readable JSON envelope with magic identifier, version, kind (sql / diagram / project) and payload",
+          "AES-256-GCM encryption for sensitive fields (connection password, API tokens) with two modes: machine key (default, portable between sessions on the same machine) and Argon2id-derived passphrase (cross-machine portable)",
+          "Save SQL tabs as plain `.sql` (content as-is, Ctrl+S unchanged) or as `.sqail` (bundles SQL + optional connection with encrypted password + per-tab AI prompt history)",
+          "Save diagram tabs as `.sqail` \u2014 round-trips full diagram state (tables, annotations, colors, viewport) plus connection and AI history",
+          "Open `.sqail` prompts the user before registering a bundled connection \u2014 credentials are never silently added to the connection store"
+        ]
+      },
+      {
+        "title": "Projects",
+        "items": [
+          "New \"Project\" panel in the sidebar (below Schema / History / Saved) \u2014 bundle multiple SQL scripts and diagrams plus shared connections into a single `.sqail` project file",
+          "Open a project \u2192 all files restore as tabs; tabs stay linked to their project file via `projectFileId` so saving the project snapshots the live tab state back into each file",
+          "Add active tab to project, rename / remove project files inline"
+        ]
+      },
+      {
+        "title": "Per-Tab AI Prompt History",
+        "items": [
+          "AI command palette recency now lives on `EditorTab` instead of being global \u2014 each tab keeps its own prompt/response history that travels with it when saved as `.sqail`",
+          "DB-backed global history (Settings \u2192 AI History) is unchanged"
+        ]
+      },
+      {
+        "title": "Backend",
+        "items": [
+          "New `crypto` module (AES-256-GCM, Argon2id KDF) and Tauri commands `sqail_encrypt_secret` / `sqail_decrypt_secret`",
+          "Per-install machine key stored at `<app_data>/sqail.key` and created on first use"
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.6.1",
     "sections": [
       {

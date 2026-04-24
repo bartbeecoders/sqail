@@ -51,7 +51,13 @@ function loadSettings(): AppSettings {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
-      return { ...DEFAULTS, ...JSON.parse(raw) };
+      const parsed = JSON.parse(raw) as Partial<AppSettings>;
+      // Validate routineDropAction is a valid enum value
+      const validActions = ["definition", "exec"];
+      if (!parsed.routineDropAction || !validActions.includes(parsed.routineDropAction)) {
+        parsed.routineDropAction = DEFAULTS.routineDropAction;
+      }
+      return { ...DEFAULTS, ...parsed };
     }
   } catch { /* ignore */ }
   return { ...DEFAULTS };

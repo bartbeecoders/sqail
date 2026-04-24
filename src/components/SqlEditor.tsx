@@ -8,6 +8,7 @@ import { useConnectionStore } from "../stores/connectionStore";
 import { useSchemaStore } from "../stores/schemaStore";
 import { useAiStore } from "../stores/aiStore";
 import { useSettingsStore } from "../stores/settingsStore";
+import { useToastStore } from "../stores/toastStore";
 import { sqlaiDark, sqlaiLight } from "../lib/monacoThemes";
 import { createSqlCompletionProvider } from "../lib/sqlCompletions";
 import { createInlineAiProvider } from "../lib/inlineAi";
@@ -373,7 +374,12 @@ export default function SqlEditor({ onExecute, onFormat, overrideTabId, editorRe
               routineType,
             });
             insertSqlInEditor(definition);
-          } catch {
+          } catch (err) {
+            console.warn(`[drop] get_routine_definition failed for ${schemaName}.${routineName}, falling back to EXEC:`, err);
+            useToastStore.getState().show(
+              `Can't open definition for ${schemaName}.${routineName} — inserted EXEC instead. ${String(err)}`,
+              "warning",
+            );
             insertSqlInEditor(buildRoutineCallStatement(schemaName, routineName, routineType, conn.driver));
           }
         } else {

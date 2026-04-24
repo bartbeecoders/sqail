@@ -930,8 +930,16 @@ async fn mssql_routine_definition(
     name: &str,
 ) -> Result<String, String> {
     let mut conn = pool.get().await.map_err(|e| e.to_string())?;
+    // sys.sql_modules.definition is nvarchar(max) and not truncated like
+    // OBJECT_DEFINITION. Joining via sys.objects + sys.schemas also sidesteps
+    // the OBJECT_ID('schema.name') literal-parsing path, which silently
+    // returns NULL for names with special characters.
     let query = format!(
-        "SELECT OBJECT_DEFINITION(OBJECT_ID('{}.{}'))",
+        "SELECT m.definition \
+         FROM sys.sql_modules m \
+         INNER JOIN sys.objects o ON m.object_id = o.object_id \
+         INNER JOIN sys.schemas s ON o.schema_id = s.schema_id \
+         WHERE s.name = '{}' AND o.name = '{}'",
         schema.replace('\'', "''"),
         name.replace('\'', "''"),
     );
@@ -964,7 +972,10 @@ async fn mssql_routine_definition(
                     };
                     Ok(altered)
                 }
-                None => Err(format!("Routine {}.{} not found", schema, name)),
+                None => Err(format!(
+                    "Routine {}.{} has no readable definition (the login likely lacks VIEW DEFINITION permission)",
+                    schema, name
+                )),
             }
         }
         None => Err(format!("Routine {}.{} not found", schema, name)),

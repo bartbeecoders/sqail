@@ -8,6 +8,7 @@ import { useConnectionStore } from "../stores/connectionStore";
 import { useEditorStore } from "../stores/editorStore";
 import { useSchemaStore } from "../stores/schemaStore";
 import { useSettingsStore } from "../stores/settingsStore";
+import { useToastStore } from "../stores/toastStore";
 import type { ColumnInfo } from "../types/schema";
 import type { EditorTab } from "../types/editor";
 
@@ -175,7 +176,12 @@ export default function EditorTabs() {
               routineName,
               routineType,
             });
-          } catch {
+          } catch (err) {
+            console.warn(`[drop] get_routine_definition failed for ${schemaName}.${routineName}, falling back to EXEC:`, err);
+            useToastStore.getState().show(
+              `Can't open definition for ${schemaName}.${routineName} — inserted EXEC instead. ${String(err)}`,
+              "warning",
+            );
             sql = buildRoutineCallStatement(schemaName, routineName, routineType, conn.driver);
           }
         } else {

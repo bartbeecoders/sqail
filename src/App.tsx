@@ -22,6 +22,7 @@ import { useEditorStore, getActiveEditorInstance } from "./stores/editorStore";
 import { useConnectionStore } from "./stores/connectionStore";
 import { useQueryStore } from "./stores/queryStore";
 import { useAiStore } from "./stores/aiStore";
+import { useToastStore } from "./stores/toastStore";
 import { useAiStream } from "./hooks/useAiStream";
 import { useMetadataEvents } from "./hooks/useMetadataEvents";
 import { useInlineAiLifecycle } from "./hooks/useInlineAiLifecycle";
@@ -208,6 +209,16 @@ export default function App() {
     return () => clearTimeout(t);
   }, [validateStatus]);
 
+  // Generic toast (shared notification channel — see useToastStore).
+  const toastMessage = useToastStore((s) => s.message);
+  const toastKind = useToastStore((s) => s.kind);
+  const dismissToast = useToastStore((s) => s.dismiss);
+  useEffect(() => {
+    if (!toastMessage) return;
+    const t = setTimeout(dismissToast, 5000);
+    return () => clearTimeout(t);
+  }, [toastMessage, dismissToast]);
+
   const handleRunFromToolbar = useCallback(() => {
     // If the editor has selected text, run only that; otherwise run full content
     const editor = getActiveEditorInstance();
@@ -303,6 +314,23 @@ export default function App() {
                 ? `SQL validation skipped: ${validateStatus.note}`
                 : "SQL is valid."
               : `Invalid SQL: ${validateStatus.message}`}
+          </div>
+        )}
+        {toastMessage && (
+          <div
+            className={`fixed right-4 top-28 z-50 max-w-md cursor-pointer rounded-md border px-3 py-2 text-xs shadow-lg ${
+              toastKind === "success"
+                ? "border-success/40 bg-success/10 text-success"
+                : toastKind === "error"
+                ? "border-destructive/40 bg-destructive/10 text-destructive"
+                : toastKind === "warning"
+                ? "border-warning/40 bg-warning/10 text-warning"
+                : "border-border bg-card text-foreground"
+            }`}
+            onClick={dismissToast}
+            title="Click to dismiss"
+          >
+            {toastMessage}
           </div>
         )}
         {activeTabKind === "diagram" ? (

@@ -12,6 +12,7 @@
   --color-accent-foreground: oklch(0.145 0 0);
   --color-destructive: oklch(0.577 0.245 27.325);
   --color-success: oklch(0.627 0.194 149.214);
+  --color-warning: oklch(0.68 0.17 70);
   --radius-sm: 0.375rem;
   --radius-md: 0.5rem;
   --radius-lg: 0.75rem;
@@ -30,6 +31,7 @@
     --color-accent-foreground: oklch(0.985 0 0);
     --color-destructive: oklch(0.704 0.191 22.216);
     --color-success: oklch(0.696 0.17 162.48);
+    --color-warning: oklch(0.80 0.17 80);
   }
 }
 
@@ -46,6 +48,7 @@ html.dark {
   --color-accent-foreground: oklch(0.985 0 0);
   --color-destructive: oklch(0.704 0.191 22.216);
   --color-success: oklch(0.696 0.17 162.48);
+  --color-warning: oklch(0.80 0.17 80);
   color-scheme: dark;
 }
 
@@ -62,6 +65,7 @@ html.light {
   --color-accent-foreground: oklch(0.145 0 0);
   --color-destructive: oklch(0.577 0.245 27.325);
   --color-success: oklch(0.627 0.194 149.214);
+  --color-warning: oklch(0.68 0.17 70);
   color-scheme: light;
 }
 

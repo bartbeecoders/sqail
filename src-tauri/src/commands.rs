@@ -1192,10 +1192,11 @@ fn parse_metadata_response(response: &str) -> GeneratedMetadata {
     }
 }
 
+/// (schema, name, object_type, columns, indexes) for batched metadata generation.
+type EnrichedObject = (String, String, String, Vec<ColumnInfo>, Vec<IndexInfo>);
+
 /// Build a combined prompt for multiple objects separated by "---".
-fn build_batch_prompt(
-    objects: &[(String, String, String, Vec<ColumnInfo>, Vec<IndexInfo>)], // (schema, name, type, cols, idxs)
-) -> String {
+fn build_batch_prompt(objects: &[EnrichedObject]) -> String {
     objects
         .iter()
         .map(|(schema, name, obj_type, cols, idxs)| {
@@ -1300,8 +1301,7 @@ async fn run_batched_metadata_generation(
     let total = all_objects.len();
 
     // Phase 1: Prefetch all columns and indexes in parallel
-    let mut enriched: Vec<(String, String, String, Vec<ColumnInfo>, Vec<IndexInfo>)> =
-        Vec::with_capacity(total);
+    let mut enriched: Vec<EnrichedObject> = Vec::with_capacity(total);
 
     // Fetch in parallel batches of 8
     for chunk in all_objects.chunks(8) {
@@ -1335,7 +1335,7 @@ async fn run_batched_metadata_generation(
     }
 
     // Phase 2: Batch objects and process batches in parallel
-    let batches: Vec<Vec<(String, String, String, Vec<ColumnInfo>, Vec<IndexInfo>)>> = enriched
+    let batches: Vec<Vec<EnrichedObject>> = enriched
         .chunks(METADATA_BATCH_SIZE)
         .map(|c| c.to_vec())
         .collect();

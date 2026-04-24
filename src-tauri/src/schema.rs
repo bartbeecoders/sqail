@@ -428,14 +428,23 @@ async fn mssql_schemas(
     pool: &bb8::Pool<bb8_tiberius::ConnectionManager>,
 ) -> Result<Vec<SchemaInfo>, String> {
     let mut conn = pool.get().await.map_err(|e| e.to_string())?;
+    // Enumerate every schema the current login can see any object in.
+    // INFORMATION_SCHEMA views are permission-filtered on Azure SQL, so this
+    // matches SSMS behavior. We deliberately do NOT join sys.database_principals:
+    // on Azure SQL that view is itself permission-filtered to just the current
+    // principal, which collapsed the result to schemas owned by the user
+    // (typically only `dbo`). See GitHub issue #42.
     let rows = conn
         .simple_query(
-            "SELECT s.name FROM sys.schemas s \
-             JOIN sys.database_principals p ON s.principal_id = p.principal_id \
-             WHERE s.name NOT IN ('sys','INFORMATION_SCHEMA','guest','db_owner','db_accessadmin',\
+            "SELECT name FROM ( \
+               SELECT TABLE_SCHEMA AS name FROM INFORMATION_SCHEMA.TABLES \
+               UNION \
+               SELECT ROUTINE_SCHEMA AS name FROM INFORMATION_SCHEMA.ROUTINES \
+             ) s \
+             WHERE name NOT IN ('sys','INFORMATION_SCHEMA','guest','db_owner','db_accessadmin',\
              'db_securityadmin','db_ddladmin','db_backupoperator','db_datareader','db_datawriter',\
              'db_denydatareader','db_denydatawriter') \
-             ORDER BY s.name",
+             ORDER BY name",
         )
         .await
         .map_err(|e| e.to_string())?

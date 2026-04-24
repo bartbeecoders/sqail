@@ -1,5 +1,23 @@
 [
   {
+    "version": "0.6.3",
+    "sections": [
+      {
+        "title": "Fixes",
+        "items": [
+          "SQL Server / Azure SQL: object browser now enumerates every schema the connected login can see, matching SSMS. Previous query joined `sys.database_principals`, which on Azure SQL is permission-filtered to the current principal and collapsed the tree to schemas owned by the user (typically only `dbo`). Fixes #42."
+        ]
+      },
+      {
+        "title": "Build",
+        "items": [
+          "Cross-platform build-number script: replaced `scripts/build-number.sh` with a Node ESM port (`scripts/build-number.js`) and updated `beforeDevCommand` / `beforeBuildCommand` so the Tauri dev/build workflow runs on Windows without bash",
+          "`scripts/run.ps1` now auto-runs `pnpm install` when `node_modules` is missing"
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.6.2",
     "sections": [
       {

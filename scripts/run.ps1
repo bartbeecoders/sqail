@@ -3,6 +3,11 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $ProjectRoot
 
+if (-not (Test-Path (Join-Path $ProjectRoot "node_modules"))) {
+    Write-Host "node_modules missing — installing dependencies..."
+    pnpm install
+}
+
 $Mode = if ($args.Count -gt 0) { $args[0] } else { "dev" }
 
 switch ($Mode) {

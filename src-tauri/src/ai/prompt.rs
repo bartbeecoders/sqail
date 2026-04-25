@@ -72,6 +72,27 @@ pub fn build_system_prompt(flow: &str, driver: Option<&str>, schema_context: Opt
                          3. Before emitting the fix, silently verify that every column you reference exists in \
                          the schema context for the table it is used with.".to_string());
         }
+        "generate_migration" => {
+            parts.push("The user will provide a set of schema diffs extracted from git — each diff shows how \
+                         one database object (table, view, routine, index, foreign key) changed between the \
+                         version currently tracked in the repository and the version the user just pulled. \
+                         Generate a single ordered SQL migration script that takes the database from the \
+                         OLD state to the NEW state.\n\n\
+                         Rules:\n\
+                         1. Emit ONLY SQL. No prose, no markdown fences, no commentary outside -- comments.\n\
+                         2. Use ALTER TABLE / CREATE / DROP statements appropriate for the target dialect.\n\
+                         3. Order statements so dependencies are respected — create referenced objects before \
+                         referencing ones; drop dependents before their targets.\n\
+                         4. For each object, precede its statements with a short `-- <object>: <summary>` \
+                         comment describing what this block does.\n\
+                         5. If a change cannot be expressed in idempotent SQL (e.g. renaming or splitting a \
+                         column with data), emit the statements required AND leave a `-- MANUAL REVIEW:` \
+                         comment explaining what the user must verify.\n\
+                         6. Never DROP a column, table, or constraint without an explicit diff showing its \
+                         removal. When in doubt, prefer a no-op with a `-- MANUAL REVIEW:` note.\n\
+                         7. Wrap the full script in a transaction if the dialect supports DDL transactions \
+                         (Postgres, MSSQL). For MySQL, do not wrap — DDL auto-commits.".to_string());
+        }
         "generate_metadata" => {
             parts.push("The user will provide the structure of a single database object (table, view, function, or procedure). \
                          Generate documentation metadata as a JSON object with these exact fields:\n\

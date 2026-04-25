@@ -688,7 +688,7 @@ async fn get_default_provider(state: &State<'_, AppState>) -> Result<AiProviderC
 /// id — we synthesize one on the fly from the current sidecar status.
 const INLINE_LOCAL_PROVIDER_ID: &str = "inline-local";
 
-async fn get_provider(state: &State<'_, AppState>, provider_id: Option<String>) -> Result<AiProviderConfig, String> {
+pub(crate) async fn get_provider(state: &State<'_, AppState>, provider_id: Option<String>) -> Result<AiProviderConfig, String> {
     match provider_id {
         Some(id) if id == INLINE_LOCAL_PROVIDER_ID => build_inline_local_config(state).await,
         Some(id) => {

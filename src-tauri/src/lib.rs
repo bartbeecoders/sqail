@@ -4,6 +4,7 @@ mod commands;
 mod crypto;
 mod db;
 mod dbservice;
+mod git;
 mod metadata;
 mod pool;
 mod query;
@@ -150,6 +151,26 @@ pub fn run() {
             commands::training_deactivate_model,
             commands::sqail_encrypt_secret,
             commands::sqail_decrypt_secret,
+            git::commands::git_init_repo,
+            git::commands::git_open_repo,
+            git::commands::git_clone_repo,
+            git::commands::git_current_branch,
+            git::commands::git_list_branches,
+            git::commands::git_status,
+            git::commands::git_file_diff,
+            git::commands::git_changed_files,
+            git::commands::git_stage,
+            git::commands::git_stage_all,
+            git::commands::git_unstage,
+            git::commands::git_commit,
+            git::commands::git_list_remotes,
+            git::commands::git_set_remote,
+            git::commands::git_remove_remote,
+            git::commands::git_fetch,
+            git::commands::git_pull,
+            git::commands::git_push,
+            git::commands::git_snapshot_schema,
+            git::commands::ai_generate_migration_script,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

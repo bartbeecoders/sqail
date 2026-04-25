@@ -64,10 +64,19 @@ export interface SqailProjectFile<C = SqailConnection> {
   payload: SqailSqlPayload<C> | SqailDiagramPayload<C>;
 }
 
+export interface SqailProjectGitConfig {
+  repoPath: string;
+  connectionId?: string;
+  defaultRemote?: string;
+  includeRoutines?: boolean;
+  lastSnapshotAt?: string;
+}
+
 export interface SqailProjectPayload<C = SqailConnection> {
   name: string;
   files: SqailProjectFile<C>[];
   connections?: C[];
+  git?: SqailProjectGitConfig;
 }
 
 export type SqailPayload<C = SqailConnection> =

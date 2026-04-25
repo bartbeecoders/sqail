@@ -44,3 +44,8 @@ Update the portal to highlight the new features and improvements.
 - new diagraming feature
 - Local LLM support
 - Local LLM training and fine-tuning
+
+
+I have a hermes-agent which is setup to use an X account (@sqaileditor) to post tweets.
+Can you generate me a set of prompts I cann give to the hermes-agent so it can start posting tweets about new releases?
+

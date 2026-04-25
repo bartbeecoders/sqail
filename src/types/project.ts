@@ -1,5 +1,6 @@
 import type { ConnectionConfig } from "./connection";
 import type { DiagramState } from "./diagram";
+import type { ProjectGitConfig } from "./git";
 import type { SqailPromptEntry } from "./sqailFile";
 
 export type ProjectFileKind = "sql" | "diagram";
@@ -26,4 +27,6 @@ export interface Project {
   files: ProjectFile[];
   /** Filesystem path the project was last saved to / opened from. */
   filePath?: string;
+  /** Git integration config, when the project is linked to a local repo. */
+  git?: ProjectGitConfig;
 }

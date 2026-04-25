@@ -1,5 +1,37 @@
 [
   {
+    "version": "0.6.4",
+    "sections": [
+      {
+        "title": "Git Integration (Phase 1)",
+        "items": [
+          "New Git panel inside the Project sidebar — link a project to a local git repository (init or open existing) and snapshot the connected database's schema as per-object DDL files",
+          "Working-tree status with per-file kind (new / modified / deleted / renamed / typechange / conflicted), staging / unstaging, and inline diff preview against HEAD",
+          "Stage selectively, write a commit message and commit — branch / upstream / ahead-behind counters refresh automatically",
+          "Remote management: list / add / update / remove remotes, choose a default remote per project, store HTTPS username + personal access token in memory for the session",
+          "Fetch, pull (fast-forward, merge-required, no-upstream cases handled distinctly) and push the current branch — pull never touches the database",
+          "AI migration generator: when the working tree shows pulled DDL changes, generate an ordered SQL migration script in a new editor tab via a dedicated `generate_migration` AI flow with dialect-aware rules and `-- MANUAL REVIEW:` callouts for ambiguous changes",
+          "Git config (repo path, linked connection, default remote, last snapshot timestamp) travels inside the `.sqail` project file so projects stay portable"
+        ]
+      },
+      {
+        "title": "Backend",
+        "items": [
+          "New `git2` crate dependency (vendored libgit2 + vendored OpenSSL) so the Rust backend ships a self-contained git client across platforms",
+          "New `src-tauri/src/git/` module: repo lifecycle, status, diff, commit, remote, schema snapshot — with twenty-one Tauri commands wired through `lib.rs`",
+          "Schema snapshot writes one DDL file per object (tables / views / routines / indexes) with stable filenames, removing files for objects that no longer exist so `git status` reflects schema drift accurately",
+          "Migration generation reuses the existing AI streaming pipeline (`ai:stream-chunk` / `ai:stream-done` / `ai:stream-error`) and the active provider, falling back to the default if none is specified"
+        ]
+      },
+      {
+        "title": "Fixes",
+        "items": [
+          "Cleared a clippy `needless_match` / `manual_map` warning in `git/diff.rs`"
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.6.3",
     "sections": [
       {

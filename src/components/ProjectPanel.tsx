@@ -13,6 +13,7 @@ import {
 import { cn } from "../lib/utils";
 import { useProjectStore } from "../stores/projectStore";
 import { useEditorStore } from "../stores/editorStore";
+import GitPanel from "./GitPanel";
 
 export default function ProjectPanel() {
   const project = useProjectStore((s) => s.project);
@@ -137,7 +138,7 @@ export default function ProjectPanel() {
         </button>
       </div>
 
-      {/* File list */}
+      {/* File list + git panel (scrollable) */}
       <div className="flex-1 overflow-y-auto">
         {project.files.length === 0 ? (
           <p className="p-3 text-[11px] text-muted-foreground">
@@ -209,6 +210,7 @@ export default function ProjectPanel() {
             })}
           </ul>
         )}
+        <GitPanel />
       </div>
     </div>
   );

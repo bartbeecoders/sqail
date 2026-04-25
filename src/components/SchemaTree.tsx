@@ -38,6 +38,7 @@ function quoteId(name: string, driver: Driver): string {
     case "mssql":
       return `[${name}]`;
     case "mysql":
+    case "surrealdb":
       return `\`${name}\``;
     default: // postgres, sqlite
       return `"${name}"`;

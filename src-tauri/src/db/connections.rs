@@ -8,6 +8,7 @@ pub enum Driver {
     Sqlite,
     Mssql,
     Dbservice,
+    Surrealdb,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -27,6 +28,7 @@ impl std::fmt::Display for Driver {
             Driver::Sqlite => write!(f, "sqlite"),
             Driver::Mssql => write!(f, "mssql"),
             Driver::Dbservice => write!(f, "dbservice"),
+            Driver::Surrealdb => write!(f, "surrealdb"),
         }
     }
 }
@@ -70,6 +72,9 @@ pub struct ConnectionConfig {
     pub dbservice_api_key: String,
     #[serde(default)]
     pub dbservice_remote_id: String,
+    // ── SurrealDB backend ──
+    #[serde(default)]
+    pub surreal_namespace: String,
 }
 
 impl ConnectionConfig {
@@ -101,6 +106,7 @@ impl ConnectionConfig {
                 String::new()
             }
             Driver::Dbservice => String::new(),
+            Driver::Surrealdb => String::new(),
         }
     }
 

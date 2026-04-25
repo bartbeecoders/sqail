@@ -15,6 +15,8 @@ function quoteIdent(name: string, driver: Driver): string {
     case "dbservice":
       return `[${name.replace(/]/g, "]]")}]`;
     case "mysql":
+    case "surrealdb":
+      // SurrealDB also wraps identifiers in backticks.
       return `\`${name.replace(/`/g, "``")}\``;
     case "postgres":
     case "sqlite":
@@ -28,6 +30,7 @@ function quoteAlias(name: string, driver: Driver): string {
     case "mssql":
     case "dbservice":
     case "mysql":
+    case "surrealdb":
       // Single-quoted alias: 'Column Name'
       return `'${name.replace(/'/g, "''")}'`;
     case "postgres":

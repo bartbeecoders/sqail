@@ -10,13 +10,30 @@ pub struct DbServiceClient {
     pub http: reqwest::Client,
 }
 
-/// Unified pool enum wrapping native sqlx pools, tiberius bb8 pool, and DbService HTTP client.
+/// Handle for a SurrealDB HTTP backend. Authentication is HTTP Basic with the
+/// configured user/password per request — SurrealDB also supports `/signin`
+/// bearer tokens, but Basic works for root/namespace/database users in 2.x and
+/// keeps Phase 1 simple.
+#[derive(Debug)]
+pub struct SurrealDbClient {
+    /// Base URL, e.g. `http://localhost:8000` (no trailing slash).
+    pub base_url: String,
+    pub namespace: String,
+    pub database: String,
+    pub user: String,
+    pub password: String,
+    pub http: reqwest::Client,
+}
+
+/// Unified pool enum wrapping native sqlx pools, tiberius bb8 pool, DbService
+/// HTTP client, and SurrealDB HTTP client.
 pub enum DbPool {
     Postgres(Arc<sqlx::PgPool>),
     Mysql(Arc<sqlx::MySqlPool>),
     Sqlite(Arc<sqlx::SqlitePool>),
     Mssql(Arc<bb8::Pool<bb8_tiberius::ConnectionManager>>),
     DbService(Arc<DbServiceClient>),
+    SurrealDb(Arc<SurrealDbClient>),
 }
 
 impl DbPool {
@@ -31,6 +48,9 @@ impl DbPool {
             DbPool::DbService(_) => {
                 // Stateless HTTP — nothing to close
             }
+            DbPool::SurrealDb(_) => {
+                // Stateless HTTP — nothing to close
+            }
         }
     }
 }
@@ -43,6 +63,7 @@ impl Clone for DbPool {
             DbPool::Sqlite(p) => DbPool::Sqlite(p.clone()),
             DbPool::Mssql(p) => DbPool::Mssql(p.clone()),
             DbPool::DbService(p) => DbPool::DbService(p.clone()),
+            DbPool::SurrealDb(p) => DbPool::SurrealDb(p.clone()),
         }
     }
 }

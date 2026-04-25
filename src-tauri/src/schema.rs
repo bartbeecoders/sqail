@@ -665,6 +665,13 @@ fn get_dbservice_client(pool: &DbPool) -> Result<&Arc<crate::pool::DbServiceClie
     }
 }
 
+fn get_surreal_client(pool: &DbPool) -> Result<&Arc<crate::pool::SurrealDbClient>, String> {
+    match pool {
+        DbPool::SurrealDb(c) => Ok(c),
+        _ => Err("Expected SurrealDB client".to_string()),
+    }
+}
+
 pub async fn list_schemas(
     pool: DbPool,
     driver: &Driver,
@@ -675,6 +682,7 @@ pub async fn list_schemas(
         Driver::Sqlite => sqlite_schemas(get_sqlite_pool(&pool)?).await,
         Driver::Mssql => mssql_schemas(get_mssql_pool(&pool)?).await,
         Driver::Dbservice => crate::dbservice::list_schemas(get_dbservice_client(&pool)?).await,
+        Driver::Surrealdb => crate::surrealdb::list_schemas(get_surreal_client(&pool)?).await,
     }
 }
 
@@ -690,6 +698,9 @@ pub async fn list_tables(
         Driver::Mssql => mssql_tables(get_mssql_pool(&pool)?, schema).await,
         Driver::Dbservice => {
             crate::dbservice::list_tables(get_dbservice_client(&pool)?, schema).await
+        }
+        Driver::Surrealdb => {
+            crate::surrealdb::list_tables(get_surreal_client(&pool)?, schema).await
         }
     }
 }
@@ -708,6 +719,9 @@ pub async fn list_columns(
         Driver::Dbservice => {
             crate::dbservice::list_columns(get_dbservice_client(&pool)?, schema, table).await
         }
+        Driver::Surrealdb => {
+            crate::surrealdb::list_columns(get_surreal_client(&pool)?, schema, table).await
+        }
     }
 }
 
@@ -723,6 +737,9 @@ pub async fn list_indexes(
         Driver::Sqlite => sqlite_indexes(get_sqlite_pool(&pool)?, schema, table).await,
         Driver::Mssql => mssql_indexes(get_mssql_pool(&pool)?, schema, table).await,
         Driver::Dbservice => Ok(Vec::new()),
+        Driver::Surrealdb => {
+            crate::surrealdb::list_indexes(get_surreal_client(&pool)?, schema, table).await
+        }
     }
 }
 
@@ -737,6 +754,7 @@ pub async fn list_routines(
         Driver::Sqlite => sqlite_routines(get_sqlite_pool(&pool)?, schema).await,
         Driver::Mssql => mssql_routines(get_mssql_pool(&pool)?, schema).await,
         Driver::Dbservice => Ok(Vec::new()),
+        Driver::Surrealdb => Ok(Vec::new()),
     }
 }
 
@@ -855,6 +873,7 @@ pub async fn get_view_definition(
         Driver::Sqlite => sqlite_view_definition(get_sqlite_pool(&pool)?, schema, name).await,
         Driver::Mssql => mssql_view_definition(get_mssql_pool(&pool)?, schema, name).await,
         Driver::Dbservice => Err("View definitions not supported via DbService".to_string()),
+        Driver::Surrealdb => Err("SurrealDB has no separate view objects".to_string()),
     }
 }
 
@@ -997,6 +1016,7 @@ pub async fn get_routine_definition(
         Driver::Sqlite => Err("SQLite does not support stored routines".to_string()),
         Driver::Mssql => mssql_routine_definition(get_mssql_pool(&pool)?, schema, name).await,
         Driver::Dbservice => Err("Routine definitions not supported via DbService".to_string()),
+        Driver::Surrealdb => Err("SurrealDB routines are not supported in Phase 1".to_string()),
     }
 }
 
@@ -1172,5 +1192,6 @@ pub async fn list_foreign_keys(
         Driver::Sqlite => sqlite_foreign_keys(get_sqlite_pool(&pool)?, schema).await,
         Driver::Mssql => mssql_foreign_keys(get_mssql_pool(&pool)?, schema).await,
         Driver::Dbservice => Ok(Vec::new()),
+        Driver::Surrealdb => Ok(Vec::new()),
     }
 }

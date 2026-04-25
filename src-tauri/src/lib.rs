@@ -11,6 +11,7 @@ mod query;
 mod query_history;
 mod schema;
 mod state;
+mod surrealdb;
 mod validate;
 
 use ai::store::{AiHistoryStore, AiProviderStore};

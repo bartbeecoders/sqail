@@ -47,6 +47,7 @@ pub async fn create_connection(
             Driver::Sqlite => 0,
             Driver::Mssql => 1433,
             Driver::Dbservice => 0,
+            Driver::Surrealdb => 8000,
         };
     }
 
@@ -214,6 +215,10 @@ pub async fn test_connection(
             });
             crate::dbservice::test(&client).await
         }
+        Driver::Surrealdb => {
+            let client = Arc::new(build_surreal_client(&config)?);
+            crate::surrealdb::test(&client).await
+        }
     }
 }
 
@@ -360,6 +365,11 @@ pub async fn connect(
             crate::dbservice::connect(&client).await?;
             DbPool::DbService(client)
         }
+        Driver::Surrealdb => {
+            let client = Arc::new(build_surreal_client(&config)?);
+            crate::surrealdb::connect(&client).await?;
+            DbPool::SurrealDb(client)
+        }
     };
 
     let mut pools = state.pools.lock().await;
@@ -397,6 +407,31 @@ pub async fn get_active_connection(
 ) -> Result<Option<String>, String> {
     let active = state.active_connection_id.lock().await;
     Ok(active.clone())
+}
+
+/// Construct a [`crate::pool::SurrealDbClient`] from a `ConnectionConfig`.
+/// Validates the minimum required fields and assembles a base URL of the
+/// form `http://host:port`. HTTPS is requested when `sslMode` is "https".
+fn build_surreal_client(
+    config: &ConnectionConfig,
+) -> Result<crate::pool::SurrealDbClient, String> {
+    if config.host.is_empty() {
+        return Err("SurrealDB host is required".to_string());
+    }
+    let port = if config.port == 0 { 8000 } else { config.port };
+    let scheme = if config.ssl_mode.eq_ignore_ascii_case("https") {
+        "https"
+    } else {
+        "http"
+    };
+    Ok(crate::pool::SurrealDbClient {
+        base_url: format!("{scheme}://{}:{port}", config.host),
+        namespace: config.surreal_namespace.clone(),
+        database: config.database.clone(),
+        user: config.user.clone(),
+        password: config.password.clone(),
+        http: crate::surrealdb::build_http_client(),
+    })
 }
 
 #[tauri::command]

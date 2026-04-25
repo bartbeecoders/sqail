@@ -180,5 +180,8 @@ pub async fn validate(pool: DbPool, driver: &Driver, sql: &str) -> ValidationRes
         Driver::Dbservice => {
             ValidationResult::skipped("Validation not supported via DbService")
         }
+        Driver::Surrealdb => {
+            ValidationResult::skipped("Validation not supported for SurrealDB")
+        }
     }
 }

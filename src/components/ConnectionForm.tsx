@@ -307,6 +307,29 @@ export default function ConnectionForm({ initial, onClose }: ConnectionFormProps
                 </div>
               )}
 
+              {/* SurrealDB-specific fields: namespace + HTTPS toggle */}
+              {form.driver === "surrealdb" && (
+                <>
+                  <Field label="Namespace">
+                    <input
+                      value={form.surrealNamespace}
+                      onChange={(e) => set("surrealNamespace", e.target.value)}
+                      placeholder="test"
+                      className="input"
+                    />
+                  </Field>
+                  <label className="flex items-center gap-2 text-xs">
+                    <input
+                      type="checkbox"
+                      checked={form.sslMode === "https"}
+                      onChange={(e) => set("sslMode", e.target.checked ? "https" : "")}
+                      className="h-3.5 w-3.5 accent-primary"
+                    />
+                    <span className="text-muted-foreground">Use HTTPS</span>
+                  </label>
+                </>
+              )}
+
               {/* Database — combobox for PG/MySQL, plain input for others */}
               <Field label="Database">
                 {supportsDbList ? (

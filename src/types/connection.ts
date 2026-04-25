@@ -1,4 +1,4 @@
-export type Driver = "postgres" | "mysql" | "sqlite" | "mssql" | "dbservice";
+export type Driver = "postgres" | "mysql" | "sqlite" | "mssql" | "dbservice" | "surrealdb";
 export type MssqlAuthMethod = "sql_server" | "windows" | "entra_id";
 
 export interface ConnectionConfig {
@@ -22,6 +22,8 @@ export interface ConnectionConfig {
   dbserviceUrl: string;
   dbserviceApiKey: string;
   dbserviceRemoteId: string;
+  // SurrealDB
+  surrealNamespace: string;
 }
 
 export function defaultPort(driver: Driver): number {
@@ -36,6 +38,8 @@ export function defaultPort(driver: Driver): number {
       return 0;
     case "dbservice":
       return 0;
+    case "surrealdb":
+      return 8000;
   }
 }
 
@@ -60,6 +64,7 @@ export function defaultConnection(driver: Driver = "postgres"): ConnectionConfig
     dbserviceUrl: "",
     dbserviceApiKey: "",
     dbserviceRemoteId: "",
+    surrealNamespace: "",
   };
 }
 
@@ -69,6 +74,7 @@ export const DRIVER_LABELS: Record<Driver, string> = {
   sqlite: "SQLite",
   mssql: "SQL Server",
   dbservice: "DbService",
+  surrealdb: "SurrealDB",
 };
 
 export const MSSQL_AUTH_LABELS: Record<MssqlAuthMethod, string> = {
@@ -104,6 +110,24 @@ export function parseConnectionString(raw: string): Partial<ConnectionConfig> & 
       host: myMatch[3] ?? "localhost",
       port: myMatch[4] ? Number(myMatch[4]) : 3306,
       database: decodeURIComponent(myMatch[5] ?? ""),
+    };
+  }
+
+  // SurrealDB: surrealdb://user:pass@host:port/namespace/database
+  // or surrealdb+http://...   surrealdb+https://...
+  const sdMatch = s.match(
+    /^surrealdb(?:\+(https?))?:\/\/(?:([^:@]+)(?::([^@]*))?@)?([^:/]+)(?::(\d+))?(?:\/([^/]+))?(?:\/([^?]*))?/i,
+  );
+  if (sdMatch) {
+    return {
+      driver: "surrealdb",
+      user: decodeURIComponent(sdMatch[2] ?? ""),
+      password: decodeURIComponent(sdMatch[3] ?? ""),
+      host: sdMatch[4] ?? "localhost",
+      port: sdMatch[5] ? Number(sdMatch[5]) : 8000,
+      surrealNamespace: decodeURIComponent(sdMatch[6] ?? ""),
+      database: decodeURIComponent(sdMatch[7] ?? ""),
+      sslMode: sdMatch[1] === "https" ? "https" : "",
     };
   }
 
@@ -169,6 +193,13 @@ export function toConnectionString(c: ConnectionConfig): string {
       return `sqlite://${c.filePath}`;
     case "dbservice":
       return c.dbserviceUrl;
+    case "surrealdb": {
+      const proto = c.sslMode === "https" ? "surrealdb+https" : "surrealdb";
+      const auth = c.user ? `${encodeURIComponent(c.user)}${c.password ? ":" + encodeURIComponent(c.password) : ""}@` : "";
+      const ns = c.surrealNamespace ? "/" + encodeURIComponent(c.surrealNamespace) : "";
+      const db = c.database ? "/" + encodeURIComponent(c.database) : "";
+      return `${proto}://${auth}${c.host}:${c.port}${ns}${db}`;
+    }
     case "mssql": {
       const parts: string[] = [];
       parts.push(`Server=${c.host}${c.port !== 1433 ? "," + c.port : ""}`);

@@ -157,7 +157,15 @@
       "Bash(curl -sL \"https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct/raw/main/tokenizer_config.json\")",
       "Bash(curl -sL \"https://huggingface.co/api/models/unsloth/Qwen3.6-35B-A3B-GGUF\")",
       "Bash(curl -sL \"https://huggingface.co/api/models/bartowski/Qwen_Qwen3.6-35B-A3B-GGUF\")",
-      "Bash(echo \"exit: $?\")"
+      "Bash(echo \"exit: $?\")",
+      "Bash(echo \"--- exit $?\")",
+      "Bash(ps -p 395939 -o comm=)",
+      "Bash(ps -p 396196 -o comm=)",
+      "Bash(RUSTFLAGS=\"-W unused\" cargo check)",
+      "Bash(awk '{print $NF}')",
+      "Bash(pnpm run *)",
+      "Bash(RUSTFLAGS=\"-W dead_code -W unused_imports -W unused_variables\" cargo build)",
+      "Bash(tee /tmp/cargo-build.log)"
     ]
   }
 }

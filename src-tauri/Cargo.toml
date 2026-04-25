@@ -1,6 +1,6 @@
 [package]
 name = "sqail"
-version = "0.6.3"
+version = "0.6.4"
 description = "A lightweight SQL database editor with AI integration"
 authors = ["sqail"]
 license = "MIT"
@@ -45,6 +45,9 @@ tauri-plugin-fs = "2"
 tauri-plugin-window-state = "2"
 tauri-plugin-updater = "2.10.1"
 tauri-plugin-process = "2.3.1"
+
+# Git integration (libgit2 bindings).
+git2 = { version = "0.19", default-features = false, features = ["https", "vendored-libgit2", "vendored-openssl"] }
 
 # Archive extraction for the runtime-downloaded llama-server sidecar.
 zip = { version = "2", default-features = false, features = ["deflate"] }

@@ -1,5 +1,6 @@
 Merge the PR and
-Update the version nr (0.6.3)
+Merge the git-integration branch into main
+Update the version nr (0.6.4)
 Include the changelog in the release. (about page)
 Check the build for warings or error and correct them.
 commit, tag and push to github

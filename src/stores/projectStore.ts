@@ -4,6 +4,7 @@ import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
 import { invoke } from "@tauri-apps/api/core";
 import type { ConnectionConfig } from "../types/connection";
 import type { EditorTab } from "../types/editor";
+import type { ProjectGitConfig } from "../types/git";
 import type { Project, ProjectFile } from "../types/project";
 import type {
   SqailDiagramPayload,
@@ -70,6 +71,8 @@ interface ProjectState {
     data: SqailProjectPayload<ConnectionConfig>,
     path: string,
   ) => Promise<void>;
+  /** Attach or update git integration config on the active project. */
+  setGitConfig: (git: ProjectGitConfig | undefined) => void;
 }
 
 export const useProjectStore = create<ProjectState>((set, get) => ({
@@ -288,9 +291,18 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       name: data.name,
       files,
       filePath: path,
+      git: data.git,
     };
     set({ project });
     persist(project);
+  },
+
+  setGitConfig: (git) => {
+    const { project } = get();
+    if (!project) return;
+    const updated = { ...project, git };
+    set({ project: updated });
+    persist(updated);
   },
 }));
 
@@ -325,6 +337,7 @@ async function writeProjectToPath(
     kind: "project",
     data: {
       name: project.name,
+      git: project.git,
       files: snapshotted.map((f): SqailProjectFile<ConnectionConfig> => {
         if (f.kind === "diagram") {
           const p: SqailDiagramPayload<ConnectionConfig> = {

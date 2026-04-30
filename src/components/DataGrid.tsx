@@ -10,8 +10,9 @@ import {
   type ColumnFiltersState,
 } from "@tanstack/react-table";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ArrowUp, ArrowDown, ArrowUpDown, Search, X, Filter, Copy, ClipboardList, FileJson, Table2 } from "lucide-react";
+import { ArrowUp, ArrowDown, ArrowUpDown, Search, X, Filter, Copy, ClipboardList, FileJson, Table2, Parentheses } from "lucide-react";
 import { cn } from "../lib/utils";
+import { valuesToInList } from "../lib/sqlValues";
 import type { QueryColumn } from "../types/query";
 
 type CellValue = string | number | boolean | null;
@@ -99,6 +100,9 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
   const lastClickedRow = useRef<number | null>(null);
   // Single-cell selection (set by double-click, cleared by row click)
   const [selectedCell, setSelectedCell] = useState<SelectedCell | null>(null);
+  // Column selection (Ctrl/Shift+click on header)
+  const [selectedColumns, setSelectedColumns] = useState<Set<number>>(new Set());
+  const lastClickedColumn = useRef<number | null>(null);
   // Drag-select state
   const isDragging = useRef(false);
 
@@ -115,7 +119,9 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
     setColWidths(columns.map(() => 150));
     setSelectedRows(new Set());
     setSelectedCell(null);
+    setSelectedColumns(new Set());
     lastClickedRow.current = null;
+    lastClickedColumn.current = null;
   }, [columns]);
 
   // Close context menu on outside click / escape
@@ -245,8 +251,10 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
 
   const handleRowMouseDown = useCallback(
     (e: React.MouseEvent, visibleIdx: number) => {
-      // Clear cell selection on row click
+      // Clear cell + column selection on row click
       setSelectedCell(null);
+      setSelectedColumns(new Set());
+      lastClickedColumn.current = null;
 
       if (e.shiftKey && lastClickedRow.current !== null) {
         // Range select
@@ -304,11 +312,81 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
   const handleCellDoubleClick = useCallback(
     (e: React.MouseEvent, rowIdx: number, colIdx: number) => {
       e.stopPropagation();
-      // Select single cell, deselect rows
+      // Select single cell, deselect rows + columns
       setSelectedRows(new Set());
+      setSelectedColumns(new Set());
+      lastClickedColumn.current = null;
       setSelectedCell({ rowIdx, colIdx });
     },
     [],
+  );
+
+  const handleHeaderClick = useCallback(
+    (
+      e: React.MouseEvent,
+      colIdx: number,
+      sortHandler: ((event: unknown) => void) | undefined,
+    ) => {
+      // Shift / Ctrl / Cmd → column selection (overrides sort)
+      if (e.shiftKey && lastClickedColumn.current !== null) {
+        e.preventDefault();
+        const start = Math.min(lastClickedColumn.current, colIdx);
+        const end = Math.max(lastClickedColumn.current, colIdx);
+        const next = new Set<number>();
+        for (let i = start; i <= end; i++) next.add(i);
+        setSelectedColumns(next);
+        setSelectedRows(new Set());
+        setSelectedCell(null);
+        return;
+      }
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        setSelectedColumns((prev) => {
+          const next = new Set(prev);
+          if (next.has(colIdx)) next.delete(colIdx);
+          else next.add(colIdx);
+          return next;
+        });
+        setSelectedRows(new Set());
+        setSelectedCell(null);
+        lastClickedColumn.current = colIdx;
+        return;
+      }
+      // Plain click → sort. Still record the column as the anchor so a
+      // following Shift+click range-selects from here.
+      lastClickedColumn.current = colIdx;
+      sortHandler?.(e);
+    },
+    [],
+  );
+
+  const handleHeaderDragStart = useCallback(
+    (e: React.DragEvent, colIdx: number) => {
+      // If the dragged column isn't already part of the selection,
+      // make it the only selected column for clear visual feedback.
+      let toExport: number[];
+      if (selectedColumns.has(colIdx) && selectedColumns.size > 0) {
+        toExport = Array.from(selectedColumns).sort((a, b) => a - b);
+      } else {
+        toExport = [colIdx];
+        setSelectedColumns(new Set([colIdx]));
+        setSelectedRows(new Set());
+        setSelectedCell(null);
+        lastClickedColumn.current = colIdx;
+      }
+
+      const payload = toExport.map((idx) => ({
+        name: columns[idx].name,
+        values: tableRows.map((r) => (r.original as CellValue[])[idx]),
+      }));
+
+      e.dataTransfer.setData(
+        "application/sqlai-column-data",
+        JSON.stringify(payload),
+      );
+      e.dataTransfer.effectAllowed = "copy";
+    },
+    [selectedColumns, tableRows, columns],
   );
 
   const handleContextMenu = useCallback(
@@ -319,20 +397,54 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
         setSelectedRows(new Set([visibleIdx]));
         lastClickedRow.current = visibleIdx;
       }
+      // A right-click on a row is a row-context action — clear column selection
+      // so the menu shows the row commands.
+      setSelectedColumns(new Set());
+      lastClickedColumn.current = null;
       setContextMenu({ x: e.clientX, y: e.clientY });
     },
     [selectedRows],
   );
 
-  // Get the actual data rows for the current selection
-  const getSelectedData = useCallback((): CellValue[][] => {
+  const handleHeaderContextMenu = useCallback(
+    (e: React.MouseEvent, colIdx: number) => {
+      e.preventDefault();
+      if (!selectedColumns.has(colIdx)) {
+        setSelectedColumns(new Set([colIdx]));
+        setSelectedRows(new Set());
+        setSelectedCell(null);
+        lastClickedColumn.current = colIdx;
+      }
+      setContextMenu({ x: e.clientX, y: e.clientY });
+    },
+    [selectedColumns],
+  );
+
+  // Get the actual data rows for the current selection. When columns are
+  // selected, returns all visible rows narrowed to those columns. When rows
+  // are selected, returns the chosen rows across all columns.
+  const getSelectedData = useCallback((): {
+    rows: CellValue[][];
+    cols: QueryColumn[];
+  } => {
+    if (selectedColumns.size > 0) {
+      const colIndices = Array.from(selectedColumns).sort((a, b) => a - b);
+      const cols = colIndices.map((i) => columns[i]);
+      const rows = tableRows.map((r) =>
+        colIndices.map((i) => (r.original as CellValue[])[i]),
+      );
+      return { rows, cols };
+    }
     const sorted = Array.from(selectedRows).sort((a, b) => a - b);
-    return sorted.map((idx) => tableRows[idx]?.original).filter(Boolean);
-  }, [selectedRows, tableRows]);
+    const rows = sorted
+      .map((idx) => tableRows[idx]?.original as CellValue[] | undefined)
+      .filter((r): r is CellValue[] => Boolean(r));
+    return { rows, cols: columns };
+  }, [selectedRows, selectedColumns, tableRows, columns]);
 
   const copyAs = useCallback(
     (format: "tsv" | "csv" | "json" | "markdown") => {
-      const data = getSelectedData();
+      const { rows: data, cols } = getSelectedData();
       if (data.length === 0) return;
       let text: string;
       switch (format) {
@@ -340,20 +452,32 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
           text = data.map(rowToTsv).join("\n");
           break;
         case "csv":
-          text = rowsToCsv(data, columns);
+          text = rowsToCsv(data, cols);
           break;
         case "json":
-          text = rowsToJson(data, columns);
+          text = rowsToJson(data, cols);
           break;
         case "markdown":
-          text = rowsToMarkdown(data, columns);
+          text = rowsToMarkdown(data, cols);
           break;
       }
       navigator.clipboard.writeText(text);
       setContextMenu(null);
     },
-    [getSelectedData, columns],
+    [getSelectedData],
   );
+
+  const copyColumnsAsInList = useCallback(() => {
+    if (selectedColumns.size === 0) return;
+    const colIndices = Array.from(selectedColumns).sort((a, b) => a - b);
+    const blocks = colIndices.map((idx) => {
+      const values = tableRows.map((r) => (r.original as CellValue[])[idx]);
+      const list = valuesToInList(values);
+      return colIndices.length > 1 ? `-- ${columns[idx].name}\n${list}` : list;
+    });
+    navigator.clipboard.writeText(blocks.join("\n\n"));
+    setContextMenu(null);
+  }, [selectedColumns, tableRows, columns]);
 
   const selectAll = useCallback(() => {
     const all = new Set<number>();
@@ -379,24 +503,29 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
       if ((e.ctrlKey || e.metaKey) && e.key === "a") {
         e.preventDefault();
         setSelectedCell(null);
+        setSelectedColumns(new Set());
         selectAll();
       }
       if ((e.ctrlKey || e.metaKey) && e.key === "c") {
         if (selectedCell) {
           e.preventDefault();
           copyCellValue();
-        } else if (selectedRows.size > 0) {
+        } else if (selectedRows.size > 0 || selectedColumns.size > 0) {
           e.preventDefault();
           copyAs("tsv");
         }
       }
-      if (e.key === "Escape" && selectedCell) {
-        setSelectedCell(null);
+      if (e.key === "Escape") {
+        if (selectedCell) setSelectedCell(null);
+        if (selectedColumns.size > 0) {
+          setSelectedColumns(new Set());
+          lastClickedColumn.current = null;
+        }
       }
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [selectAll, copyAs, selectedRows.size, selectedCell, copyCellValue]);
+  }, [selectAll, copyAs, selectedRows.size, selectedColumns.size, selectedCell, copyCellValue]);
 
   const virtualizer = useVirtualizer({
     count: tableRows.length,
@@ -457,6 +586,11 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
             {selectedRows.size} row{selectedRows.size !== 1 && "s"} selected
           </span>
         )}
+        {!selectedCell && selectedRows.size === 0 && selectedColumns.size > 0 && (
+          <span className="text-[10px] text-muted-foreground ml-auto">
+            {selectedColumns.size} column{selectedColumns.size !== 1 && "s"} selected · drag to editor for IN-list
+          </span>
+        )}
       </div>
 
       {/* Data grid */}
@@ -477,11 +611,20 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
                     const meta = header.column.columnDef.meta as
                       | { typeName: string }
                       | undefined;
+                    const isColSelected = selectedColumns.has(hIdx);
+                    const sortHandler = header.column.getToggleSortingHandler();
                     return (
                       <div
                         key={header.id}
-                        onClick={header.column.getToggleSortingHandler()}
-                        className="relative cursor-pointer select-none border-b border-r border-border px-2 py-1.5 text-left hover:bg-accent/50"
+                        draggable
+                        onDragStart={(e) => handleHeaderDragStart(e, hIdx)}
+                        onClick={(e) => handleHeaderClick(e, hIdx, sortHandler)}
+                        onContextMenu={(e) => handleHeaderContextMenu(e, hIdx)}
+                        className={cn(
+                          "relative cursor-pointer select-none border-b border-r border-border px-2 py-1.5 text-left",
+                          isColSelected ? "bg-primary/15" : "hover:bg-accent/50",
+                        )}
+                        title={`${header.column.columnDef.header as string} — click to sort, Ctrl+click to select column, drag to insert as IN-list`}
                       >
                         <div className="flex items-center gap-1.5">
                           <div className="flex flex-col gap-0">
@@ -506,6 +649,8 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
                         </div>
                         {/* Resize handle */}
                         <div
+                          draggable={false}
+                          onDragStart={(e) => e.preventDefault()}
                           onMouseDown={(e) => onResizeStart(e, hIdx)}
                           className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize hover:bg-primary/30 active:bg-primary/50"
                         />
@@ -583,11 +728,13 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
                     const isCellSelected =
                       selectedCell?.rowIdx === virtualRow.index &&
                       selectedCell?.colIdx === cellIdx;
+                    const isColSelected = selectedColumns.has(cellIdx);
                     return (
                       <div
                         key={cell.id}
                         className={cn(
                           "truncate border-r border-border px-2 py-1",
+                          isColSelected && !isSelected && "bg-primary/10",
                           isCellSelected && "ring-2 ring-inset ring-primary bg-primary/15",
                         )}
                         onDoubleClick={(e) => handleCellDoubleClick(e, virtualRow.index, cellIdx)}
@@ -604,7 +751,7 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
       </div>
 
       {/* Context menu */}
-      {contextMenu && (selectedRows.size > 0 || selectedCell) && (
+      {contextMenu && (selectedRows.size > 0 || selectedCell || selectedColumns.size > 0) && (
         <div
           ref={contextRef}
           className="fixed z-50 min-w-52 rounded-md border border-border bg-background py-1 shadow-lg text-xs"
@@ -613,6 +760,16 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
           {selectedCell && (
             <>
               <CtxItem icon={Copy} label="Copy cell" shortcut="Ctrl+C" onClick={() => { copyCellValue(); setContextMenu(null); }} />
+              <div className="my-1 border-t border-border" />
+            </>
+          )}
+          {selectedColumns.size > 0 && (
+            <>
+              <CtxItem icon={Copy} label={`Copy column${selectedColumns.size !== 1 ? "s" : ""}`} shortcut="Ctrl+C" onClick={() => copyAs("tsv")} />
+              <CtxItem icon={Parentheses} label="Copy as IN-list" onClick={copyColumnsAsInList} />
+              <CtxItem icon={ClipboardList} label="Copy as CSV" onClick={() => copyAs("csv")} />
+              <CtxItem icon={FileJson} label="Copy as JSON" onClick={() => copyAs("json")} />
+              <CtxItem icon={Table2} label="Copy as Markdown" onClick={() => copyAs("markdown")} />
               <div className="my-1 border-t border-border" />
             </>
           )}
@@ -629,6 +786,7 @@ export default function DataGrid({ columns, rows }: DataGridProps) {
             label={`Select all (${tableRows.length})`}
             onClick={() => {
               setSelectedCell(null);
+              setSelectedColumns(new Set());
               selectAll();
               setContextMenu(null);
             }}

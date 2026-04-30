@@ -1,16 +1,20 @@
 import { useState, useRef, useEffect } from "react";
-import { Table2, Loader2, AlertCircle, CheckCircle2, Download, Sparkles } from "lucide-react";
+import { Table2, Loader2, AlertCircle, CheckCircle2, Download, Sparkles, AlignLeft } from "lucide-react";
 import { cn } from "../lib/utils";
 import { useQueryStore } from "../stores/queryStore";
 import { useAiStore } from "../stores/aiStore";
 import { exportResults, type ExportFormat } from "../lib/exportResults";
 import DataGrid from "./DataGrid";
+import TextResultsView from "./TextResultsView";
+
+type ViewMode = "grid" | "text";
 
 export default function ResultsPane() {
   const { results, activeResultIndex, totalTimeMs, error, loading, lastExecutedSql, setActiveResultIndex } =
     useQueryStore();
   const openPalette = useAiStore((s) => s.openPalette);
   const aiProviders = useAiStore((s) => s.providers);
+  const [viewMode, setViewMode] = useState<ViewMode>("grid");
 
   const handleFixWithAi = () => {
     if (!error || !lastExecutedSql) return;
@@ -73,25 +77,34 @@ export default function ResultsPane() {
   const activeResult = results[activeResultIndex];
   const canExport = !activeResult.isMutation && activeResult.columns.length > 0 && activeResult.rows.length > 0;
 
+  const showViewToggle =
+    !activeResult.isMutation && activeResult.columns.length > 0;
+
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
-      {/* Multi-result tabs */}
-      {results.length > 1 && (
+      {/* Top toolbar: multi-result tabs + view-mode toggle */}
+      {(results.length > 1 || showViewToggle) && (
         <div className="flex h-7 items-center gap-px border-b border-border bg-muted/30 px-1">
-          {results.map((r, i) => (
-            <button
-              key={i}
-              onClick={() => setActiveResultIndex(i)}
-              className={cn(
-                "rounded px-2 py-0.5 text-[11px] transition-colors",
-                i === activeResultIndex
-                  ? "bg-background text-foreground font-medium"
-                  : "text-muted-foreground hover:text-foreground",
-              )}
-            >
-              {r.isMutation ? `Statement ${r.statementIndex + 1}` : `Result ${i + 1}`}
-            </button>
-          ))}
+          {results.length > 1 &&
+            results.map((r, i) => (
+              <button
+                key={i}
+                onClick={() => setActiveResultIndex(i)}
+                className={cn(
+                  "rounded px-2 py-0.5 text-[11px] transition-colors",
+                  i === activeResultIndex
+                    ? "bg-background text-foreground font-medium"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {r.isMutation ? `Statement ${r.statementIndex + 1}` : `Result ${i + 1}`}
+              </button>
+            ))}
+          {showViewToggle && (
+            <div className="ml-auto flex items-center">
+              <ViewModeToggle mode={viewMode} setMode={setViewMode} />
+            </div>
+          )}
         </div>
       )}
 
@@ -110,6 +123,8 @@ export default function ResultsPane() {
         <div className="flex flex-1 items-center justify-center text-muted-foreground">
           <p className="text-xs">Query returned no columns</p>
         </div>
+      ) : viewMode === "text" ? (
+        <TextResultsView columns={activeResult.columns} rows={activeResult.rows} />
       ) : (
         <DataGrid columns={activeResult.columns} rows={activeResult.rows} />
       )}
@@ -144,6 +159,45 @@ export default function ResultsPane() {
             : undefined
         }
       />
+    </div>
+  );
+}
+
+function ViewModeToggle({
+  mode,
+  setMode,
+}: {
+  mode: ViewMode;
+  setMode: (m: ViewMode) => void;
+}) {
+  return (
+    <div className="flex items-center rounded border border-border bg-background p-0.5">
+      <button
+        onClick={() => setMode("grid")}
+        className={cn(
+          "flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] transition-colors",
+          mode === "grid"
+            ? "bg-primary/10 text-primary"
+            : "text-muted-foreground hover:text-foreground",
+        )}
+        title="Grid view"
+      >
+        <Table2 size={11} />
+        Grid
+      </button>
+      <button
+        onClick={() => setMode("text")}
+        className={cn(
+          "flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] transition-colors",
+          mode === "text"
+            ? "bg-primary/10 text-primary"
+            : "text-muted-foreground hover:text-foreground",
+        )}
+        title="Text view"
+      >
+        <AlignLeft size={11} />
+        Text
+      </button>
     </div>
   );
 }

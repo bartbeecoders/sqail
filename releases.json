@@ -1,5 +1,24 @@
 [
   {
+    "version": "0.6.5",
+    "sections": [
+      {
+        "title": "Editor",
+        "items": [
+          "SQL autocomplete no longer pops up unsolicited after a complete keyword, alias, or literal followed by a space — the popup only opens when the previous token expects something specific (after FROM/SELECT/WHERE/JOIN/etc., or after `,` `(` `.`). Manual Ctrl+Space trigger always works. Fixes #47"
+        ]
+      },
+      {
+        "title": "Results Grid",
+        "items": [
+          "Column selection: Ctrl/Cmd+click a column header to toggle, Shift+click for range — plain click still sorts and now records an anchor for the next Shift+click. Right-click a header for the column context menu (Copy, Copy as IN-list, CSV, JSON, Markdown). Fixes #46",
+          "Drag a column header into the SQL editor to insert its values as a quoted SQL IN-list (`'a', 'b', 'c'`); multi-column drops are emitted as separate `-- column_name` blocks. Fixes #46",
+          "New plain-text view for results: Grid/Text toggle in the results-pane toolbar renders a fixed-width SSMS-style table (header, `---` separator, padded rows, `(N rows)` footer, NULL printed literally, cells truncated at 80 chars) with a hover Copy button. Fixes #45"
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.6.4",
     "sections": [
       {

@@ -14,6 +14,7 @@ import { createSqlCompletionProvider } from "../lib/sqlCompletions";
 import { createInlineAiProvider } from "../lib/inlineAi";
 import { buildSelectStatement, buildRoutineCallStatement } from "../lib/sqlGenerate";
 import { validateSql, toMonacoMarkers } from "../lib/sqlValidator";
+import { valuesToInList } from "../lib/sqlValues";
 import type { ColumnInfo } from "../types/schema";
 import type { Driver } from "../types/connection";
 
@@ -271,7 +272,11 @@ export default function SqlEditor({ onExecute, onFormat, overrideTabId, editorRe
   });
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
-    if (e.dataTransfer.types.includes("application/sqlai-table") || e.dataTransfer.types.includes("application/sqlai-routine")) {
+    if (
+      e.dataTransfer.types.includes("application/sqlai-table") ||
+      e.dataTransfer.types.includes("application/sqlai-routine") ||
+      e.dataTransfer.types.includes("application/sqlai-column-data")
+    ) {
       e.preventDefault();
       e.dataTransfer.dropEffect = "copy";
       setDragOver(true);
@@ -318,6 +323,29 @@ export default function SqlEditor({ onExecute, onFormat, overrideTabId, editorRe
   const handleDrop = useCallback(
     async (e: React.DragEvent) => {
       setDragOver(false);
+
+      // Handle column-data drop (from results grid). Doesn't require an
+      // active connection — it's pure formatting of values the user already
+      // has in front of them.
+      const colDataRaw = e.dataTransfer.getData("application/sqlai-column-data");
+      if (colDataRaw) {
+        e.preventDefault();
+        try {
+          const cols = JSON.parse(colDataRaw) as Array<{
+            name: string;
+            values: (string | number | boolean | null)[];
+          }>;
+          const blocks = cols.map(({ name, values }) =>
+            cols.length > 1
+              ? `-- ${name}\n${valuesToInList(values)}`
+              : valuesToInList(values),
+          );
+          insertSqlInEditor(blocks.join("\n\n"));
+        } catch {
+          /* malformed payload — ignore */
+        }
+        return;
+      }
 
       const connStore = useConnectionStore.getState();
       const conn = connStore.connections.find(

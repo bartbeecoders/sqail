@@ -454,6 +454,44 @@ function isKeyword(word: string): boolean {
   return ALL_KEYWORDS.includes(word);
 }
 
+/**
+ * Tokens that "demand" a completion to follow. When the cursor sits right
+ * after one of these (and the user has just typed whitespace), it makes
+ * sense to pop up suggestions. After anything else — a complete identifier,
+ * an alias, a literal — the popup would be intrusive.
+ */
+const DEMAND_TOKENS = new Set<string>([
+  // Statement keywords
+  "SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP",
+  "TRUNCATE", "MERGE", "WITH", "EXPLAIN", "DESCRIBE",
+  // Clause keywords expecting an entity next
+  "FROM", "WHERE", "AND", "OR", "NOT", "JOIN", "INTO", "ON", "SET",
+  "HAVING", "DISTINCT", "BY", "AS", "WHEN", "THEN", "ELSE", "CASE",
+  "IN", "LIKE", "BETWEEN", "EXISTS", "VALUES", "USING", "RETURNING",
+  "GROUP", "ORDER", "PARTITION", "OVER", "FILTER",
+  // Join modifiers
+  "INNER", "LEFT", "RIGHT", "FULL", "OUTER", "CROSS", "NATURAL", "LATERAL",
+  // DDL slots expecting a name/type next
+  "TABLE", "INDEX", "VIEW", "DATABASE", "SCHEMA", "SEQUENCE", "COLUMN",
+  "CONSTRAINT", "REFERENCES", "PRIMARY", "FOREIGN", "UNIQUE", "CHECK",
+  // Punctuation that opens a new completion slot
+  ",", "(", ".",
+]);
+
+/**
+ * True if the most recent meaningful token before the cursor expects
+ * something specific to follow.
+ */
+function lastTokenDemandsSuggestion(textBeforeCursor: string): boolean {
+  const cleaned = stripStringsAndComments(textBeforeCursor);
+  const trimmed = cleaned.trimEnd();
+  if (trimmed === "") return true; // start of document — keyword context
+  if (trimmed.endsWith(";")) return true; // start of next statement
+  const tokens = tokenizeEnd(trimmed, 1);
+  const last = tokens[tokens.length - 1]?.toUpperCase() ?? "";
+  return DEMAND_TOKENS.has(last);
+}
+
 // ── Main completion provider ─────────────────────────────────
 
 export function createSqlCompletionProvider(): languages.CompletionItemProvider {
@@ -477,6 +515,14 @@ export function createSqlCompletionProvider(): languages.CompletionItemProvider 
         endColumn: position.column,
       });
       const fullText = model.getValue();
+
+      // Cursor sits after whitespace (no word being typed) and the previous
+      // token doesn't expect anything specific — stay quiet so we don't
+      // interfere after a complete keyword or alias. User can still trigger
+      // the popup manually with Ctrl+Space.
+      if (word.word === "" && !lastTokenDemandsSuggestion(textBeforeCursor)) {
+        return { suggestions: [] };
+      }
 
       // Detect context
       const ctx = detectContext(textBeforeCursor, fullText);

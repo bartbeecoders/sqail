@@ -3,6 +3,15 @@
     "version": "0.6.5",
     "sections": [
       {
+        "title": "SurrealDB (Phase 1 — read/query)",
+        "items": [
+          "New SurrealDB driver wrapping the documented `/version` and `/sql` HTTP endpoints — basic auth + Surreal-NS / Surreal-DB headers per request, no per-connection state to open. Connection form gains a Namespace field and an HTTPS toggle when the driver is SurrealDB",
+          "Result materialiser turns per-statement envelopes into rows: arrays of objects → union-of-keys columns with `id` floated to the front; arrays of scalars / single objects / scalars all handled",
+          "Schema introspection via `INFO FOR DB` / `INFO FOR TABLE … STRUCTURE`; SCHEMALESS tables fall back to sampling `SELECT * FROM <table> LIMIT 25` with an `(inferred)` annotation. Routines and foreign keys return empty for Phase 1 by design",
+          "Eager `RETURN 1` probe on connect so bad credentials or wrong NS+DB fail fast"
+        ]
+      },
+      {
         "title": "Editor",
         "items": [
           "SQL autocomplete no longer pops up unsolicited after a complete keyword, alias, or literal followed by a space — the popup only opens when the previous token expects something specific (after FROM/SELECT/WHERE/JOIN/etc., or after `,` `(` `.`). Manual Ctrl+Space trigger always works. Fixes #47"

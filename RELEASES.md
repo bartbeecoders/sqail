@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+## v0.6.6
+
+### Fixes
+- SQL Server: fix `tls handshake eof` when connecting to older servers (2008/2012/2014). The tiberius driver now uses native-tls (SChannel on Windows) instead of rustls, which rejected the legacy TLS protocols/ciphers those servers negotiate. Fixes #49
+
 ## v0.5.4
 
 ### Auto-update (fix #34)

@@ -1,5 +1,16 @@
 [
   {
+    "version": "0.6.6",
+    "sections": [
+      {
+        "title": "Fixes",
+        "items": [
+          "SQL Server: connecting to older servers (2008 / 2012 / 2014) no longer fails with `tls handshake eof`. The tiberius driver now uses the native-tls backend (SChannel on Windows) instead of rustls, which refused the legacy TLS protocols and cipher suites those servers negotiate. Reuses the native-tls stack sqlx already ships, so no new dependency. Fixes #49"
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.6.5",
     "sections": [
       {

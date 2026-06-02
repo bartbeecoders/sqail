@@ -20,6 +20,22 @@ pub enum MssqlAuthMethod {
     EntraId,
 }
 
+/// Connection encryption level for MSSQL (tiberius).
+/// Maps to `tiberius::EncryptionLevel`. Defaults to `Required` to preserve
+/// existing behavior; `Off` (no TLS at all) is the workaround for older
+/// servers whose only TLS protocols/ciphers modern Windows SChannel refuses.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MssqlEncryption {
+    /// Encrypt everything; fail if the server can't. (tiberius `Required`)
+    #[default]
+    Required,
+    /// Encrypt only the login handshake. (tiberius `Off`)
+    LoginOnly,
+    /// No encryption at all — skip the TLS handshake. (tiberius `NotSupported`)
+    Off,
+}
+
 impl std::fmt::Display for Driver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -59,6 +75,8 @@ pub struct ConnectionConfig {
     pub trust_server_certificate: bool,
     #[serde(default)]
     pub mssql_auth_method: MssqlAuthMethod,
+    #[serde(default)]
+    pub mssql_encryption: MssqlEncryption,
     #[serde(default)]
     pub tenant_id: String,
     #[serde(default)]
@@ -136,6 +154,12 @@ impl ConnectionConfig {
                 }
             }
         }
+
+        config.encryption(match self.mssql_encryption {
+            MssqlEncryption::Required => tiberius::EncryptionLevel::Required,
+            MssqlEncryption::LoginOnly => tiberius::EncryptionLevel::Off,
+            MssqlEncryption::Off => tiberius::EncryptionLevel::NotSupported,
+        });
 
         if self.trust_server_certificate {
             config.trust_cert();

@@ -1,5 +1,6 @@
 export type Driver = "postgres" | "mysql" | "sqlite" | "mssql" | "dbservice" | "surrealdb";
 export type MssqlAuthMethod = "sql_server" | "windows" | "entra_id";
+export type MssqlEncryption = "required" | "login_only" | "off";
 
 export interface ConnectionConfig {
   id: string;
@@ -15,6 +16,7 @@ export interface ConnectionConfig {
   integratedSecurity: boolean;
   trustServerCertificate: boolean;
   mssqlAuthMethod: MssqlAuthMethod;
+  mssqlEncryption: MssqlEncryption;
   tenantId: string;
   azureClientId: string;
   color: string;
@@ -58,6 +60,7 @@ export function defaultConnection(driver: Driver = "postgres"): ConnectionConfig
     integratedSecurity: false,
     trustServerCertificate: false,
     mssqlAuthMethod: "sql_server",
+    mssqlEncryption: "required",
     tenantId: "",
     azureClientId: "",
     color: "",
@@ -81,6 +84,12 @@ export const MSSQL_AUTH_LABELS: Record<MssqlAuthMethod, string> = {
   sql_server: "SQL Server",
   windows: "Windows",
   entra_id: "Entra ID",
+};
+
+export const MSSQL_ENCRYPTION_LABELS: Record<MssqlEncryption, string> = {
+  required: "Required",
+  login_only: "Login only",
+  off: "Off",
 };
 
 /** Parse a connection string into a partial ConnectionConfig. */
@@ -171,6 +180,10 @@ export function parseConnectionString(raw: string): Partial<ConnectionConfig> & 
       trustServerCertificate: (kv.get("trustservercertificate") ?? "").toLowerCase() === "true",
       integratedSecurity: (kv.get("integrated security") ?? "").toLowerCase() === "true"
         || (kv.get("trusted_connection") ?? "").toLowerCase() === "true",
+      // Encrypt=false/optional/no/0 → no encryption (older-server workaround); anything else keeps the default.
+      ...(["false", "optional", "no", "0"].includes((kv.get("encrypt") ?? "").toLowerCase())
+        ? { mssqlEncryption: "off" as MssqlEncryption }
+        : {}),
     };
   }
 
@@ -211,6 +224,7 @@ export function toConnectionString(c: ConnectionConfig): string {
         if (c.password) parts.push(`Password=${c.password}`);
       }
       if (c.trustServerCertificate) parts.push("TrustServerCertificate=true");
+      if (c.mssqlEncryption === "off") parts.push("Encrypt=false");
       return parts.join(";") + ";";
     }
   }

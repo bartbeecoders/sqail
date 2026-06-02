@@ -7,12 +7,14 @@ import {
   type ConnectionConfig,
   type Driver,
   type MssqlAuthMethod,
+  type MssqlEncryption,
   defaultConnection,
   defaultPort,
   parseConnectionString,
   toConnectionString,
   DRIVER_LABELS,
   MSSQL_AUTH_LABELS,
+  MSSQL_ENCRYPTION_LABELS,
 } from "../types/connection";
 
 interface ConnectionFormProps {
@@ -31,7 +33,11 @@ interface DeviceCodeInfo {
 }
 
 export default function ConnectionForm({ initial, onClose }: ConnectionFormProps) {
-  const [form, setForm] = useState<ConnectionConfig>(initial ?? defaultConnection());
+  // Merge over defaults so connections saved before a field existed (e.g. mssqlEncryption)
+  // still yield a fully-populated, controlled form.
+  const [form, setForm] = useState<ConnectionConfig>(
+    initial ? { ...defaultConnection(initial.driver), ...initial } : defaultConnection(),
+  );
   const [testStatus, setTestStatus] = useState<TestStatus>("idle");
   const [testMessage, setTestMessage] = useState("");
   const [saving, setSaving] = useState(false);
@@ -384,6 +390,23 @@ export default function ConnectionForm({ initial, onClose }: ConnectionFormProps
                     />
                     <span className="text-muted-foreground">Trust Server Certificate</span>
                   </label>
+                  <Field label="Encryption">
+                    <select
+                      value={form.mssqlEncryption}
+                      onChange={(e) => set("mssqlEncryption", e.target.value as MssqlEncryption)}
+                      className="input"
+                    >
+                      {(Object.keys(MSSQL_ENCRYPTION_LABELS) as MssqlEncryption[]).map((e) => (
+                        <option key={e} value={e}>
+                          {MSSQL_ENCRYPTION_LABELS[e]}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      Set to <strong>Off</strong> for older SQL Servers that fail with a TLS handshake or
+                      “no common algorithm” error.
+                    </p>
+                  </Field>
                 </>
               )}
               {form.driver === "mssql" && form.mssqlAuthMethod === "entra_id" && (

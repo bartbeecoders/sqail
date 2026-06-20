@@ -165,7 +165,8 @@
       "Bash(awk '{print $NF}')",
       "Bash(pnpm run *)",
       "Bash(RUSTFLAGS=\"-W dead_code -W unused_imports -W unused_variables\" cargo build)",
-      "Bash(tee /tmp/cargo-build.log)"
+      "Bash(tee /tmp/cargo-build.log)",
+      "Bash(cargo --version)"
     ]
   }
 }

@@ -137,7 +137,7 @@ export default function ConnectionForm({ initial, onClose }: ConnectionFormProps
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="w-full max-w-md rounded-lg border border-border bg-background p-5 shadow-xl">
+      <div className="w-full max-w-lg rounded-lg border border-border bg-background p-5 shadow-xl">
         {/* Header */}
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-sm font-semibold">

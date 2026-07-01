@@ -4,7 +4,7 @@
 
 sqail (pronounced *"snail"*) is a lightweight cross-platform desktop SQL client with first-class AI integration, built on Tauri v2. It launches in under a second, stays under 20 MB, and ships with natural-language-to-SQL, query explanation, and optimization out of the box — without telemetry, lock-in, or a paid tier.
 
-It speaks PostgreSQL, MySQL, SQLite, and Microsoft SQL Server today. It uses the same Monaco editor that powers VS Code, stores credentials locally in encrypted SurrealDB, and lets you bring your own API key for Claude, OpenAI, Minimax, Z.ai, LM Studio, or any OpenAI-compatible endpoint. Everything else is up to you.
+It speaks PostgreSQL, MySQL, SQLite, and Microsoft SQL Server today. It uses the same Monaco editor that powers VS Code, stores credentials locally in encrypted on-disk files, and lets you bring your own API key for Claude, OpenAI, Minimax, Z.ai, LM Studio, or any OpenAI-compatible endpoint. Everything else is up to you.
 
 [**Download for your OS →**](https://sqail.io) &nbsp;·&nbsp; [Codeberg](https://codeberg.org/bartbeecoders/sqail) &nbsp;·&nbsp; [GitHub mirror](https://github.com/bartbeecoders/sqail)
 
@@ -25,7 +25,7 @@ It speaks PostgreSQL, MySQL, SQLite, and Microsoft SQL Server today. It uses the
 - Multi-provider AI: Claude, OpenAI, Minimax, Z.ai, LM Studio, Claude Code CLI, OpenAI-compatible
 - **Inline AI completion** — ghost-text SQL suggestions from a local llama.cpp sidecar, opt-in, no cloud calls
 - Keyboard-first shortcuts, fully customizable
-- Privacy-respecting: credentials in local encrypted SurrealDB, no telemetry
+- Privacy-respecting: credentials in local encrypted files, no telemetry
 
 ## Inline AI completion
 

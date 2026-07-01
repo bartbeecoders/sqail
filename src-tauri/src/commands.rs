@@ -15,7 +15,10 @@ use crate::ai::inline::sidecar::SidecarStatus;
 use crate::ai::provider::{AiHistoryEntry, AiProviderConfig, AiProviderType};
 use crate::auth::entra;
 use crate::crypto::{self, CryptoEnvelope};
-use crate::db::connections::{ConnectionConfig, Driver, MssqlAuthMethod};
+use crate::db::connections::{
+    build_mysql_connect_options, build_pg_connect_options, ConnectionConfig, Driver,
+    MssqlAuthMethod,
+};
 use crate::metadata::{ColumnMetadata, GeneratedMetadata, ObjectMetadata};
 use crate::pool::DbPool;
 use crate::query::{self, QueryResponse};
@@ -146,11 +149,10 @@ pub async fn test_connection(
             }
         }
         Driver::Postgres => {
-            let url = config.connection_string();
             let pool = PgPoolOptions::new()
                 .max_connections(1)
                 .acquire_timeout(Duration::from_secs(5))
-                .connect(&url)
+                .connect_with(config.pg_connect_options())
                 .await
                 .map_err(|e| format!("Connection failed: {e}"))?;
             let row: (i32,) = sqlx::query_as("SELECT 1")
@@ -165,11 +167,10 @@ pub async fn test_connection(
             }
         }
         Driver::Mysql => {
-            let url = config.connection_string();
             let pool = MySqlPoolOptions::new()
                 .max_connections(1)
                 .acquire_timeout(Duration::from_secs(5))
-                .connect(&url)
+                .connect_with(config.mysql_connect_options())
                 .await
                 .map_err(|e| format!("Connection failed: {e}"))?;
             let row: (i32,) = sqlx::query_as("SELECT 1")
@@ -184,11 +185,10 @@ pub async fn test_connection(
             }
         }
         Driver::Sqlite => {
-            let url = config.connection_string();
             let pool = SqlitePoolOptions::new()
                 .max_connections(1)
                 .acquire_timeout(Duration::from_secs(5))
-                .connect(&url)
+                .connect_with(config.sqlite_connect_options())
                 .await
                 .map_err(|e| format!("Connection failed: {e}"))?;
             let row: (i32,) = sqlx::query_as("SELECT 1")
@@ -233,15 +233,12 @@ pub async fn list_databases(
 ) -> Result<Vec<String>, String> {
     match driver {
         Driver::Postgres => {
-            let ssl = if ssl_mode.is_empty() { "prefer" } else { &ssl_mode };
-            let url = format!(
-                "postgres://{}:{}@{}:{}/postgres?sslmode={}",
-                user, password, host, port, ssl
-            );
             let pool = PgPoolOptions::new()
                 .max_connections(1)
                 .acquire_timeout(Duration::from_secs(5))
-                .connect(&url)
+                .connect_with(build_pg_connect_options(
+                    &host, port, &user, &password, "postgres", &ssl_mode,
+                ))
                 .await
                 .map_err(|e| format!("Connection failed: {e}"))?;
             let rows = sqlx::query_scalar::<_, String>(
@@ -256,14 +253,12 @@ pub async fn list_databases(
             Ok(rows)
         }
         Driver::Mysql => {
-            let url = format!(
-                "mysql://{}:{}@{}:{}/information_schema",
-                user, password, host, port
-            );
             let pool = MySqlPoolOptions::new()
                 .max_connections(1)
                 .acquire_timeout(Duration::from_secs(5))
-                .connect(&url)
+                .connect_with(build_mysql_connect_options(
+                    &host, port, &user, &password, "information_schema",
+                ))
                 .await
                 .map_err(|e| format!("Connection failed: {e}"))?;
             let rows = sqlx::query_scalar::<_, String>(
@@ -316,31 +311,28 @@ pub async fn connect(
             DbPool::Mssql(Arc::new(pool))
         }
         Driver::Postgres => {
-            let url = config.connection_string();
             let pool = PgPoolOptions::new()
                 .max_connections(5)
                 .acquire_timeout(Duration::from_secs(10))
-                .connect(&url)
+                .connect_with(config.pg_connect_options())
                 .await
                 .map_err(|e| format!("Connection failed: {e}"))?;
             DbPool::Postgres(Arc::new(pool))
         }
         Driver::Mysql => {
-            let url = config.connection_string();
             let pool = MySqlPoolOptions::new()
                 .max_connections(5)
                 .acquire_timeout(Duration::from_secs(10))
-                .connect(&url)
+                .connect_with(config.mysql_connect_options())
                 .await
                 .map_err(|e| format!("Connection failed: {e}"))?;
             DbPool::Mysql(Arc::new(pool))
         }
         Driver::Sqlite => {
-            let url = config.connection_string();
             let pool = SqlitePoolOptions::new()
                 .max_connections(5)
                 .acquire_timeout(Duration::from_secs(10))
-                .connect(&url)
+                .connect_with(config.sqlite_connect_options())
                 .await
                 .map_err(|e| format!("Connection failed: {e}"))?;
             DbPool::Sqlite(Arc::new(pool))

@@ -166,7 +166,13 @@
       "Bash(pnpm run *)",
       "Bash(RUSTFLAGS=\"-W dead_code -W unused_imports -W unused_variables\" cargo build)",
       "Bash(tee /tmp/cargo-build.log)",
-      "Bash(cargo --version)"
+      "Bash(cargo --version)",
+      "Bash(kubectl get *)",
+      "Bash(kubectl -n stasid-dev get cm postgres-pgbouncer -o jsonpath='{.data.pgbouncer\\\\.ini}')",
+      "Bash(kubectl -n stasid-dev get secret postgres-pgbouncer -o jsonpath='{.data}')",
+      "Bash(kubectl -n stasid-dev get cm,secret)",
+      "Bash(kubectl -n stasid-dev get pods -l postgres-operator.crunchydata.com/role=master -o custom-columns=NAME:.metadata.name,ROLE:.metadata.labels.postgres-operator\\\\\\\\.crunchydata\\\\\\\\.com/role)",
+      "Bash(kubectl -n stasid-dev get pods -l postgres-operator.crunchydata.com/instance-set=instance1 -L postgres-operator.crunchydata.com/role)"
     ]
   }
 }

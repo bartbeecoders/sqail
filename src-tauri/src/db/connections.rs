@@ -1,4 +1,7 @@
 use serde::{Deserialize, Serialize};
+use sqlx::mysql::MySqlConnectOptions;
+use sqlx::postgres::{PgConnectOptions, PgSslMode};
+use sqlx::sqlite::SqliteConnectOptions;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -95,37 +98,90 @@ pub struct ConnectionConfig {
     pub surreal_namespace: String,
 }
 
+/// Build Postgres connect options from raw field values.
+///
+/// Uses the sqlx builder instead of a formatted `postgres://…` URL so the
+/// password (and every other field) needs no percent-encoding — a password
+/// containing `@`, `:`, `/`, `?`, `#`, `%` or a space would otherwise make the
+/// URL parser fail with a misleading error such as "invalid port number".
+pub fn build_pg_connect_options(
+    host: &str,
+    port: u16,
+    user: &str,
+    password: &str,
+    database: &str,
+    ssl_mode: &str,
+) -> PgConnectOptions {
+    let mode = match ssl_mode.to_ascii_lowercase().as_str() {
+        "disable" => PgSslMode::Disable,
+        "allow" => PgSslMode::Allow,
+        "require" => PgSslMode::Require,
+        "verify-ca" => PgSslMode::VerifyCa,
+        "verify-full" => PgSslMode::VerifyFull,
+        // Empty or unrecognized (e.g. the SurrealDB "https" flag) → libpq default.
+        _ => PgSslMode::Prefer,
+    };
+    let mut opts = PgConnectOptions::new()
+        .host(host)
+        .port(port)
+        .username(user)
+        .password(password)
+        .ssl_mode(mode);
+    if !database.is_empty() {
+        opts = opts.database(database);
+    }
+    opts
+}
+
+/// Build MySQL connect options from raw field values. See
+/// [`build_pg_connect_options`] for why this avoids hand-built URLs.
+pub fn build_mysql_connect_options(
+    host: &str,
+    port: u16,
+    user: &str,
+    password: &str,
+    database: &str,
+) -> MySqlConnectOptions {
+    let mut opts = MySqlConnectOptions::new()
+        .host(host)
+        .port(port)
+        .username(user)
+        .password(password);
+    if !database.is_empty() {
+        opts = opts.database(database);
+    }
+    opts
+}
+
 impl ConnectionConfig {
-    /// Connection string for sqlx (Postgres, MySQL, SQLite only)
-    pub fn connection_string(&self) -> String {
-        match self.driver {
-            Driver::Postgres => {
-                let ssl = if self.ssl_mode.is_empty() {
-                    "prefer"
-                } else {
-                    &self.ssl_mode
-                };
-                format!(
-                    "postgres://{}:{}@{}:{}/{}?sslmode={}",
-                    self.user, self.password, self.host, self.port, self.database, ssl
-                )
-            }
-            Driver::Mysql => {
-                format!(
-                    "mysql://{}:{}@{}:{}/{}",
-                    self.user, self.password, self.host, self.port, self.database
-                )
-            }
-            Driver::Sqlite => {
-                format!("sqlite:{}", self.file_path)
-            }
-            Driver::Mssql => {
-                // Not used — MSSQL uses tiberius config directly
-                String::new()
-            }
-            Driver::Dbservice => String::new(),
-            Driver::Surrealdb => String::new(),
-        }
+    /// sqlx connect options for a Postgres connection, built from typed
+    /// fields. See [`build_pg_connect_options`].
+    pub fn pg_connect_options(&self) -> PgConnectOptions {
+        build_pg_connect_options(
+            &self.host,
+            self.port,
+            &self.user,
+            &self.password,
+            &self.database,
+            &self.ssl_mode,
+        )
+    }
+
+    /// sqlx connect options for a MySQL connection. See [`build_mysql_connect_options`].
+    pub fn mysql_connect_options(&self) -> MySqlConnectOptions {
+        build_mysql_connect_options(
+            &self.host,
+            self.port,
+            &self.user,
+            &self.password,
+            &self.database,
+        )
+    }
+
+    /// sqlx connect options for a SQLite connection. `.filename()` takes the
+    /// path verbatim, so paths with spaces or reserved characters are safe.
+    pub fn sqlite_connect_options(&self) -> SqliteConnectOptions {
+        SqliteConnectOptions::new().filename(&self.file_path)
     }
 
     /// Build a tiberius Config for MSSQL connections.

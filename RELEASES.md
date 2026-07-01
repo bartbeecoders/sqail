@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+## v0.6.7
+
 ### Fixes
 - Postgres/MySQL: fix connections failing with "invalid port number" when the password contains URL-reserved characters (`@ : / ? # %`, spaces, …). Connect/test/database-list now build sqlx connect options from typed fields instead of a hand-formatted `postgres://…` URL, so passwords no longer need to be URL-safe
 

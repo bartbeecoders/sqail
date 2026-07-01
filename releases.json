@@ -1,5 +1,16 @@
 [
   {
+    "version": "0.6.7",
+    "sections": [
+      {
+        "title": "Fixes",
+        "items": [
+          "Postgres / MySQL: connecting with a password that contains URL-reserved characters (`@ : / ? # %`, spaces, …) no longer fails with a misleading \"invalid port number\" error. Connect, test, and database listing now build the sqlx connect options from the typed connection fields instead of a hand-formatted `postgres://…` URL, so passwords no longer need to be URL-safe"
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.6.6",
     "sections": [
       {

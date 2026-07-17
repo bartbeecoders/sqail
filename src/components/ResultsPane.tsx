@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { Table2, Loader2, AlertCircle, CheckCircle2, Download, Sparkles, AlignLeft } from "lucide-react";
+import { Table2, Loader2, AlertCircle, CheckCircle2, Download, Sparkles, AlignLeft, Square, Ban } from "lucide-react";
 import { cn } from "../lib/utils";
 import { useQueryStore } from "../stores/queryStore";
 import { useAiStore } from "../stores/aiStore";
@@ -10,7 +10,7 @@ import TextResultsView from "./TextResultsView";
 type ViewMode = "grid" | "text";
 
 export default function ResultsPane() {
-  const { results, activeResultIndex, totalTimeMs, error, loading, lastExecutedSql, setActiveResultIndex } =
+  const { results, activeResultIndex, totalTimeMs, error, loading, lastExecutedSql, setActiveResultIndex, cancelQuery } =
     useQueryStore();
   const openPalette = useAiStore((s) => s.openPalette);
   const aiProviders = useAiStore((s) => s.providers);
@@ -21,14 +21,26 @@ export default function ResultsPane() {
     openPalette({ flow: "fix_query", sql: lastExecutedSql, errorMessage: error });
   };
   const canFixWithAi = aiProviders.length > 0 && !!lastExecutedSql;
+  const wasCancelled = error === "Query cancelled";
 
   // Loading state
   if (loading) {
     return (
       <div className="flex flex-1 flex-col">
-        <div className="flex flex-1 items-center justify-center text-muted-foreground">
-          <Loader2 size={20} className="mr-2 animate-spin" />
-          <span className="text-sm">Executing query...</span>
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 text-muted-foreground">
+          <div className="flex items-center">
+            <Loader2 size={20} className="mr-2 animate-spin" />
+            <span className="text-sm">Executing query...</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => { cancelQuery().catch(console.error); }}
+            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent"
+            title="Stop query (Ctrl+Shift+C)"
+          >
+            <Square size={12} className="fill-current" />
+            Stop
+          </button>
         </div>
       </div>
     );
@@ -39,13 +51,20 @@ export default function ResultsPane() {
     return (
       <div className="flex flex-1 flex-col">
         <div className="flex flex-1 items-center justify-center px-8">
-          <div className="max-w-lg rounded-md bg-destructive/10 p-4 text-sm text-destructive">
+          <div
+            className={cn(
+              "max-w-lg rounded-md p-4 text-sm",
+              wasCancelled
+                ? "bg-muted text-muted-foreground"
+                : "bg-destructive/10 text-destructive",
+            )}
+          >
             <div className="mb-2 flex items-center gap-2 font-medium">
-              <AlertCircle size={14} />
-              Query Error
+              {wasCancelled ? <Ban size={14} /> : <AlertCircle size={14} />}
+              {wasCancelled ? "Query Cancelled" : "Query Error"}
             </div>
             <p className="break-all text-xs opacity-80">{error}</p>
-            {canFixWithAi && (
+            {!wasCancelled && canFixWithAi && (
               <button
                 onClick={handleFixWithAi}
                 className="mt-3 inline-flex items-center gap-1 rounded-md bg-primary px-2 py-1 text-[11px] font-medium text-primary-foreground hover:bg-primary/90"

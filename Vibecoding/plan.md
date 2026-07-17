@@ -67,7 +67,7 @@
 - [x] 4.7. Add NULL value rendering (italic gray `NULL`), boolean coloring, number tabular-nums, long text truncation
 - [x] 4.8. Support multiple result sets (SQL split on `;` respecting strings/comments, tab switcher per result)
 - [x] 4.9. Add loading spinner in results pane + toolbar Run button shows "Running..." with spinner
-- [ ] 4.10. Implement query cancellation (abort long-running queries) — deferred
+- [x] 4.10. Implement query cancellation (abort long-running queries)
 
 ---
 

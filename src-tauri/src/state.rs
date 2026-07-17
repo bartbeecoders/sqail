@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 
 use crate::ai::inline::state::InlineAiState;
 use crate::ai::provider::{AiHistoryEntry, AiProviderConfig};
@@ -20,6 +20,11 @@ pub struct AppState {
     pub active_connection_id: Mutex<Option<String>>,
     /// Entra ID access tokens keyed by connection ID
     pub entra_tokens: Mutex<HashMap<String, String>>,
+
+    /// Cancel sender for the currently running SQL query (at most one).
+    /// Sending on this channel aborts `execute_query` and drops the in-flight
+    /// driver future (which closes the connection and stops server-side work).
+    pub query_cancel: Mutex<Option<oneshot::Sender<()>>>,
 
     pub ai_provider_store: AiProviderStore,
     pub ai_providers: Mutex<Vec<AiProviderConfig>>,
@@ -59,6 +64,7 @@ impl AppState {
             pools: Mutex::new(HashMap::new()),
             active_connection_id: Mutex::new(None),
             entra_tokens: Mutex::new(HashMap::new()),
+            query_cancel: Mutex::new(None),
             ai_provider_store,
             ai_providers: Mutex::new(ai_providers),
             ai_history_store,

@@ -1,5 +1,16 @@
 [
   {
+    "version": "0.6.8",
+    "sections": [
+      {
+        "title": "Query execution",
+        "items": [
+          "Stop long-running queries: toolbar **Stop** button (replaces Run while executing), Stop control in the results pane, and **Ctrl+Shift+C** shortcut. Backend cancels the in-flight driver future so pooled connections close and server-side work is aborted when the connection drops"
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.6.7",
     "sections": [
       {

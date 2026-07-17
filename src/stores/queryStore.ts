@@ -14,11 +14,13 @@ interface QueryState {
   lastExecutedSql: string;
 
   executeQuery: (connectionId: string, sql: string) => Promise<void>;
+  /** Abort the in-flight query on the backend (no-op if nothing is running). */
+  cancelQuery: () => Promise<void>;
   setActiveResultIndex: (index: number) => void;
   clear: () => void;
 }
 
-export const useQueryStore = create<QueryState>((set) => ({
+export const useQueryStore = create<QueryState>((set, get) => ({
   results: [],
   activeResultIndex: 0,
   totalTimeMs: 0,
@@ -76,6 +78,17 @@ export const useQueryStore = create<QueryState>((set) => ({
         success: false,
         errorMessage: String(e),
       });
+    }
+  },
+
+  cancelQuery: async () => {
+    if (!get().loading) return;
+    try {
+      await invoke<boolean>("cancel_query");
+      // `executeQuery` will finish with a cancelled response and clear loading.
+    } catch (e) {
+      // If the backend has no active query, still drop the loading spinner so the UI recovers.
+      set({ loading: false, error: String(e) });
     }
   },
 

@@ -439,7 +439,48 @@ pub async fn execute_query(
         .clone();
     drop(pools);
 
-    Ok(query::run_query(pool, &sql).await)
+    // Register a cancel token so the UI can abort long-running work.
+    // Only one query runs at a time (frontend `loading` gate); replace any
+    // leftover sender from a prior aborted command.
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    {
+        let mut slot = state.query_cancel.lock().await;
+        *slot = Some(cancel_tx);
+    }
+
+    let start = std::time::Instant::now();
+    let response = tokio::select! {
+        biased;
+        _ = cancel_rx => {
+            QueryResponse {
+                results: vec![],
+                total_time_ms: start.elapsed().as_millis() as u64,
+                error: Some("Query cancelled".to_string()),
+            }
+        }
+        result = query::run_query(pool, &sql) => result,
+    };
+
+    // Clear the cancel slot if we still own it (cancel path already took it).
+    {
+        let mut slot = state.query_cancel.lock().await;
+        *slot = None;
+    }
+
+    Ok(response)
+}
+
+/// Abort the currently running query, if any.
+/// Returns `true` when a cancel signal was delivered.
+#[tauri::command]
+pub async fn cancel_query(state: State<'_, AppState>) -> Result<bool, String> {
+    let mut slot = state.query_cancel.lock().await;
+    if let Some(tx) = slot.take() {
+        let _ = tx.send(());
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
 
 // ── Schema introspection commands ───────────────────────────

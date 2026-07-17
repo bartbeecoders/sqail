@@ -84,6 +84,7 @@ pub fn run() {
             commands::disconnect,
             commands::get_active_connection,
             commands::execute_query,
+            commands::cancel_query,
             commands::list_schemas,
             commands::list_tables,
             commands::list_columns,

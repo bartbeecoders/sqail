@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Play, AlignLeft, CheckCircle2, Trash2, Sparkles, Loader2, Settings, ChevronDown, MessageSquareText, BookOpen, Wand2 } from "lucide-react";
+import { Play, Square, AlignLeft, CheckCircle2, Trash2, Sparkles, Loader2, Settings, ChevronDown, MessageSquareText, BookOpen, Wand2 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { useAiStore } from "../stores/aiStore";
 import { useEditorStore } from "../stores/editorStore";
@@ -8,6 +8,7 @@ import type { SettingsTab } from "./SettingsModal";
 
 interface ToolbarProps {
   onRun?: () => void;
+  onCancel?: () => void;
   onValidate?: () => void;
   validating?: boolean;
   onFormat?: () => void;
@@ -55,19 +56,29 @@ function ToolbarButton({
   );
 }
 
-export default function Toolbar({ onRun, onValidate, validating, onFormat, onFormatWithComments, onClear, hasConnection, loading, onOpenSettings, infoPanelOpen, onToggleInfoPanel }: ToolbarProps) {
+export default function Toolbar({ onRun, onCancel, onValidate, validating, onFormat, onFormatWithComments, onClear, hasConnection, loading, onOpenSettings, infoPanelOpen, onToggleInfoPanel }: ToolbarProps) {
   const openPalette = useAiStore((s) => s.openPalette);
 
   return (
     <div className="flex h-10 items-center gap-1 border-b border-border bg-muted/30 px-2">
-      <ToolbarButton
-        icon={loading ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
-        label={loading ? "Running..." : "Run"}
-        shortcut="F5 / Ctrl+Enter"
-        variant="primary"
-        onClick={onRun}
-        disabled={!hasConnection || loading}
-      />
+      {loading ? (
+        <ToolbarButton
+          icon={<Square size={14} className="fill-current" />}
+          label="Stop"
+          shortcut="Ctrl+Shift+C"
+          variant="primary"
+          onClick={onCancel}
+        />
+      ) : (
+        <ToolbarButton
+          icon={<Play size={14} />}
+          label="Run"
+          shortcut="F5 / Ctrl+Enter"
+          variant="primary"
+          onClick={onRun}
+          disabled={!hasConnection}
+        />
+      )}
       <ToolbarButton
         icon={validating ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
         label={validating ? "Validating..." : "Validate"}

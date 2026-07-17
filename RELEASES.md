@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+## v0.6.8
+
+### Query execution
+- Stop long-running queries: toolbar **Stop** button while executing, Stop in the results pane, and **Ctrl+Shift+C**. Cancels the in-flight driver future so the connection closes and server work is aborted when the socket drops
+
 ## v0.6.7
 
 ### Fixes

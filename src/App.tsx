@@ -76,6 +76,7 @@ export default function App() {
   );
   const loading = useQueryStore((s) => s.loading);
   const executeQuery = useQueryStore((s) => s.executeQuery);
+  const cancelQuery = useQueryStore((s) => s.cancelQuery);
 
   // When the active tab changes, sync the global active connection to match the tab's connection
   useEffect(() => {
@@ -247,6 +248,11 @@ export default function App() {
   const shortcutHandlers: ShortcutHandlers = useMemo(
     () => ({
       "run-query": handleRunFromToolbar,
+      "cancel-query": () => {
+        if (useQueryStore.getState().loading) {
+          cancelQuery().catch(console.error);
+        }
+      },
       "validate-query": handleValidate,
       "format-query": handleFormat,
       "new-tab": () => {
@@ -269,7 +275,7 @@ export default function App() {
       "toggle-ai-panel": () => useAiStore.getState().togglePanel(),
       "open-settings": () => setSettingsOpen("general"),
     }),
-    [handleRunFromToolbar, handleFormat, handleValidate],
+    [handleRunFromToolbar, handleFormat, handleValidate, cancelQuery],
   );
 
   useGlobalShortcuts(shortcutHandlers);
@@ -290,6 +296,7 @@ export default function App() {
       <div className="flex flex-1 flex-col overflow-hidden">
         <Toolbar
           onRun={handleRunFromToolbar}
+          onCancel={() => { cancelQuery().catch(console.error); }}
           onValidate={handleValidate}
           validating={validateStatus.kind === "validating"}
           onFormat={handleFormat}

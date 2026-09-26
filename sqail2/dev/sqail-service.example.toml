@@ -6,6 +6,7 @@
 bind = "127.0.0.1:7443"   # loopback only; use 0.0.0.0 to serve other machines
 log_format = "pretty"     # or "json"
 docs_ui = false           # interactive API docs at /docs (on in debug builds)
+admin_ui = true           # admin page at /admin/ and the /v1/admin API (SQAIL_ADMIN_UI)
 
 [tls]
 # PEM files. Leave both unset to use a generated self-signed dev certificate.

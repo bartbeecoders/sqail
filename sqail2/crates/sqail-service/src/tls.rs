@@ -86,6 +86,23 @@ pub fn load(cfg: &Config) -> Result<ServerTls> {
     })
 }
 
+/// Check that a PEM certificate chain and private key belong together and
+/// can serve TLS. Returns the leaf certificate's fingerprint.
+pub fn check_pair(cert_pem: &[u8], key_pem: &[u8]) -> Result<String> {
+    install_crypto_provider();
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert_pem)
+        .collect::<Result<_, _>>()
+        .context("the certificate is not valid PEM")?;
+    let leaf = certs.first().context("no certificate found in the PEM")?;
+    let fingerprint = fingerprint(leaf);
+    let key = PrivateKeyDer::from_pem_slice(key_pem).context("the private key is not valid PEM")?;
+    ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .context("the certificate and key do not match")?;
+    Ok(fingerprint)
+}
+
 pub fn fingerprint(cert: &CertificateDer<'_>) -> String {
     Sha256::digest(cert.as_ref())
         .iter()

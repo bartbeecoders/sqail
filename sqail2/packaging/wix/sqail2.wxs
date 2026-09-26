@@ -5,7 +5,8 @@
   Installs both binaries per machine, adds a Start menu shortcut and puts the
   install folder on PATH (for the sqail-service CLI). The Windows service is
   not registered by the installer: run setup\Install-SqailService.cmd as
-  Administrator when a machine-wide gateway is wanted (see SETUP.md).
+  Administrator when a machine-wide gateway is wanted; it opens the admin
+  page for the rest of the setup (see SETUP.md).
   Keep this file list in sync with the staging in package-windows.ps1.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">

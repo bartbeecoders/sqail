@@ -87,12 +87,22 @@ scripts/service.sh fingerprint                              # cert fingerprint t
 
 On first start the service creates `service.db`, `master.key` and a
 self-signed certificate in its data directory. It also prints a one-time
-**admin token** (or, without a terminal, writes it to
-`bootstrap-admin-token.txt` there). On Windows, `sqail-service service
-install` runs it as a Windows service; on Linux a systemd user unit ships in
-`packaging/linux/`. See [docs/operations.md](docs/operations.md). The dev scripts use `.sqail2/service/` in this repo as the
-data directory. For configuration, see
-[`dev/sqail-service.example.toml`](dev/sqail-service.example.toml).
+**admin token** and a sign-in link for the **admin page** (or, without a
+terminal, writes the token to `bootstrap-admin-token.txt` there).
+
+The admin page, at `https://127.0.0.1:7443/admin/`, is built into the binary.
+Everything after installing is done there: who can connect, the
+certificate, SQLite folders, limits, connections, tokens, backups and the
+audit log. Settings are applied with an in-process restart, and are only
+saved once the service runs with them. `sqail-service admin-link` prints a
+new sign-in link.
+
+Installing is a single step with no options: `setup\Install-SqailService.cmd`
+(as Administrator) on Windows, or `install.sh` on Linux (systemd user unit).
+Both start the service and hand you the sign-in link. See
+[docs/operations.md](docs/operations.md). The dev scripts use
+`.sqail2/service/` in this repo as the data directory. Every setting is also
+in [`dev/sqail-service.example.toml`](dev/sqail-service.example.toml).
 
 API reference: `GET /v1/openapi.json`, or the interactive docs at `/docs` in
 debug builds. Query results stream as NDJSON, one `QueryEvent` per line:

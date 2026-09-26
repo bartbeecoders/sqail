@@ -18,7 +18,8 @@ use sqail_service::Config;
 use sqail_service::store::{AuditEvent, Store};
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
 use windows_service::service::{
-    ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode,
+    ServiceAccess, ServiceAction, ServiceActionType, ServiceControl, ServiceControlAccept,
+    ServiceErrorControl, ServiceExitCode, ServiceFailureActions, ServiceFailureResetPeriod,
     ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
 };
 use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
@@ -129,18 +130,37 @@ fn install(data_dir: Option<PathBuf>, config: Option<PathBuf>, start: bool) -> R
         )
         .context("creating the service (is it already installed?)")?;
     service.set_description(DESCRIPTION)?;
+    // Come back by itself after a crash: restart after 5 s, three times a day.
+    service.update_failure_actions(ServiceFailureActions {
+        reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(24 * 3600)),
+        reboot_msg: None,
+        command: None,
+        actions: Some(vec![
+            ServiceAction {
+                action_type: ServiceActionType::Restart,
+                delay: Duration::from_secs(5),
+            };
+            3
+        ]),
+    })?;
     println!("installed service `{NAME}` (data: {})", data_dir.display());
 
     if start {
         service.start::<&str>(&[]).context("starting the service")?;
         println!("started; listening on https://{}", cfg.bind);
     }
-    if let Some(token) = token {
-        println!(
+    match token {
+        Some(token) => println!(
             "\n  Admin token (shown once; store it now):\n\n    {token}\n\n  \
-             Pin the certificate with:  sqail-service --data-dir \"{}\" fingerprint\n",
+             Admin page (signs you in):\n\n    {}\n",
+            sqail_service::admin_link(cfg.bind, &token)
+        ),
+        None => println!(
+            "\n  Admin page: {}/admin/  (sign in with an admin token, or run\n  \
+             sqail-service --data-dir \"{}\" admin-link)\n",
+            sqail_service::local_url(cfg.bind),
             data_dir.display()
-        );
+        ),
     }
     Ok(())
 }
@@ -231,8 +251,8 @@ fn run_service() -> Result<()> {
     handle.set_service_status(status(ServiceState::StartPending, 0))?;
 
     let result = (|| -> Result<()> {
-        let (data_dir, config) = ARGS.lock().expect("args lock").take().unwrap_or_default();
-        let config = Config::load(data_dir, config)?;
+        let (data_dir, config_file) = ARGS.lock().expect("args lock").take().unwrap_or_default();
+        let config = Config::load(data_dir.clone(), config_file.clone())?;
         let log_dir = config.data_dir.join("logs");
         std::fs::create_dir_all(&log_dir)?;
         let log = std::fs::OpenOptions::new()
@@ -243,7 +263,7 @@ fn run_service() -> Result<()> {
 
         let rt = tokio::runtime::Runtime::new()?;
         handle.set_service_status(status(ServiceState::Running, 0))?;
-        rt.block_on(crate::serve(config, async {
+        rt.block_on(crate::serve(config, data_dir, config_file, async {
             let _ = rx.await;
         }))
     })();

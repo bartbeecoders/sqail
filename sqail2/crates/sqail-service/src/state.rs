@@ -9,6 +9,7 @@ use governor::DefaultKeyedRateLimiter;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::Control;
 use crate::config::Config;
 use crate::crypto::MasterKey;
 use crate::engine::registry::Registry;
@@ -26,8 +27,17 @@ pub struct Inner {
     pub pools: Registry,
     pub sessions: Sessions,
     pub queries: Mutex<HashMap<Uuid, RunningQuery>>,
+    pub tls: TlsInfo,
+    /// Restart requests and their outcome; outlives this server.
+    pub control: Arc<Control>,
     /// Throttles `last_used_at` writes to one per token per minute.
     token_touched: Mutex<HashMap<Uuid, Instant>>,
+}
+
+/// What the admin page shows about the served certificate.
+pub struct TlsInfo {
+    pub fingerprint: String,
+    pub self_signed: bool,
 }
 
 pub struct RunningQuery {
@@ -43,7 +53,13 @@ impl Deref for AppState {
 }
 
 impl AppState {
-    pub fn new(config: Config, store: Store, key: MasterKey) -> Self {
+    pub fn new(
+        config: Config,
+        store: Store,
+        key: MasterKey,
+        tls: TlsInfo,
+        control: Arc<Control>,
+    ) -> Self {
         let limiter =
             crate::auth::rate_limiter(config.limits.requests_per_second, config.limits.burst);
         Self(Arc::new(Inner {
@@ -54,6 +70,8 @@ impl AppState {
             pools: Registry::default(),
             sessions: Sessions::default(),
             queries: Mutex::new(HashMap::new()),
+            tls,
+            control,
             token_touched: Mutex::new(HashMap::new()),
         }))
     }

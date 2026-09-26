@@ -58,6 +58,19 @@ if [[ $SERVICE == 1 ]]; then
         systemctl --user daemon-reload
         systemctl --user enable --now sqail-service
         echo "sqail-service is running (systemctl --user status sqail-service)."
+        # First start: the service leaves a one-time admin token in a private
+        # file. Turn it into a sign-in link for the admin page, then remove it.
+        TOKEN_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/sqail-service/bootstrap-admin-token.txt"
+        for _ in $(seq 20); do [[ -f "$TOKEN_FILE" ]] && break; sleep 0.25; done
+        if [[ -f "$TOKEN_FILE" ]]; then
+            echo
+            echo "Finish the setup on the admin page (this link signs you in; it is shown once):"
+            echo "    https://127.0.0.1:7443/admin/#token=$(tr -d '[:space:]' < "$TOKEN_FILE")"
+            echo "Your browser warns about the self-signed certificate once; continue to the page."
+            rm -f "$TOKEN_FILE"
+        else
+            echo "Admin page: https://127.0.0.1:7443/admin/ (a new sign-in link: sqail-service admin-link)"
+        fi
     else
         echo "Installed the unit to $UNIT_DIR; enable it with: systemctl --user enable --now sqail-service"
     fi

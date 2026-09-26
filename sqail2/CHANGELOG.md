@@ -4,6 +4,31 @@ All notable changes to sqail2 and sqail-service. Versions follow
 [Semantic Versioning](https://semver.org/); releases are tagged
 `sqail2-v<version>`.
 
+## Unreleased
+
+### sqail-service
+
+- Admin page at `/admin/`, built into the binary: status and the details to
+  hand to users, connections (with test), tokens, settings and the audit
+  log. It signs in with an admin token; installers print a sign-in link
+  (`/admin/#token=…`), and `sqail-service admin-link` makes a new one.
+- Settings are changed on the admin page and applied by an in-process
+  restart. They are checked first and saved only once the service runs with
+  them; otherwise the previous settings stay and the page shows why. New
+  `/v1/admin` API (status, settings, restart, certificate upload, backup).
+- `admin_ui` setting (`SQAIL_ADMIN_UI`) switches the page and `/v1/admin` off.
+- Windows: the service restarts itself after a crash.
+
+### Installers
+
+- `Install-SqailService.ps1` no longer takes configuration options
+  (`-Network`, `-Port`, `-CertFile`/`-KeyFile`, `-SqliteFolder`, `-Force`
+  are gone). It installs with safe defaults, adds a program-scoped firewall
+  rule, and opens the admin page signed in. Set the network, certificate and
+  SQLite folders there. Scripts that passed the old options must drop them.
+- `install.sh` prints the admin page sign-in link after starting the
+  systemd unit and removes the one-time token file.
+
 ## 1.0.0 — 2026-09-26
 
 First release of the Rust rewrite: a native editor (`sqail2`) and an HTTPS

@@ -12,6 +12,7 @@ sqail-service [--data-dir DIR] [--config FILE] <command>
   token create --name N --scope read|query|admin
   token list | token revoke <id>
   fingerprint                      SHA-256 of the served certificate
+  admin-link                       new admin token + a link that opens the admin page signed in
   backup <file-or-folder>          consistent copy of service.db (while running)
   service install|uninstall        Windows only, see below
 ```
@@ -57,8 +58,50 @@ When the service starts and no admin token exists, it creates one:
 Tokens are never logged. `serve --no-bootstrap-token` skips this step. sqail2
 uses that flag when it starts a local service, because it creates its own token
 with `token create`. You can always make another admin token on the service
-host with `sqail-service token create --name me --scope admin`. Access to
-the data dir is what authorises that.
+host with `sqail-service token create --name me --scope admin`, or with
+`sqail-service admin-link`, which also prints a sign-in link for the admin
+page. Access to the data dir is what authorises that.
+
+## The admin page
+
+The service serves a web admin page at **`https://<host>:<port>/admin/`**
+(`/` redirects there). It is compiled into the binary; there is nothing to
+install. Sign in with an **admin** token. The installers, `service install`
+and the first start on a terminal print a *sign-in link* of the form
+`https://127.0.0.1:7443/admin/#token=sq2_…`. The token is in the URL fragment,
+which browsers never send to the server, and the page removes it from the
+address bar straight away. The page keeps the token for the browser tab only
+(`sessionStorage`).
+
+| Page | What |
+|---|---|
+| Overview | status, the URL and fingerprint to give users, warnings (e.g. "only this computer can connect"), backup, restart |
+| Connections | add, edit, test and delete connection profiles (tests run from the service host) |
+| Tokens | create (shown once, with the URL and fingerprint to hand over), list, revoke |
+| Settings | network (who can connect, port), certificate (upload your own PEM pair), SQLite folders, limits, sessions, audit |
+| Audit log | every recorded event, newest first |
+
+**Applying settings.** *Apply and restart* first checks the new settings on
+the running service: the values, that the certificate files load, that the
+SQLite folders exist, that a new port is free, and that the settings file is
+writable. It then restarts the server in place (same process, so a Windows
+service or systemd unit keeps running). The new settings are written to the
+settings file (`<data-dir>/sqail-service.toml`, or `--config`) only once the
+server is up with them. If it cannot start with them, it goes back to the
+previous settings, and the page shows why. A restart closes open sessions
+(open transactions roll back) and cancels running queries. `log_format`
+changes need a real restart of the process. Keys set by an `SQAIL_*`
+environment variable are shown read-only.
+
+The file is rewritten in full when you save from the page, so comments in a
+hand-edited file are lost. Uploaded certificates are stored as
+`<data-dir>/tls/server-cert.pem` and `server-key.pem`.
+
+The page and the `/v1/admin/*` API behind it can be switched off with
+`admin_ui = false` (or `SQAIL_ADMIN_UI=0`); the rest of the API is
+unaffected. The page's static files need no token; every call they make
+does. They are served with a strict Content-Security-Policy (own scripts and
+styles only, no framing).
 
 ## Tokens and scopes
 
@@ -114,7 +157,7 @@ Give Alice `alice.crt` and `alice.key`. She adds them as `client_cert` and
 ## Serving other machines
 
 The default `bind = "127.0.0.1:7443"` only accepts local connections. For a
-shared gateway:
+shared gateway (steps 1, 2, 4 and 5 are all on the admin page's *Settings*):
 
 1. Set `bind = "0.0.0.0:7443"` (or a specific interface).
 2. Use a real certificate, or distribute the self-signed fingerprint through

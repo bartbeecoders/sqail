@@ -35,8 +35,10 @@ if ($svc) {
     Step 'the sqail-service service is not installed'
 }
 
-Get-NetFirewallRule -DisplayName 'sqail-service (TCP *)' -ErrorAction SilentlyContinue |
-    Remove-NetFirewallRule
+# 'sqail-service' is the current rule; 'sqail-service (TCP <port>)' came from older installers.
+foreach ($rule in 'sqail-service', 'sqail-service (TCP *)') {
+    Get-NetFirewallRule -DisplayName $rule -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+}
 Done 'firewall rules removed'
 
 if ($RemoveData) {

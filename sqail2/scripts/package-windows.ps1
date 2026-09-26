@@ -84,8 +84,10 @@ Just me, on this PC
     connection (+ New connection). Nothing else to install.
 
 A shared gateway for a team (connects to your SQL Servers)
-    Right-click setup\Install-SqailService.cmd > Run as administrator
-    (add -Network to serve other PCs), then follow SETUP.md.
+    Right-click setup\Install-SqailService.cmd > Run as administrator.
+    It installs the service and opens its admin page, where you set up
+    everything else (network, certificate, connections, tokens). SETUP.md
+    walks through it.
 
 Files
     sqail2.exe              the editor

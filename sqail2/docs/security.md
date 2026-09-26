@@ -69,6 +69,13 @@ sqail2 ──TLS 1.3 + bearer token (+ optional client cert)──▶ sqail-serv
   guessed (256 bits), but a flood of requests with bad tokens still costs a
   hash and a lookup each. Put a reverse proxy in front when exposing the
   service beyond a trusted network.
+* **An admin token can change the service's settings** through the admin
+  page (`/v1/admin`): which address it listens on, its certificate, and
+  which folders SQLite profiles may open. That last one means an admin
+  token can read any SQLite file the service account can reach. Treat admin
+  tokens like credentials for the service host, give everyone else `query`
+  or `read`, and set `admin_ui = false` where settings should only change
+  on the host itself.
 * **mTLS and fingerprint probing:** the first-run fingerprint check cannot
   complete against a service that requires client certificates. Configure
   such services in `settings.toml` (see docs/operations.md).

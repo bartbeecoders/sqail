@@ -1,6 +1,8 @@
-//! HTTP routes. Every route except `/v1/health` and the OpenAPI document
-//! requires a bearer token.
+//! HTTP routes. Every route except `/v1/health`, the OpenAPI document and
+//! the admin page's static files requires a bearer token.
 
+pub mod admin;
+mod admin_ui;
 mod audit;
 mod connections;
 mod explain;
@@ -49,6 +51,7 @@ use crate::store::StoredConnection;
         (name = "sessions", description = "Dedicated connections for transactions"),
         (name = "schema", description = "Catalog browsing"),
         (name = "audit", description = "Audit log (admin)"),
+        (name = "admin", description = "Service status and settings, for the admin page (admin)"),
     )
 )]
 struct ApiDoc;
@@ -94,6 +97,11 @@ pub fn router(state: AppState) -> Router {
         .routes(routes!(schema::routines))
         .routes(routes!(schema::ddl))
         .routes(routes!(audit::list))
+        .routes(routes!(admin::status))
+        .routes(routes!(admin::settings, admin::update_settings))
+        .routes(routes!(admin::restart))
+        .routes(routes!(admin::upload_certificate))
+        .routes(routes!(admin::backup))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
 
     let (api, openapi) = OpenApiRouter::with_openapi(ApiDoc::openapi())
@@ -117,6 +125,9 @@ pub fn router(state: AppState) -> Router {
             "/docs",
             axum::routing::get(move || async move { axum::response::Html(html) }),
         );
+    }
+    if state.config.admin_ui {
+        app = app.merge(admin_ui::routes());
     }
 
     let request_id = HeaderName::from_static("x-request-id");

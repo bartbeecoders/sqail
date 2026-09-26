@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>sqail-service admin</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="app.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <noscript>The admin page needs JavaScript.</noscript>
+
+  <section id="login" class="login" hidden>
+    <form id="login-form" class="login-card">
+      <img src="icon.svg" alt="" width="48" height="48">
+      <h1>sqail-service</h1>
+      <p class="muted">Sign in with an <strong>admin</strong> token.</p>
+      <label>Admin token
+        <input id="login-token" type="password" autocomplete="off" spellcheck="false"
+               placeholder="sq2_…" required>
+      </label>
+      <p id="login-error" class="error" hidden></p>
+      <button type="submit" class="primary">Sign in</button>
+      <details class="muted small">
+        <summary>No token?</summary>
+        <p>On the service host, run <code>sqail-service admin-link</code> (Windows: in an
+          elevated prompt, add <code>--data-dir "%ProgramData%\sqail2\service"</code>).
+          It prints a link that opens this page signed in.</p>
+      </details>
+    </form>
+  </section>
+
+  <div id="app" class="app" hidden>
+    <aside class="nav">
+      <div class="brand"><img src="icon.svg" alt="" width="28" height="28"><span>sqail-service</span></div>
+      <nav>
+        <a href="#/overview" data-page="overview">Overview</a>
+        <a href="#/connections" data-page="connections">Connections</a>
+        <a href="#/tokens" data-page="tokens">Tokens</a>
+        <a href="#/settings" data-page="settings">Settings</a>
+        <a href="#/audit" data-page="audit">Audit log</a>
+      </nav>
+      <div class="nav-foot">
+        <span id="version" class="muted small"></span>
+        <button id="logout" class="link">Sign out</button>
+      </div>
+    </aside>
+    <main id="page" class="page"></main>
+  </div>
+
+  <div id="busy" class="busy" hidden><div class="busy-card"><div class="spinner"></div><p id="busy-text"></p></div></div>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+  <dialog id="dialog"></dialog>
+</body>
+</html>

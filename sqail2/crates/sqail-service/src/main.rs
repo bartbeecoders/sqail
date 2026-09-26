@@ -46,6 +46,9 @@ enum Command {
     },
     /// Print the TLS certificate fingerprint clients should pin.
     Fingerprint,
+    /// Create an admin token and print a link that opens the admin page
+    /// signed in with it (for when the first one is lost).
+    AdminLink,
     /// Write a consistent copy of service.db (safe while running). PATH is
     /// a new file, or a folder to create service-<timestamp>.db in.
     /// Back up master.key separately: without it stored passwords are lost.
@@ -85,7 +88,7 @@ fn main() -> Result<()> {
         Command::Service { command } => return winsvc::main(command, cli.data_dir, cli.config),
         other => other,
     };
-    let mut config = Config::load(cli.data_dir, cli.config)?;
+    let mut config = Config::load(cli.data_dir.clone(), cli.config.clone())?;
     init_tracing(
         &config,
         BoxMakeWriter::new(std::io::stderr),
@@ -96,10 +99,24 @@ fn main() -> Result<()> {
     match command {
         Command::Serve { no_bootstrap_token } => {
             config.bootstrap_admin_token = !no_bootstrap_token;
-            rt.block_on(serve(config, shutdown_signal()))
+            rt.block_on(serve(config, cli.data_dir, cli.config, shutdown_signal()))
         }
         Command::Fingerprint => {
             println!("{}", tls::load(&config)?.fingerprint);
+            Ok(())
+        }
+        Command::AdminLink => {
+            let store = Store::open(&config.db_path()).context("opening service.db")?;
+            let created = store.token_create("admin-link", Scope::Admin)?;
+            store.audit(AuditEvent {
+                actor: "cli",
+                action: "token.create",
+                target: Some(created.info.id.to_string()),
+                detail: Some("admin-link (admin)".into()),
+                duration_ms: None,
+                success: true,
+            });
+            println!("{}", sqail_service::admin_link(config.bind, &created.token));
             Ok(())
         }
         Command::Token { command } => token(&config, command),
@@ -126,39 +143,53 @@ fn main() -> Result<()> {
     }
 }
 
-/// Run the server until `shutdown` resolves.
-pub(crate) async fn serve(config: Config, shutdown: impl Future<Output = ()>) -> Result<()> {
-    let data_dir = config.data_dir.clone();
-    let sqlite_dirs = config.sqlite.allowed_dirs.clone();
-    let server = sqail_service::start(config).await?;
-    tracing::info!(
-        addr = %server.addr,
-        data_dir = %data_dir.display(),
-        fingerprint = %server.fingerprint,
-        "sqail-service {} listening on https://{}",
-        env!("CARGO_PKG_VERSION"),
-        server.addr
-    );
-    if sqlite_dirs.is_empty() {
-        tracing::info!("SQLite disabled (set sqlite.allowed_dirs or SQAIL_SQLITE_DIRS to enable)");
-    }
-    if let Some(token) = &server.bootstrap_token {
-        show_bootstrap_token(&data_dir, token)?;
-    }
-    shutdown.await;
-    tracing::info!("shutting down");
-    server.shutdown();
-    server.wait().await
+/// Run the server until `shutdown` resolves, restarting it in place when the
+/// admin page changes the settings. `data_dir`/`config_file` are the command
+/// line values, used to re-read the settings on a restart.
+pub(crate) async fn serve(
+    config: Config,
+    data_dir: Option<PathBuf>,
+    config_file: Option<PathBuf>,
+    shutdown: impl Future<Output = ()>,
+) -> Result<()> {
+    let dir = config.data_dir.clone();
+    let reload = move || Config::load(data_dir.clone(), config_file.clone());
+    let mut first = true;
+    sqail_service::run(config, reload, shutdown, |server| {
+        tracing::info!(
+            addr = %server.addr,
+            data_dir = %dir.display(),
+            fingerprint = %server.fingerprint,
+            "sqail-service {} listening on https://{}; admin page: {}/admin/",
+            env!("CARGO_PKG_VERSION"),
+            server.addr,
+            sqail_service::local_url(server.addr),
+        );
+        if first {
+            first = false;
+            if let Some(token) = &server.bootstrap_token {
+                show_bootstrap_token(&dir, server.addr, token)?;
+            }
+        }
+        Ok(())
+    })
+    .await
 }
 
 /// Hand the first-start admin token to the operator without logging it: on
 /// an interactive terminal it is printed; under a service manager (where
 /// stderr ends up in the journal or nowhere) it goes to a private file.
-fn show_bootstrap_token(data_dir: &std::path::Path, token: &str) -> Result<()> {
+fn show_bootstrap_token(
+    data_dir: &std::path::Path,
+    addr: std::net::SocketAddr,
+    token: &str,
+) -> Result<()> {
     use std::io::IsTerminal;
     if std::io::stderr().is_terminal() {
         eprintln!(
-            "\n  First start: created an admin token. Store it now; it is not shown again.\n\n    {token}\n"
+            "\n  First start: created an admin token. Store it now; it is not shown again.\n\n    {token}\n\n  \
+             Open the admin page (signs you in):\n\n    {}\n",
+            sqail_service::admin_link(addr, token)
         );
     } else {
         let path = data_dir.join(BOOTSTRAP_TOKEN_FILE);

@@ -87,6 +87,14 @@ impl Sessions {
         self.map().remove(&id)
     }
 
+    pub fn len(&self) -> usize {
+        self.map().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map().is_empty()
+    }
+
     pub fn owned_by(&self, owner: Uuid) -> Vec<Arc<Session>> {
         self.map()
             .values()

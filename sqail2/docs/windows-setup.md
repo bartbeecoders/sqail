@@ -113,64 +113,63 @@ sqail2 still stops the query by closing its connection.
    `C:\Temp\sqail2`. You can also run the MSI instead, which installs to
    `C:\Program Files\sqail2`.
 2. Right-click **`setup\Install-SqailService.cmd`** → **Run as administrator**.
-   To serve other PCs, run it from an elevated PowerShell with `-Network`:
-
-   ```powershell
-   cd C:\Temp\sqail2\setup
-   powershell -ExecutionPolicy Bypass -File .\Install-SqailService.ps1 -Network
-   ```
-
-   The script:
+   There is nothing to choose. The script:
    * copies the programs to `C:\Program Files\sqail2`;
-   * writes `C:\ProgramData\sqail2\service\sqail-service.toml`;
    * registers the **sqail-service** Windows service. It runs as *Local
-     Service*, starts automatically, and its data folder is locked down to
-     SYSTEM, Administrators and the service;
-   * opens TCP 7443 in Windows Firewall for the **local subnet** (with
-     `-Network`; widen it with `-FirewallRemoteAddress 10.0.0.0/8`). The
-     rule covers the *Domain* and *Private* network profiles;
-   * checks that the service answers.
+     Service*, starts automatically, restarts itself after a crash, and its
+     data folder is locked down to SYSTEM, Administrators and the service;
+   * adds a Windows Firewall rule for `sqail-service.exe` (*Domain* and
+     *Private* networks, local subnet; widen it with
+     `-FirewallRemoteAddress 10.0.0.0/8`, or skip it with `-NoFirewall`).
+     It has no effect until you let other computers in (step 3);
+   * checks that the service answers and **opens its admin page**, already
+     signed in.
+3. **Finish on the admin page** (`https://127.0.0.1:7443/admin/`). Your
+   browser warns once about the self-signed certificate; continue to the
+   page. Then, under **Settings**:
+   * **Network → Other computers too**, so users' PCs can connect (or pick
+     one address of the server, or another port);
+   * **Certificate → My own certificate**, if you have one (see below);
+   * **SQLite**, if you want SQLite databases: the folders they may be in;
+   * **Apply and restart**. The service checks the settings first, restarts
+     with them, and keeps the old ones if they don't work.
+4. The first admin token is printed in the console once. The admin page
+   stays signed in for the browser tab; to sign in again later, keep the
+   token in your password manager. If you lose it, run
+   `sqail-service --data-dir "%ProgramData%\sqail2\service" admin-link`
+   in an elevated prompt: it prints a new sign-in link.
 
-3. **Copy the admin token it prints.** It is shown only once and is needed
-   in the next steps. Keep it in your password manager.
-   If you lose it, create a new one with
-   `.\New-SqailToken.ps1 -Name admin2 -Scope admin`.
-4. Note the **certificate SHA-256** it prints. Users compare it when they
-   connect for the first time.
-
-Useful options:
-
-| Option | Effect |
-|---|---|
-| `-Network` | Listen on all interfaces (default: only this machine) |
-| `-Port 8443` | Another port |
-| `-CertFile gw.pem -KeyFile gw.key` | Use your own certificate (see below) instead of a self-signed one |
-| `-FirewallRemoteAddress 10.1.0.0/16,10.2.0.0/16` | Who may connect |
-| `-SqliteFolder D:\sqlite` | Allow SQLite databases in that folder |
-| `-DataDir D:\sqail` | Keep the data elsewhere (then pass the same `-DataDir` to `New-SqailToken.ps1` and `Uninstall-SqailService.ps1`) |
+The admin page also shows the **URL and certificate fingerprint** users need
+(*Overview*), and manages connections, tokens, backups and the audit log.
 
 **Own certificate (recommended for teams).** With a certificate from your
 company CA, sqail2 can verify the gateway through the Windows trust store
 instead of pinning, so certificate renewals need no action from users. The
-service reads PEM files. To convert a `.pfx` (openssl comes with Git for
+admin page takes PEM files. To convert a `.pfx` (openssl comes with Git for
 Windows):
 
 ```powershell
 openssl pkcs12 -in gw.pfx -clcerts -nokeys -out gw.pem     # certificate; append intermediate CA certs, if any
 openssl pkcs12 -in gw.pfx -nocerts -nodes -out gw.key      # private key
-.\Install-SqailService.ps1 -Network -CertFile gw.pem -KeyFile gw.key
-Remove-Item gw.key                                          # a copy now lives in the data folder
 ```
 
-The certificate must name the host users type, e.g.
-`sqail-gw.corp.local`.
+Choose both files under *Settings → Certificate → My own certificate*, apply,
+then delete `gw.key` (a copy now lives in the data folder). The certificate
+must name the host users type, e.g. `sqail-gw.corp.local`.
+
+**SQLite folders** need the service account's access:
+`icacls D:\sqlite /grant "*S-1-5-19:(OI)(CI)M"` (S-1-5-19 is *Local Service*).
 
 ### B3. Register your SQL Server databases
 
 Each database connection is stored once, on the gateway. Every user sees it,
-but only the gateway knows the password. Use either method.
+but only the gateway knows the password. Use any of these methods.
 
-**With the setup script**, on the gateway, in PowerShell:
+**On the admin page** (easiest): *Connections → New connection*, fill in
+the form (see the table in [A](#a-just-me)), **Test**, then **Save**. The test
+runs from the gateway, so it checks exactly the path users' queries take.
+
+**With the setup script**, for scripted setups, on the gateway, in PowerShell:
 
 ```powershell
 cd "C:\Program Files\sqail2\setup"
@@ -198,7 +197,9 @@ then **Test** and **Save**.
 
 ### B4. Give users access
 
-For each user (or group of users), create a token on the gateway:
+For each user (or group of users), create a token: on the admin page under
+*Tokens → New token* (it shows the token once, with the URL and fingerprint
+to send along), or with the script on the gateway:
 
 ```powershell
 cd "C:\Program Files\sqail2\setup"
@@ -299,7 +300,7 @@ rejected: it is an old-style (X.509 v1) certificate…*
 | `Login failed for user 'NT AUTHORITY\ANONYMOUS LOGON'` | Windows authentication from Local Service to a remote server. See [B5](#b5-windows-authentication-optional). |
 | sqail2: `the token is not valid` / HTTP 401 | The token was revoked, mistyped, or comes from another gateway. Create a new one with `New-SqailToken.ps1`. |
 | sqail2: `certificate fingerprint mismatch` | The gateway's certificate changed (a new install or a new certificate). Check the new fingerprint with `sqail-service --data-dir C:\ProgramData\sqail2\service fingerprint`, then in sqail2 use *Service → Forget this service* and connect again. If nothing changed on the gateway, treat it as a possible attack. |
-| sqail2 can't reach the gateway | Is the service installed with `-Network`? Is the gateway's network profile *Public*? (The firewall rule only covers Domain and Private.) Test with `Test-NetConnection <gateway> -Port 7443`. |
+| sqail2 can't reach the gateway | Does the admin page's *Overview* say "Only this computer can connect"? Then choose *Settings → Network → Other computers too*. Is the gateway's network profile *Public*? (The firewall rule only covers Domain and Private.) Test with `Test-NetConnection <gateway> -Port 7443`. |
 | The service doesn't start | Read `C:\ProgramData\sqail2\service\logs\sqail-service.log` and *Event Viewer → Windows Logs → System* (source *Service Control Manager*). The usual causes are the port being in use, or an unreadable certificate or key file. |
 | `requires the 'query' scope` | The user's token is `read`-scoped and the profile isn't read-only. Give them a `query` token, or mark the profile read-only. |
 

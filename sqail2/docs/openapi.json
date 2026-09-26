@@ -1,6 +1,138 @@
 {
   "components": {
     "schemas": {
+      "AdminSettings": {
+        "properties": {
+          "config_file": {
+            "type": "string"
+          },
+          "data_dir": {
+            "type": "string"
+          },
+          "env_overrides": {
+            "description": "Keys an `SQAIL_*` environment variable replaces; changing them in the\nfile has no effect.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "settings": {
+            "$ref": "#/components/schemas/Config",
+            "description": "The settings as saved in the config file (without environment overrides)."
+          }
+        },
+        "required": [
+          "settings",
+          "env_overrides",
+          "config_file",
+          "data_dir"
+        ],
+        "type": "object"
+      },
+      "AdminStatus": {
+        "properties": {
+          "active_tokens": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "config_file": {
+            "type": "string"
+          },
+          "connections": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "data_dir": {
+            "type": "string"
+          },
+          "fingerprint": {
+            "description": "SHA-256 of the served certificate, as clients pin it.",
+            "type": "string"
+          },
+          "last_restart_error": {
+            "description": "Why the last restart from the admin page failed, if it did.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "listen": {
+            "description": "The address the service listens on.",
+            "type": "string"
+          },
+          "loopback_only": {
+            "description": "Only this machine can connect.",
+            "type": "boolean"
+          },
+          "mutual_tls": {
+            "type": "boolean"
+          },
+          "running_queries": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "self_signed": {
+            "type": "boolean"
+          },
+          "sessions": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sqlite_enabled": {
+            "type": "boolean"
+          },
+          "started_at": {
+            "description": "When the service process started (restarts from the admin page keep it).",
+            "format": "date-time",
+            "type": "string"
+          },
+          "urls": {
+            "description": "Addresses clients can use (for a wildcard address: this host's name\nand loopback).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "started_at",
+          "listen",
+          "urls",
+          "loopback_only",
+          "fingerprint",
+          "self_signed",
+          "mutual_tls",
+          "sqlite_enabled",
+          "data_dir",
+          "config_file",
+          "connections",
+          "active_tokens",
+          "sessions",
+          "running_queries"
+        ],
+        "type": "object"
+      },
+      "AuditConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "log_sql": {
+            "default": true,
+            "description": "Record query text in the audit log (never row values).",
+            "type": "boolean"
+          },
+          "max_sql_len": {
+            "default": 4096,
+            "description": "Truncate logged SQL to this many bytes.",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
       "AuditEntry": {
         "properties": {
           "action": {
@@ -72,6 +204,55 @@
         ],
         "type": "object"
       },
+      "BackupDone": {
+        "properties": {
+          "path": {
+            "description": "The backup file, on the service host. `master.key` is not included.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "CertificateSaved": {
+        "properties": {
+          "cert": {
+            "description": "Use these as `tls.cert` and `tls.key`.",
+            "type": "string"
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "cert",
+          "key",
+          "fingerprint"
+        ],
+        "type": "object"
+      },
+      "CertificateUpload": {
+        "properties": {
+          "cert_pem": {
+            "description": "PEM certificate chain, leaf first.",
+            "type": "string"
+          },
+          "key_pem": {
+            "description": "PEM private key (PKCS#8, PKCS#1 or SEC1).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "cert_pem",
+          "key_pem"
+        ],
+        "type": "object"
+      },
       "Column": {
         "properties": {
           "logical": {
@@ -124,6 +305,74 @@
           "nullable",
           "primary_key"
         ],
+        "type": "object"
+      },
+      "Config": {
+        "additionalProperties": false,
+        "description": "The service settings, as in `sqail-service.toml`.",
+        "properties": {
+          "admin_ui": {
+            "default": true,
+            "description": "Serve the admin page at `/admin/` and the `/v1/admin` API that\nchanges these settings.",
+            "type": "boolean"
+          },
+          "audit": {
+            "$ref": "#/components/schemas/AuditConfig",
+            "default": {
+              "log_sql": true,
+              "max_sql_len": 4096
+            }
+          },
+          "bind": {
+            "default": "127.0.0.1:7443",
+            "description": "Address to listen on. Defaults to loopback only.",
+            "example": "127.0.0.1:7443",
+            "type": "string"
+          },
+          "docs_ui": {
+            "default": true,
+            "description": "Serve the interactive API docs at `/docs`.",
+            "type": "boolean"
+          },
+          "limits": {
+            "$ref": "#/components/schemas/Limits",
+            "default": {
+              "body_limit_bytes": 8388608,
+              "burst": 200,
+              "default_max_rows": 100000,
+              "default_timeout_ms": 0,
+              "max_rows": 5000000,
+              "max_timeout_ms": 86400000,
+              "pool_size": 8,
+              "request_timeout_secs": 60,
+              "requests_per_second": 50
+            }
+          },
+          "log_format": {
+            "default": "pretty",
+            "description": "`pretty` or `json`.",
+            "type": "string"
+          },
+          "sessions": {
+            "$ref": "#/components/schemas/SessionConfig",
+            "default": {
+              "idle_timeout_secs": 1800,
+              "max_per_token": 32
+            }
+          },
+          "sqlite": {
+            "$ref": "#/components/schemas/SqliteConfig",
+            "default": {
+              "allowed_dirs": []
+            }
+          },
+          "tls": {
+            "$ref": "#/components/schemas/TlsConfig",
+            "default": {
+              "allow_tls12": false
+            }
+          }
+        },
         "type": "object"
       },
       "Connection": {
@@ -456,6 +705,73 @@
           "unique",
           "primary"
         ],
+        "type": "object"
+      },
+      "Limits": {
+        "additionalProperties": false,
+        "properties": {
+          "body_limit_bytes": {
+            "default": 8388608,
+            "description": "Maximum request body (SQL scripts included).",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "burst": {
+            "default": 200,
+            "description": "Per-token burst on top of the sustained rate.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "default_max_rows": {
+            "default": 100000,
+            "description": "Default row cap per result set when the request does not set one.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "default_timeout_ms": {
+            "default": 0,
+            "description": "Default query timeout when the request does not set one.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_rows": {
+            "default": 5000000,
+            "description": "Hard row cap per result set.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_timeout_ms": {
+            "default": 86400000,
+            "description": "Hard query timeout.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "pool_size": {
+            "default": 8,
+            "description": "Pooled connections per connection profile.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "request_timeout_secs": {
+            "default": 60,
+            "description": "Timeout for non-streaming requests.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "requests_per_second": {
+            "default": 50,
+            "description": "Per-token sustained request rate.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
         "type": "object"
       },
       "LogicalType": {
@@ -1016,6 +1332,20 @@
         ],
         "type": "object"
       },
+      "Restarting": {
+        "properties": {
+          "port": {
+            "description": "The port the service will listen on after the restart.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "port"
+        ],
+        "type": "object"
+      },
       "RoutineInfo": {
         "properties": {
           "kind": {
@@ -1081,6 +1411,23 @@
         ],
         "type": "object"
       },
+      "SessionConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "idle_timeout_secs": {
+            "default": 1800,
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_per_token": {
+            "default": 32,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
       "SessionInfo": {
         "properties": {
           "busy": {
@@ -1121,6 +1468,20 @@
           "busy",
           "idle_timeout_secs"
         ],
+        "type": "object"
+      },
+      "SqliteConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed_dirs": {
+            "default": [],
+            "description": "SQLite profiles may only point at files inside these directories.\nEmpty means SQLite is disabled.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
         "type": "object"
       },
       "SqliteParams": {
@@ -1198,6 +1559,40 @@
         ],
         "type": "object"
       },
+      "TlsConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "allow_tls12": {
+            "default": false,
+            "description": "Also accept TLS 1.2 (default: TLS 1.3 only).",
+            "type": "boolean"
+          },
+          "cert": {
+            "default": null,
+            "description": "PEM certificate chain. When absent a self-signed dev certificate is\ngenerated in `<data_dir>/tls/`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "client_ca": {
+            "default": null,
+            "description": "Mutual TLS: require client certificates signed by this CA (PEM).\nBearer tokens are still required on top.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "key": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "TokenInfo": {
         "properties": {
           "created_at": {
@@ -1253,6 +1648,162 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/v1/admin/backup": {
+      "post": {
+        "operationId": "backup",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupDone"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Write a consistent copy of `service.db` to `<data-dir>/backups/`.",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/certificate": {
+      "post": {
+        "operationId": "upload_certificate",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CertificateUpload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CertificateSaved"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Store a certificate and key in `<data-dir>/tls/`. They take effect once\nthe settings point `tls.cert` and `tls.key` at the returned paths.",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/restart": {
+      "post": {
+        "operationId": "restart",
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Restarting"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Re-read the config file and restart.",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/settings": {
+      "get": {
+        "operationId": "settings",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSettings"
+                }
+              }
+            }
+          }
+        },
+        "summary": "The settings in the config file.",
+        "tags": [
+          "admin"
+        ]
+      },
+      "put": {
+        "operationId": "update_settings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Config"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Restarting"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Check new settings, then restart the service with them. They are saved\nto the config file once the service runs with them; if it cannot start,\nit goes back to the previous settings and `/v1/admin/status` reports why.\nOpen sessions are closed and running queries cancelled.",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/status": {
+      "get": {
+        "operationId": "status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminStatus"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Service status for the admin page.",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/v1/audit": {
       "get": {
         "operationId": "list",
@@ -2424,6 +2975,10 @@
     {
       "description": "Audit log (admin)",
       "name": "audit"
+    },
+    {
+      "description": "Service status and settings, for the admin page (admin)",
+      "name": "admin"
     }
   ]
 }

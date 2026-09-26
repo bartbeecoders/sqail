@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  sqail2 MSI (WiX Toolset 5; v4 syntax). Built by scripts/package-windows.ps1:
+    wix build packaging/wix/sqail2.wxs -arch x64 -d Version=… -d StageDir=…
+  Installs both binaries per machine, adds a Start menu shortcut and puts the
+  install folder on PATH (for the sqail-service CLI). The Windows service is
+  not registered by the installer: run setup\Install-SqailService.cmd as
+  Administrator when a machine-wide gateway is wanted (see SETUP.md).
+  Keep this file list in sync with the staging in package-windows.ps1.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="sqail2"
+           Manufacturer="bartbeecoders"
+           Version="$(var.Version)"
+           UpgradeCode="0f67a45c-2c0a-40e9-8fe1-d751b754bb27"
+           Scope="perMachine"
+           Compressed="yes">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of sqail2 is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="sqail2.ico" SourceFile="$(var.StageDir)\sqail2.ico" />
+    <Property Id="ARPPRODUCTICON" Value="sqail2.ico" />
+    <Property Id="ARPURLINFOABOUT" Value="https://codeberg.org/bartbeecoders/sqail" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="sqail2">
+        <Component Id="Editor">
+          <File Id="sqail2.exe" Source="$(var.StageDir)\sqail2.exe" KeyPath="yes">
+            <Shortcut Id="StartMenuShortcut"
+                      Directory="ProgramMenuFolder"
+                      Name="sqail2"
+                      Description="Fast SQL editor"
+                      WorkingDirectory="INSTALLFOLDER"
+                      Icon="sqail2.ico"
+                      Advertise="yes" />
+          </File>
+        </Component>
+        <Component Id="Service">
+          <File Id="sqail_service.exe" Source="$(var.StageDir)\sqail-service.exe" KeyPath="yes" />
+        </Component>
+        <Component Id="Docs">
+          <File Id="LICENSE.txt" Source="$(var.StageDir)\LICENSE.txt" KeyPath="yes" />
+          <File Id="README.txt" Source="$(var.StageDir)\README.txt" />
+          <File Id="SETUP.md" Source="$(var.StageDir)\SETUP.md" />
+          <File Id="example.toml" Source="$(var.StageDir)\sqail-service.example.toml" />
+        </Component>
+        <Directory Id="SetupFolder" Name="setup">
+          <Component Id="SetupKit">
+            <File Id="Install.ps1" Source="$(var.StageDir)\setup\Install-SqailService.ps1" KeyPath="yes" />
+            <File Id="Install.cmd" Source="$(var.StageDir)\setup\Install-SqailService.cmd" />
+            <File Id="Uninstall.ps1" Source="$(var.StageDir)\setup\Uninstall-SqailService.ps1" />
+            <File Id="Uninstall.cmd" Source="$(var.StageDir)\setup\Uninstall-SqailService.cmd" />
+            <File Id="NewToken.ps1" Source="$(var.StageDir)\setup\New-SqailToken.ps1" />
+            <File Id="AddSqlServer.ps1" Source="$(var.StageDir)\setup\Add-SqailSqlServer.ps1" />
+          </Component>
+        </Directory>
+        <Directory Id="DocsFolder" Name="docs">
+          <Component Id="DocsFolder">
+            <File Id="user_guide.md" Source="$(var.StageDir)\docs\user-guide.md" KeyPath="yes" />
+            <File Id="windows_setup.md" Source="$(var.StageDir)\docs\windows-setup.md" />
+            <File Id="operations.md" Source="$(var.StageDir)\docs\operations.md" />
+            <File Id="security.md" Source="$(var.StageDir)\docs\security.md" />
+            <File Id="api.md" Source="$(var.StageDir)\docs\api.md" />
+            <File Id="Inter_OFL.txt" Source="$(var.StageDir)\docs\Inter-OFL.txt" />
+            <File Id="JetBrainsMono_OFL.txt" Source="$(var.StageDir)\docs\JetBrainsMono-OFL.txt" />
+          </Component>
+        </Directory>
+        <Component Id="PathEntry">
+          <RegistryValue Root="HKLM" Key="Software\bartbeecoders\sqail2" Name="InstallDir"
+                         Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
+          <Environment Id="PATH" Name="PATH" Value="[INSTALLFOLDER]"
+                       Action="set" Part="last" System="yes" Permanent="no" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <Feature Id="Main" Title="sqail2" Level="1">
+      <ComponentRef Id="Editor" />
+      <ComponentRef Id="Service" />
+      <ComponentRef Id="Docs" />
+      <ComponentRef Id="SetupKit" />
+      <ComponentRef Id="DocsFolder" />
+      <ComponentRef Id="PathEntry" />
+    </Feature>
+  </Package>
+</Wix>

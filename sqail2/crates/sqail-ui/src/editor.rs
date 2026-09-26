@@ -1,0 +1,729 @@
+//! Query tabs and the SQL editor widget: highlighting, line numbers,
+//! current-line and bracket highlighting, find/replace.
+
+use std::path::PathBuf;
+
+use egui::text::{CCursor, CCursorRange};
+use egui::{
+    Color32, FontId, Id, Key, KeyboardShortcut, Margin, Modifiers, Rect, RichText, Shape, Stroke,
+    TextEdit, pos2,
+};
+use sqail_client::proto::Engine;
+use uuid::Uuid;
+
+use crate::results::Run;
+use crate::sql::complete::{Candidate, Catalog};
+use crate::sql::{complete, highlight, statements};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorAction {
+    RunCurrent,
+    RunAll,
+    Cancel,
+    Commit,
+    Rollback,
+}
+
+#[derive(Default)]
+pub struct FindBar {
+    pub open: bool,
+    pub focus: bool,
+    pub query: String,
+    pub replace: String,
+    pub match_case: bool,
+    pub status: String,
+}
+
+/// An open completion popup.
+pub struct Popup {
+    pub items: Vec<Candidate>,
+    /// Byte range the chosen item replaces.
+    pub range: std::ops::Range<usize>,
+    pub selected: usize,
+    scroll: bool,
+    /// The user moved the selection; keep it across refreshes.
+    moved: bool,
+}
+
+/// What the editor needs from the app for one frame.
+pub struct EditorEnv<'a> {
+    pub engine: Option<Engine>,
+    pub dark: bool,
+    pub font_size: f32,
+    pub catalog: Option<&'a dyn Catalog>,
+    pub autocomplete: bool,
+}
+
+/// Cursor byte offset, text length, and the bracket pair found for them.
+type BracketCache = Option<(usize, usize, Option<(usize, usize)>)>;
+
+pub struct Tab {
+    pub id: u64,
+    pub title: String,
+    pub path: Option<PathBuf>,
+    pub text: String,
+    saved: String,
+    pub connection: Option<Uuid>,
+    /// (connection, session) — a dedicated server connection for this tab.
+    pub session: Option<(Uuid, Uuid)>,
+    pub run: Option<Run>,
+    pub find: FindBar,
+    /// Char range of the current selection/cursor, from the last frame.
+    pub cursor: CCursorRange,
+    /// Selection to apply on the next frame (find results).
+    pending_select: Option<CCursorRange>,
+    bracket_cache: BracketCache,
+    /// From the last laid-out frame: line count and (line, col) of the cursor.
+    lines: usize,
+    line_col: (usize, usize),
+    pub completion: Option<Popup>,
+    /// Catalog data arrived; recompute an open (or pending) popup.
+    pub completion_stale: bool,
+    /// A completion was asked for at this cursor but had nothing yet
+    /// (catalog still loading); retry when data arrives.
+    pub completion_pending: Option<usize>,
+    /// Off: runs open a transaction that stays open until Commit/Rollback.
+    pub autocommit: bool,
+    /// The tab's session has an open transaction (as of the last run).
+    pub in_transaction: bool,
+    cursor_screen: Option<egui::Pos2>,
+}
+
+impl Tab {
+    pub fn new(id: u64, title: String, connection: Option<Uuid>) -> Self {
+        Self {
+            id,
+            title,
+            path: None,
+            text: String::new(),
+            saved: String::new(),
+            connection,
+            session: None,
+            run: None,
+            find: FindBar::default(),
+            cursor: CCursorRange::default(),
+            pending_select: None,
+            bracket_cache: None,
+            lines: 1,
+            line_col: (1, 1),
+            completion: None,
+            completion_stale: false,
+            completion_pending: None,
+            autocommit: true,
+            in_transaction: false,
+            cursor_screen: None,
+        }
+    }
+
+    pub fn restore(id: u64, saved: &crate::local::SavedTab) -> Self {
+        let mut t = Self::new(id, saved.title.clone(), saved.connection);
+        t.path = saved.path.clone();
+        t.text = saved.text.clone();
+        // Dirty relative to the file on disk (or to nothing for scratch tabs).
+        t.saved = match &saved.path {
+            Some(p) => std::fs::read_to_string(p).unwrap_or_default(),
+            None => String::new(),
+        };
+        let at = saved.cursor.min(t.text.chars().count());
+        t.cursor = CCursorRange::one(CCursor::new(at));
+        t.pending_select = Some(t.cursor);
+        t
+    }
+
+    pub fn snapshot(&self) -> crate::local::SavedTab {
+        crate::local::SavedTab {
+            title: self.title.clone(),
+            path: self.path.clone(),
+            text: self.text.clone(),
+            connection: self.connection,
+            cursor: self.cursor.primary.index.0,
+        }
+    }
+
+    /// Select the byte range `start..end`.
+    pub fn select_bytes(&mut self, start: usize, end: usize) {
+        let (a, b) = (
+            byte_to_char(&self.text, start),
+            byte_to_char(&self.text, end),
+        );
+        self.cursor = CCursorRange::two(CCursor::new(a), CCursor::new(b));
+        self.pending_select = Some(self.cursor);
+    }
+
+    /// Insert `s` at the cursor (replacing a selection) and move after it.
+    pub fn insert_at_cursor(&mut self, s: &str) {
+        let (a, b) = (self.cursor.primary.index.0, self.cursor.secondary.index.0);
+        let (start, end) = (
+            char_to_byte(&self.text, a.min(b)),
+            char_to_byte(&self.text, a.max(b)),
+        );
+        self.text.replace_range(start..end, s);
+        let at = byte_to_char(&self.text, start + s.len());
+        self.cursor = CCursorRange::one(CCursor::new(at));
+        self.pending_select = Some(self.cursor);
+    }
+
+    pub fn editor_id(&self) -> Id {
+        Id::new(("sql_editor", self.id))
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.text != self.saved && !(self.path.is_none() && self.text.trim().is_empty())
+    }
+
+    pub fn set_file(&mut self, path: PathBuf, text: String) {
+        self.title = file_title(&path);
+        self.path = Some(path);
+        self.saved = text.clone();
+        self.text = text;
+    }
+
+    pub fn mark_saved(&mut self, path: PathBuf) {
+        self.title = file_title(&path);
+        self.path = Some(path);
+        self.saved = self.text.clone();
+    }
+
+    /// The selection if there is one, else the statement at the cursor.
+    pub fn current_sql(&self, engine: Option<Engine>) -> String {
+        let (a, b) = (self.cursor.primary.index.0, self.cursor.secondary.index.0);
+        if a != b {
+            let (s, e) = (
+                char_to_byte(&self.text, a.min(b)),
+                char_to_byte(&self.text, a.max(b)),
+            );
+            return self.text[s..e].to_string();
+        }
+        let at = char_to_byte(&self.text, a);
+        statements::at(&self.text, engine, at)
+            .map(|r| self.text[r].to_string())
+            .unwrap_or_default()
+    }
+
+    /// 1-based cursor position, as of the last frame.
+    pub fn line_col(&self) -> (usize, usize) {
+        self.line_col
+    }
+}
+
+fn file_title(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "untitled.sql".into())
+}
+
+pub fn char_to_byte(s: &str, char_idx: usize) -> usize {
+    s.char_indices().nth(char_idx).map_or(s.len(), |(b, _)| b)
+}
+
+fn byte_to_char(s: &str, byte: usize) -> usize {
+    s[..byte.min(s.len())].chars().count()
+}
+
+/// Replace the popup's range with item `i` and put the cursor after it.
+fn accept(tab: &mut Tab, i: usize) {
+    let Some(p) = tab.completion.take() else {
+        return;
+    };
+    let Some(item) = p.items.get(i) else { return };
+    let r = p.range;
+    if r.end > tab.text.len()
+        || !tab.text.is_char_boundary(r.start)
+        || !tab.text.is_char_boundary(r.end)
+    {
+        return;
+    }
+    tab.text.replace_range(r.clone(), &item.insert);
+    let at = byte_to_char(&tab.text, r.start + item.insert.len());
+    tab.cursor = CCursorRange::one(CCursor::new(at));
+    tab.pending_select = Some(tab.cursor);
+}
+
+/// Should typing just now open completions? After `.` or two word chars.
+fn auto_trigger(text: &str, cursor: usize) -> bool {
+    let b = text.as_bytes();
+    let is_word = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80;
+    if cursor == 0 || cursor > b.len() {
+        return false;
+    }
+    if b[cursor - 1] == b'.' {
+        return true;
+    }
+    let mut p = cursor;
+    while p > 0 && is_word(b[p - 1]) {
+        p -= 1;
+    }
+    let next_is_word = b.get(cursor).is_some_and(|&c| is_word(c));
+    cursor - p >= 2 && !next_is_word && !b[p].is_ascii_digit()
+}
+
+pub fn editor_ui(ui: &mut egui::Ui, tab: &mut Tab, env: &EditorEnv<'_>) {
+    let (engine, dark, font_size) = (env.engine, env.dark, env.font_size);
+    if tab.find.open {
+        find_bar(ui, tab);
+    }
+
+    // Completion keys win over the text editor while the popup is open.
+    let editor_id = tab.editor_id();
+    let focused = ui.ctx().memory(|m| m.has_focus(editor_id));
+    let mut request = false;
+    if focused {
+        request = ui.input_mut(|i| {
+            i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Space))
+        });
+        if let Some(p) = tab.completion.as_mut() {
+            let (down, up, enter, esc) = ui.input_mut(|i| {
+                (
+                    i.consume_key(Modifiers::NONE, Key::ArrowDown),
+                    i.consume_key(Modifiers::NONE, Key::ArrowUp),
+                    i.consume_key(Modifiers::NONE, Key::Enter)
+                        || i.consume_key(Modifiers::NONE, Key::Tab),
+                    i.consume_key(Modifiers::NONE, Key::Escape),
+                )
+            });
+            let n = p.items.len();
+            if down {
+                p.selected = (p.selected + 1) % n;
+                p.scroll = true;
+                p.moved = true;
+            }
+            if up {
+                p.selected = (p.selected + n - 1) % n;
+                p.scroll = true;
+                p.moved = true;
+            }
+            if esc {
+                tab.completion = None;
+            } else if enter {
+                let i = p.selected;
+                accept(tab, i);
+            }
+        }
+    }
+
+    let font = FontId::monospace(font_size);
+    let row_height = ui.fonts_mut(|f| f.row_height(&font));
+    let digits = tab.lines.to_string().len().max(3) as f32;
+    let char_w = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
+    let gutter = digits * char_w + 20.0;
+
+    // Bracket pair at the cursor (recomputed only when cursor/text change,
+    // and only tokenized when the cursor actually touches a bracket).
+    let cursor_byte = char_to_byte(&tab.text, tab.cursor.primary.index.0);
+    let brackets = match tab.bracket_cache {
+        Some((c, len, res)) if c == cursor_byte && len == tab.text.len() => res,
+        _ => {
+            let bytes = tab.text.as_bytes();
+            let touches = |i: Option<usize>| {
+                i.and_then(|i| bytes.get(i))
+                    .is_some_and(|b| matches!(b, b'(' | b')'))
+            };
+            let res = if tab.cursor.primary == tab.cursor.secondary
+                && (touches(Some(cursor_byte)) || touches(cursor_byte.checked_sub(1)))
+            {
+                highlight::matching_bracket(&tab.text, engine, cursor_byte)
+            } else {
+                None
+            };
+            tab.bracket_cache = Some((cursor_byte, tab.text.len(), res));
+            res
+        }
+    };
+
+    let visuals = ui.visuals().clone();
+    let editor_bg = visuals.extreme_bg_color;
+    let line_bg = if dark {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 10)
+    } else {
+        Color32::from_rgba_unmultiplied(0, 0, 0, 10)
+    };
+
+    egui::ScrollArea::both()
+        .id_salt(("editor_scroll", tab.id))
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            // Painted before the editor so text sits on top.
+            let bg_slot = ui.painter().add(Shape::Noop);
+            let line_slot = ui.painter().add(Shape::Noop);
+
+            if let Some(sel) = tab.pending_select.take() {
+                let mut state = egui::TextEdit::load_state(ui.ctx(), tab.editor_id()).unwrap_or_default();
+                state.cursor.set_char_range(Some(sel));
+                state.store(ui.ctx(), tab.editor_id());
+                ui.ctx().memory_mut(|m| m.request_focus(tab.editor_id()));
+            }
+
+            let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _wrap: f32| {
+                let job = highlight::highlight(
+                    ui.ctx(),
+                    highlight::Key {
+                        text: buf.as_str(),
+                        engine,
+                        dark,
+                        brackets,
+                        font_size_bits: font_size.to_bits(),
+                    },
+                );
+                ui.fonts_mut(|f| f.layout_job(job))
+            };
+            let min_size = ui.available_size();
+            let editor_id = tab.editor_id();
+            let output = TextEdit::multiline(&mut tab.text)
+                .id(editor_id)
+                .font(font.clone())
+                .code_editor()
+                .lock_focus(true)
+                // A custom frame replaces `.margin()`; the gutter lives in it.
+                .frame(egui::Frame::NONE.inner_margin(Margin {
+                    left: gutter.min(120.0) as i8,
+                    right: 8,
+                    top: 6,
+                    bottom: 6,
+                }))
+                .desired_width(f32::INFINITY)
+                .min_size(min_size)
+                .layouter(&mut layouter)
+                .show(ui);
+
+            let before = tab.cursor;
+            if let Some(range) = output.cursor_range {
+                tab.cursor = range;
+            }
+            // No wrapping, so galley rows are lines.
+            tab.lines = output.galley.rows.len().max(1);
+            let layout = output.galley.layout_from_cursor(tab.cursor.primary);
+            tab.line_col = (layout.row + 1, layout.column.0 + 1);
+
+            // Completion: open on typing triggers, refresh while open.
+            let changed = output.response.response.changed();
+            let cursor_now = char_to_byte(&tab.text, tab.cursor.primary.index.0);
+            if let (Some(eng), Some(cat)) = (engine, env.catalog) {
+                let typed = ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Text(_))));
+                if changed && typed && env.autocomplete && auto_trigger(&tab.text, cursor_now) {
+                    request = true;
+                }
+                if tab.completion.is_some() && (changed || before != tab.cursor || tab.completion_stale) {
+                    request = true;
+                }
+                if tab.completion_pending.is_some() && (changed || before != tab.cursor) && !request {
+                    tab.completion_pending = None;
+                }
+                if tab.completion_stale && tab.completion_pending == Some(cursor_now) {
+                    request = true;
+                }
+                tab.completion_stale = false;
+                if request {
+                    let prev = tab
+                        .completion
+                        .as_ref()
+                        .filter(|p| p.moved)
+                        .and_then(|p| p.items.get(p.selected))
+                        .map(|c| c.label.clone());
+                    tab.completion = complete::complete(&tab.text, cursor_now, eng, cat).map(|c| {
+                        let kept = prev
+                            .as_ref()
+                            .and_then(|l| c.items.iter().position(|i| &i.label == l));
+                        let selected = kept.unwrap_or(0);
+                        Popup {
+                            moved: kept.is_some(),
+                            items: c.items,
+                            range: c.range,
+                            selected,
+                            scroll: true,
+                        }
+                    });
+                    tab.completion_pending = Some(cursor_now);
+                }
+            }
+            if !output.response.response.has_focus() && !request {
+                // Keep the popup through the click that selects an item.
+                let pointer_on_popup = ui.ctx().is_pointer_over_egui() && tab.completion.is_some();
+                if !pointer_on_popup {
+                    tab.completion = None;
+                }
+            }
+
+            let rect = output.response.response.rect;
+            let painter = ui.painter();
+            painter.set(bg_slot, Shape::rect_filled(rect, 0.0, editor_bg));
+
+            // Current line.
+            let galley = &output.galley;
+            let cursor_rect = galley.pos_from_cursor(tab.cursor.primary);
+            tab.cursor_screen = Some(output.galley_pos + cursor_rect.left_bottom().to_vec2());
+            let has_focus = output.response.response.has_focus();
+            if has_focus {
+                let y = output.galley_pos.y + cursor_rect.min.y;
+                painter.set(
+                    line_slot,
+                    Shape::rect_filled(
+                        Rect::from_min_max(pos2(rect.left(), y), pos2(rect.right(), y + cursor_rect.height().max(row_height))),
+                        0.0,
+                        line_bg,
+                    ),
+                );
+            }
+
+            // Gutter: background, separator, visible line numbers.
+            let gutter_rect = Rect::from_min_max(rect.min, pos2(rect.left() + gutter - 8.0, rect.bottom()));
+            painter.rect_filled(gutter_rect, 0.0, visuals.panel_fill.gamma_multiply(if dark { 0.9 } else { 1.0 }));
+            painter.line_segment(
+                [gutter_rect.right_top(), gutter_rect.right_bottom()],
+                Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
+            );
+            if tab.text.is_empty() {
+                painter.text(
+                    output.galley_pos,
+                    egui::Align2::LEFT_TOP,
+                    "-- Write SQL here. Ctrl+Enter runs the statement at the cursor, F5 the whole script.",
+                    font.clone(),
+                    visuals.weak_text_color(),
+                );
+            }
+            let clip = ui.clip_rect();
+            let current_line = tab.line_col.0 - 1;
+            let number_font = FontId::monospace(font_size * 0.85);
+            let mut line_no = 0usize;
+            for row in &galley.rows {
+                let y = output.galley_pos.y + row.pos.y;
+                if y + row_height >= clip.top() && y <= clip.bottom() {
+                    let color = if line_no == current_line && has_focus {
+                        visuals.strong_text_color()
+                    } else {
+                        visuals.weak_text_color()
+                    };
+                    painter.text(
+                        pos2(gutter_rect.right() - 6.0, y + row_height / 2.0),
+                        egui::Align2::RIGHT_CENTER,
+                        (line_no + 1).to_string(),
+                        number_font.clone(),
+                        color,
+                    );
+                }
+                if row.ends_with_newline {
+                    line_no += 1;
+                }
+            }
+        });
+    completion_popup(ui, tab, font_size);
+}
+
+fn completion_popup(ui: &mut egui::Ui, tab: &mut Tab, font_size: f32) {
+    let (Some(p), Some(pos)) = (tab.completion.as_mut(), tab.cursor_screen) else {
+        return;
+    };
+    let mut clicked = None;
+    egui::Area::new(Id::new(("completion", tab.id)))
+        .order(egui::Order::Foreground)
+        .fixed_pos(pos + egui::vec2(0.0, 2.0))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_min_width(340.0);
+                egui::ScrollArea::vertical()
+                    .max_height(260.0)
+                    .show(ui, |ui| {
+                        for (i, c) in p.items.iter().enumerate() {
+                            let selected = i == p.selected;
+                            let resp = ui
+                                .horizontal(|ui| {
+                                    let r = ui.selectable_label(
+                                        selected,
+                                        RichText::new(&c.label)
+                                            .font(FontId::monospace(font_size * 0.95)),
+                                    );
+                                    ui.label(
+                                        RichText::new(format!("{}  {}", c.kind.tag(), c.detail))
+                                            .weak()
+                                            .small(),
+                                    );
+                                    r
+                                })
+                                .inner;
+                            if selected && p.scroll {
+                                resp.scroll_to_me(None);
+                            }
+                            if resp.clicked() {
+                                clicked = Some(i);
+                            }
+                        }
+                    });
+            });
+        });
+    p.scroll = false;
+    if let Some(i) = clicked {
+        accept(tab, i);
+    }
+}
+
+fn find_bar(ui: &mut egui::Ui, tab: &mut Tab) {
+    let mut find_next = false;
+    let mut replace_one = false;
+    let mut replace_all = false;
+    ui.horizontal(|ui| {
+        let resp = ui.add(
+            TextEdit::singleline(&mut tab.find.query)
+                .hint_text("Find")
+                .desired_width(220.0),
+        );
+        if tab.find.focus {
+            resp.request_focus();
+            tab.find.focus = false;
+        }
+        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            find_next = true;
+        }
+        ui.add(
+            TextEdit::singleline(&mut tab.find.replace)
+                .hint_text("Replace")
+                .desired_width(180.0),
+        );
+        ui.checkbox(&mut tab.find.match_case, "Aa")
+            .on_hover_text("Match case");
+        find_next |= ui.button("Next").clicked();
+        replace_one = ui.button("Replace").clicked();
+        replace_all = ui.button("All").on_hover_text("Replace all").clicked();
+        ui.label(RichText::new(&tab.find.status).weak());
+        if ui.small_button("×").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            tab.find.open = false;
+        }
+    });
+    if tab.find.query.is_empty() {
+        return;
+    }
+    let (hay, needle) = if tab.find.match_case {
+        (tab.text.clone(), tab.find.query.clone())
+    } else {
+        (tab.text.to_lowercase(), tab.find.query.to_lowercase())
+    };
+    // Lowercasing can change byte lengths for some scripts; only trust
+    // positions when it did not.
+    let same_len = hay.len() == tab.text.len();
+
+    if replace_all && same_len {
+        let mut out = String::with_capacity(tab.text.len());
+        let mut last = 0;
+        let mut n = 0;
+        for (pos, _) in hay.match_indices(&needle) {
+            out.push_str(&tab.text[last..pos]);
+            out.push_str(&tab.find.replace);
+            last = pos + needle.len();
+            n += 1;
+        }
+        out.push_str(&tab.text[last..]);
+        tab.text = out;
+        tab.find.status = format!("Replaced {n}");
+        return;
+    }
+
+    let sel_start = char_to_byte(
+        &tab.text,
+        tab.cursor.primary.index.0.min(tab.cursor.secondary.index.0),
+    );
+    let sel_end = char_to_byte(
+        &tab.text,
+        tab.cursor.primary.index.0.max(tab.cursor.secondary.index.0),
+    );
+    if replace_one && same_len && sel_end > sel_start && hay[sel_start..sel_end] == needle {
+        tab.text
+            .replace_range(sel_start..sel_end, &tab.find.replace);
+        let after = sel_start + tab.find.replace.len();
+        tab.cursor = CCursorRange::one(CCursor::new(byte_to_char(&tab.text, after)));
+        find_next = true;
+    }
+    if find_next && same_len {
+        let from = char_to_byte(
+            &tab.text,
+            tab.cursor.primary.index.0.max(tab.cursor.secondary.index.0),
+        );
+        let hay = if tab.find.match_case {
+            tab.text.clone()
+        } else {
+            tab.text.to_lowercase()
+        };
+        let found = hay[from..]
+            .find(&needle)
+            .map(|p| p + from)
+            .or_else(|| hay.find(&needle));
+        match found {
+            Some(p) => {
+                let a = byte_to_char(&tab.text, p);
+                let b = byte_to_char(&tab.text, p + needle.len());
+                let range = CCursorRange::two(CCursor::new(a), CCursor::new(b));
+                tab.cursor = range;
+                tab.pending_select = Some(range);
+                let total = hay.matches(&needle).count();
+                tab.find.status = format!("{total} match{}", if total == 1 { "" } else { "es" });
+            }
+            None => tab.find.status = "No matches".into(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_sql_uses_selection_or_statement() {
+        let mut t = Tab::new(1, "q".into(), None);
+        t.text = "SELECT 1;\nSELECT 2;".into();
+        t.cursor = CCursorRange::one(CCursor::new(12));
+        assert_eq!(t.current_sql(None), "SELECT 2");
+        t.cursor = CCursorRange::two(CCursor::new(0), CCursor::new(8));
+        assert_eq!(t.current_sql(None), "SELECT 1");
+    }
+
+    #[test]
+    fn dirty_tracking() {
+        let mut t = Tab::new(1, "q".into(), None);
+        assert!(!t.is_dirty());
+        t.text = "  ".into();
+        assert!(
+            !t.is_dirty(),
+            "whitespace in a new tab is not worth a prompt"
+        );
+        t.text = "SELECT 1".into();
+        assert!(t.is_dirty());
+        t.mark_saved("/tmp/x.sql".into());
+        assert!(!t.is_dirty());
+        assert_eq!(t.title, "x.sql");
+    }
+
+    #[test]
+    fn autocomplete_triggers() {
+        assert!(auto_trigger("SELECT o.", 9));
+        assert!(auto_trigger("SELECT na", 9));
+        assert!(!auto_trigger("SELECT n", 8));
+        assert!(!auto_trigger("SELECT 12", 9), "numbers do not trigger");
+        assert!(!auto_trigger("SELECT nam", 9), "mid-word does not trigger");
+    }
+
+    #[test]
+    fn accepting_replaces_the_prefix() {
+        let mut t = Tab::new(1, "q".into(), None);
+        t.text = "SELECT sta FROM t".into();
+        t.completion = Some(Popup {
+            items: vec![Candidate {
+                label: "status".into(),
+                insert: "status".into(),
+                kind: complete::CandKind::Column,
+                detail: String::new(),
+            }],
+            range: 7..10,
+            selected: 0,
+            scroll: false,
+            moved: false,
+        });
+        accept(&mut t, 0);
+        assert_eq!(t.text, "SELECT status FROM t");
+        assert_eq!(t.cursor.primary.index.0, 13);
+        assert!(t.completion.is_none());
+    }
+
+    #[test]
+    fn char_byte_conversion() {
+        assert_eq!(char_to_byte("héllo", 2), 3);
+        assert_eq!(char_to_byte("hé", 10), 3);
+        assert_eq!(byte_to_char("héllo", 3), 2);
+    }
+}

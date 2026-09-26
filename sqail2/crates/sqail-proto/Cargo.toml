@@ -1,0 +1,22 @@
+[package]
+name = "sqail-proto"
+description = "Shared REST API types between sqail-service and its clients"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# Derive OpenAPI schemas (only the service needs this).
+openapi = ["dep:utoipa"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+uuid = { version = "1", features = ["serde"] }
+chrono = { version = "0.4", default-features = false, features = ["serde", "std"] }
+utoipa = { version = "6", optional = true, features = ["uuid", "chrono"] }
+
+[lints]
+workspace = true

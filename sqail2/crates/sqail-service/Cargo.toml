@@ -1,0 +1,77 @@
+[package]
+name = "sqail-service"
+description = "HTTPS REST gateway between sqail2 and SQL databases"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "sqail-service"
+path = "src/main.rs"
+
+[dependencies]
+sqail-proto = { workspace = true, features = ["openapi"] }
+serde.workspace = true
+serde_json.workspace = true
+
+# runtime + http
+tokio = { version = "1.53", features = ["full"] }
+tokio-util = { version = "0.7", features = ["compat", "rt"] }
+tokio-stream = "0.1"
+futures = "0.3"
+async-trait = "0.1"
+bytes = "1"
+axum = { version = "0.8", features = ["http2"] }
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.7", features = ["limit", "timeout", "trace", "set-header", "request-id", "sensitive-headers", "util"] }
+governor = "0.10"
+
+# tls + crypto. aws-lc-rs is the one provider (tiberius requires it); it is
+# installed as the process default at startup.
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "prefer-post-quantum", "std", "logging", "tls12"] }
+rustls-native-certs = "0.8"
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "aws_lc_rs"] }
+aes-gcm = "0.11"
+sha2 = "0.11"
+subtle = "2.6"
+rand = "0.10"
+base64 = "0.23"
+hex = "0.4"
+
+# database drivers
+tokio-postgres = { version = "0.7.18", features = ["with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
+tokio-postgres-rustls = "0.14"
+tiberius = { version = "0.13", default-features = false, features = ["tds80", "rustls", "chrono", "sql-browser-tokio"] }
+rusqlite = { version = "0.40", features = ["bundled", "column_decltype"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# app plumbing
+clap = { version = "4.6", features = ["derive", "env"] }
+directories = "6"
+toml = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+utoipa = { version = "6", features = ["axum_extras", "uuid", "chrono"] }
+utoipa-axum = "0.3"
+utoipa-scalar = { version = "0.4", features = ["axum"] }
+roxmltree = "0.21"
+
+[target.'cfg(windows)'.dependencies]
+tiberius = { version = "0.13", default-features = false, features = ["winauth"] }
+windows-service = "0.8"
+
+[dev-dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
+tempfile = "3"
+
+[lints]
+workspace = true

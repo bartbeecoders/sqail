@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=sqail2
+GenericName=SQL Editor
+Comment=Fast SQL editor for PostgreSQL, SQL Server and SQLite
+Exec=sqail2
+Icon=sqail2
+Terminal=false
+Categories=Development;Database;
+Keywords=sql;database;postgres;postgresql;mssql;sqlserver;sqlite;query;
+StartupWMClass=sqail2

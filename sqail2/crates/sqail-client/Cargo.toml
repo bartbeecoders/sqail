@@ -1,0 +1,31 @@
+[package]
+name = "sqail-client"
+description = "Typed HTTPS client for sqail-service"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+sqail-proto.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream", "http2"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "prefer-post-quantum", "std", "logging", "tls12"] }
+sha2 = "0.11"
+futures = "0.3"
+bytes = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = "2"
+rustls-native-certs = "0.8"
+
+[dev-dependencies]
+sqail-service = { path = "../sqail-service" }
+tokio = { version = "1.53", features = ["full"] }
+tempfile = "3"
+anyhow = "1"
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "aws_lc_rs"] }
+
+[lints]
+workspace = true

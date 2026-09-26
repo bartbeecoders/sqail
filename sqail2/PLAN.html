@@ -1,0 +1,564 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sqail2 Build Plan</title>
+<style>
+:root {
+  --bg: #f7f6f3; --surface: #ffffff; --surface-2: #f0eee9; --text: #1d1c1a; --muted: #6b6860;
+  --border: #e2dfd8; --accent: #2f6f5e; --accent-soft: #e2efe9; --warn: #9a5b12; --warn-soft: #f7ecdc;
+  --code-bg: #f0eee9; --done: #2f6f5e; --bar: #dedad2;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #151514; --surface: #1d1c1b; --surface-2: #252422; --text: #ebe9e4; --muted: #a09c93;
+    --border: #34322f; --accent: #6cc2a6; --accent-soft: #1f3530; --warn: #e2a95c; --warn-soft: #3a2d1b;
+    --code-bg: #262523; --done: #6cc2a6; --bar: #34322f;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #151514; --surface: #1d1c1b; --surface-2: #252422; --text: #ebe9e4; --muted: #a09c93;
+  --border: #34322f; --accent: #6cc2a6; --accent-soft: #1f3530; --warn: #e2a95c; --warn-soft: #3a2d1b;
+  --code-bg: #262523; --done: #6cc2a6; --bar: #34322f;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Inter, sans-serif;
+}
+.wrap { max-width: 980px; margin: 0 auto; padding: 32px 16px 96px; }
+h1 { font-size: 30px; line-height: 1.2; margin: 0 0 6px; letter-spacing: -0.01em; }
+h2 { font-size: 21px; margin: 44px 0 12px; }
+h3 { font-size: 16px; margin: 20px 0 6px; }
+p { margin: 8px 0; }
+a { color: var(--accent); }
+.sub { color: var(--muted); margin: 0 0 20px; }
+code, pre, kbd { font-family: ui-monospace, "JetBrains Mono", "Cascadia Code", Menlo, monospace; font-size: 13px; }
+code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+pre { background: var(--code-bg); padding: 12px 14px; border-radius: 8px; overflow-x: auto; margin: 8px 0; }
+kbd { border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+.tablewrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 18px; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+.note { background: var(--warn-soft); border-left: 3px solid var(--warn); padding: 10px 14px; border-radius: 6px; margin: 12px 0; }
+.pill { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 99px; background: var(--surface-2); color: var(--muted); }
+
+/* progress header */
+.progress { position: sticky; top: 0; z-index: 5; background: var(--bg); padding: 10px 0 12px; border-bottom: 1px solid var(--border); margin-bottom: 8px; }
+.progress-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.bar { flex: 1 1 200px; height: 8px; background: var(--bar); border-radius: 99px; overflow: hidden; }
+.bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .25s; }
+.progress small { color: var(--muted); }
+button.link { background: none; border: 1px solid var(--border); color: var(--muted); border-radius: 6px; padding: 3px 10px; font: inherit; font-size: 13px; cursor: pointer; }
+button.link:hover { color: var(--text); }
+
+/* phases + steps */
+.phase { margin-top: 36px; }
+.phase-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.phase-head h2 { margin: 0; }
+.phase-head .count { color: var(--muted); font-size: 14px; }
+.phase .intro { color: var(--muted); margin: 4px 0 12px; }
+details.step { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; margin: 8px 0; }
+details.step[open] { border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
+details.step > summary { list-style: none; display: flex; gap: 12px; align-items: center; padding: 10px 14px; cursor: pointer; }
+details.step > summary::-webkit-details-marker { display: none; }
+summary .num { font-family: ui-monospace, monospace; font-size: 13px; color: var(--muted); min-width: 34px; }
+summary .title { flex: 1; font-weight: 600; }
+summary .chev { color: var(--muted); transition: transform .15s; }
+details[open] > summary .chev { transform: rotate(90deg); }
+summary input[type=checkbox] { width: 18px; height: 18px; accent-color: var(--accent); margin: 0; flex: none; cursor: pointer; }
+details.step.done summary .title { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--done); }
+.body { padding: 2px 18px 14px 60px; border-top: 1px solid var(--border); }
+.body ul { margin: 6px 0; padding-left: 20px; }
+.body li { margin: 2px 0; }
+.verify { background: var(--accent-soft); border-radius: 8px; padding: 8px 12px; margin-top: 10px; }
+.verify b { color: var(--accent); }
+.diagram { width: 100%; height: auto; display: block; }
+.diagram text { font-family: ui-sans-serif, system-ui, sans-serif; fill: var(--text); }
+.diagram .muted { fill: var(--muted); }
+.diagram .box { fill: var(--surface); stroke: var(--border); stroke-width: 1.5; }
+.diagram .boxa { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+.diagram .line { stroke: var(--muted); stroke-width: 1.5; fill: none; }
+.diagram .arrow { fill: var(--muted); }
+@media (max-width: 600px) {
+  .body { padding: 2px 14px 14px 16px; }
+  h1 { font-size: 24px; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Sqail2 build plan</h1>
+<p class="sub">A fast, easy to use and powerful SQL editor. All database access goes through <b>sqail-service</b>, an HTTPS REST gateway. Everything is written in Rust and runs on Linux (Omarchy) and Windows. <span class="pill">plan v1.4 · updated 2026-09-26 (phases 0–3 done; phase 4 built, 3 checks need you)</span></p>
+
+<div class="progress" id="progress">
+  <div class="progress-row">
+    <strong id="pct">0%</strong>
+    <div class="bar"><i id="barfill"></i></div>
+    <small id="counts">0 / 0 steps</small>
+    <button class="link" id="expand">Expand all</button>
+    <button class="link" id="reset" title="Clear the ticks saved in this browser and go back to the state recorded in the file">Reset to file</button>
+  </div>
+</div>
+
+<h2>How to use this plan</h2>
+<div class="card">
+  <p>Work through the steps in order. Tick a step only when it meets the <b>definition of done</b>:</p>
+  <ol>
+    <li><code>scripts/check.sh</code> passes. It runs <code>cargo fmt --check</code>, <code>clippy -D warnings</code> and the unit tests.</li>
+    <li><code>scripts/check.sh --it</code> passes for every database engine the step touches. It runs the integration tests against the podman databases.</li>
+    <li><code>scripts/dev.sh</code> still starts the whole system, and the step's <b>Verify</b> box has been checked by hand.</li>
+    <li>User-visible changes get a line in <code>CHANGELOG.md</code>.</li>
+  </ol>
+  <p>Ticks are saved in this browser (<code>localStorage</code>). Steps that are finished in the file itself are marked <code>data-done="true"</code>. That way progress also shows up in git, and anyone opening the file sees it. <b>Reset to file</b> clears your browser ticks.</p>
+</div>
+
+<h2>Architecture</h2>
+<svg class="diagram" viewBox="0 0 900 250" role="img" aria-label="sqail2 UI talks HTTPS/JSON to sqail-service, which uses a driver per engine to reach PostgreSQL, SQL Server and SQLite">
+  <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arrow"/></marker></defs>
+  <rect class="box" x="10" y="60" width="220" height="130" rx="10"/>
+  <text x="120" y="88" text-anchor="middle" font-weight="600" font-size="16">sqail2 (desktop UI)</text>
+  <text x="120" y="112" text-anchor="middle" font-size="13" class="muted">egui / eframe · wgpu</text>
+  <text x="120" y="132" text-anchor="middle" font-size="13" class="muted">editor · grid · schema tree</text>
+  <text x="120" y="152" text-anchor="middle" font-size="13" class="muted">sqail-client (reqwest+rustls)</text>
+  <text x="120" y="172" text-anchor="middle" font-size="13" class="muted">no DB drivers linked</text>
+  <path class="line" d="M232,125 L338,125" marker-end="url(#ah)"/>
+  <text x="285" y="112" text-anchor="middle" font-size="12" class="muted">HTTPS · TLS 1.3</text>
+  <text x="285" y="145" text-anchor="middle" font-size="12" class="muted">JSON + NDJSON</text>
+  <rect class="boxa" x="340" y="30" width="250" height="190" rx="10"/>
+  <text x="465" y="58" text-anchor="middle" font-weight="600" font-size="16">sqail-service</text>
+  <text x="465" y="82" text-anchor="middle" font-size="13" class="muted">axum · tokio · rustls</text>
+  <text x="465" y="104" text-anchor="middle" font-size="13" class="muted">auth · rate limit · audit</text>
+  <text x="465" y="126" text-anchor="middle" font-size="13" class="muted">connection profiles (encrypted)</text>
+  <text x="465" y="148" text-anchor="middle" font-size="13" class="muted">sessions · streaming · cancel</text>
+  <text x="465" y="176" text-anchor="middle" font-size="13">trait Driver</text>
+  <text x="465" y="198" text-anchor="middle" font-size="12" class="muted">state: service.db (SQLite)</text>
+  <path class="line" d="M592,80 L688,55" marker-end="url(#ah)"/>
+  <path class="line" d="M592,125 L688,125" marker-end="url(#ah)"/>
+  <path class="line" d="M592,170 L688,195" marker-end="url(#ah)"/>
+  <rect class="box" x="690" y="30" width="200" height="50" rx="8"/>
+  <text x="790" y="52" text-anchor="middle" font-size="14" font-weight="600">PostgreSQL</text>
+  <text x="790" y="70" text-anchor="middle" font-size="12" class="muted">tokio-postgres</text>
+  <rect class="box" x="690" y="100" width="200" height="50" rx="8"/>
+  <text x="790" y="122" text-anchor="middle" font-size="14" font-weight="600">SQL Server</text>
+  <text x="790" y="140" text-anchor="middle" font-size="12" class="muted">tiberius</text>
+  <rect class="box" x="690" y="170" width="200" height="50" rx="8"/>
+  <text x="790" y="192" text-anchor="middle" font-size="14" font-weight="600">SQLite</text>
+  <text x="790" y="210" text-anchor="middle" font-size="12" class="muted">rusqlite (bundled)</text>
+</svg>
+
+<h3>Key decisions</h3>
+<div class="tablewrap"><table>
+<tr><th>Area</th><th>Choice</th><th>Why</th></tr>
+<tr><td>UI toolkit</td><td><b>egui / eframe</b> (wgpu renderer)</td><td>Pure Rust and GPU-rendered, with one static binary. It is mature on Windows and on Wayland/Hyprland. Immediate mode makes a virtualised grid of 1M rows simple, and the whole app redraws in about 1 ms. I also considered Iced (Elm-style, but big grids take more work), Slint (its own markup language and dual licence) and GPUI (very fast, but the API is unstable and poorly documented outside Zed).</td></tr>
+<tr><td>HTTP server</td><td><b>axum 0.8 + tokio + tower-http</b>, TLS via <b>rustls</b> (aws-lc-rs provider)</td><td>The Rust default: fast, async, with middleware for limits, timeouts and tracing. Using rustls means no OpenSSL anywhere. aws-lc-rs is the single crypto provider because tiberius requires it, and its prebuilt NASM objects keep Windows builds simple.</td></tr>
+<tr><td>PostgreSQL</td><td><b>tokio-postgres</b> (vendored, one-field patch)</td><td>Scripts run through the simple-query protocol. It handles several statements per request, returns column headers even for empty results, and reports affected-row counts. Cancel uses a real <code>CancelToken</code>, and NOTICE messages come through. The patch keeps the column type OID that upstream throws away (<code>vendor/tokio-postgres/SQAIL2-PATCH.md</code>). sqlx was rejected because it has no cancel and loses the columns of empty results.</td></tr>
+<tr><td>SQL Server</td><td><b>tiberius 0.13</b></td><td>A pure-Rust TDS driver. It handles multiple result sets and SQL auth, and Windows integrated auth on Windows. Queries are cancelled with <code>KILL &lt;spid&gt;</code> from a side connection.</td></tr>
+<tr><td>SQLite</td><td><b>rusqlite</b> (bundled) on a blocking thread</td><td>No system library is needed, and <code>InterruptHandle</code> gives clean cancellation.</td></tr>
+<tr><td>Service state</td><td>SQLite file <code>service.db</code> with migrations</td><td>It holds connection profiles, API tokens and the audit log. Secrets are encrypted with AES-256-GCM.</td></tr>
+<tr><td>Result transport</td><td>NDJSON stream (<code>result_start</code> → <code>rows</code> batches → <code>result_end</code> … <code>done</code>)</td><td>The first rows show within milliseconds, and memory stays bounded on both ends. Integers are JSON numbers (i64). Decimals are strings, so no precision is lost. Bytes are hex.</td></tr>
+<tr><td>Pooling</td><td>One small generic pool for all engines</td><td>Idle connections are revalidated after 30 s. A connection that is broken, or that still has a transaction open, is never reused. Sessions hold their own dedicated connection.</td></tr>
+<tr><td>Shared types</td><td><code>sqail-proto</code> crate</td><td>The service and the client compile against the same structs, so the API cannot drift between them.</td></tr>
+</table></div>
+
+<h3>Repository layout (<code>sqail2/</code>)</h3>
+<pre>Cargo.toml              workspace (edition 2024)
+PLAN.html               this document
+crates/
+  sqail-proto/          REST API wire types (shared)
+  sqail-service/        HTTPS gateway: auth, profiles, drivers, streaming
+  sqail-client/         typed async client used by the UI (and tests)
+  sqail-ui/             the desktop app, binary name `sqail2`
+dev/
+  seed/{postgres,mssql,sqlite}/   identical test schema per engine (sales.*)
+  data/                 generated SQLite test db (git-ignored)
+scripts/                *.sh for Linux, *.ps1 for Windows (same names)</pre>
+
+<h3>Scripts</h3>
+<div class="tablewrap"><table>
+<tr><th>Linux</th><th>Windows</th><th>What it does</th></tr>
+<tr><td><code>scripts/dev.sh</code></td><td><code>.\scripts\dev.ps1</code></td><td>Starts the test DBs, runs the service in the background and the UI in front. Use this day to day.</td></tr>
+<tr><td><code>scripts/db.sh up</code></td><td><code>.\scripts\db.ps1 up</code></td><td>Starts and seeds Postgres and SQL Server (podman) and builds the SQLite file. Also takes <code>down · reset · destroy · status · logs · psql · sqlcmd</code>.</td></tr>
+<tr><td><code>scripts/check.sh [--it]</code></td><td><code>.\scripts\check.ps1 [-It]</code></td><td>The step gate: fmt, clippy and tests. <code>--it</code> adds the integration tests against the DBs.</td></tr>
+<tr><td><code>scripts/smoke.sh</code></td><td><code>.\scripts\smoke.ps1</code></td><td>End-to-end curl test: starts a throwaway service, creates a profile per DB and queries each one.</td></tr>
+<tr><td><code>scripts/build.sh [--release]</code></td><td><code>.\scripts\build.ps1</code></td><td>Builds the whole workspace.</td></tr>
+<tr><td><code>scripts/service.sh</code></td><td><code>.\scripts\service.ps1</code></td><td>Runs only sqail-service (data in <code>.sqail2/service/</code>). <code>service.sh token create --name me --scope admin</code> makes a token.</td></tr>
+<tr><td><code>scripts/ui.sh</code></td><td><code>.\scripts\ui.ps1</code></td><td>Runs only the sqail2 UI.</td></tr>
+</table></div>
+
+<h3>Test databases</h3>
+<div class="tablewrap"><table>
+<tr><th>Engine</th><th>Where</th><th>Credentials (dev only)</th></tr>
+<tr><td>PostgreSQL 17</td><td><code>127.0.0.1:55432</code>, db <code>sqail_test</code></td><td><code>sqail</code> / <code>sqail_dev_pw</code></td></tr>
+<tr><td>SQL Server 2022</td><td><code>127.0.0.1,51433</code>, db <code>sqail_test</code></td><td><code>sqail</code> or <code>sa</code> / <code>Sqail2_dev!Passw0rd</code></td></tr>
+<tr><td>SQLite</td><td><code>dev/data/sqail_test.db</code></td><td>—</td></tr>
+</table></div>
+<p>Every engine gets the same <code>sales</code> schema: customers (1k rows), products (200), orders (10k), order_items (29,850), a view (<code>order_totals</code>) and a function or procedure. There is also a <code>type_zoo</code> table with one column per interesting data type, plus an all-NULL row, for type-mapping tests. The ports bind to localhost only.</p>
+
+<h3>Security baseline for sqail-service</h3>
+<div class="grid2">
+  <div class="card"><b>Transport</b><br>HTTPS only, even on localhost. TLS 1.3 by default. A dev certificate is generated on first run and its SHA-256 fingerprint is shown; the client pins it (trust on first use). In production you supply your own PEM cert, and mTLS is optional.</div>
+  <div class="card"><b>AuthN / AuthZ</b><br>Bearer API tokens of 256 bits, stored only as hashes. Scopes are <code>admin</code>, <code>query</code> and <code>read</code>. A bootstrap admin token is printed once. Each token has a rate limit.</div>
+  <div class="card"><b>Secrets</b><br>Connection passwords are encrypted at rest with AES-256-GCM, using a master key from a file (mode 0600, or the ACL on Windows) or an env var. The API never returns them: those fields are write-only.</div>
+  <div class="card"><b>Blast radius</b><br>Binds to <code>127.0.0.1</code> by default. It enforces body-size limits, query timeouts and row caps. Read-only profiles are enforced by the driver. The audit log records who ran what, where, and how long it took, but never row values. CORS is off.</div>
+</div>
+
+<!-- ================================================================== -->
+<div id="phases">
+
+<section class="phase" data-phase="0">
+  <div class="phase-head"><h2>Phase 0 · Foundation</h2><span class="count"></span></div>
+  <p class="intro">Workspace, test databases and scripts. After this phase, everything builds and the DBs start with one command.</p>
+
+  <details class="step" data-id="0.1" data-done="true"><summary><input type="checkbox"><span class="num">0.1</span><span class="title">Cargo workspace skeleton</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li>Workspace with <code>sqail-proto</code>, <code>sqail-service</code>, <code>sqail-client</code> and <code>sqail-ui</code> (binary <code>sqail2</code>). Edition 2024, shared lints (<code>unsafe_code = forbid</code>) and a release profile.</li>
+      <li><code>.gitignore</code> for <code>target/</code> and generated data.</li>
+    </ul><div class="verify"><b>Verify:</b> <code>scripts/build.sh</code> works, and <code>scripts/service.sh</code> and <code>scripts/ui.sh</code> both print their version banner.</div></div></details>
+
+  <details class="step" data-id="0.2" data-done="true"><summary><input type="checkbox"><span class="num">0.2</span><span class="title">Podman test databases + seed data</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li>Postgres 17 and SQL Server 2022 containers started with plain <code>podman run</code>. That needs no compose provider and no podman socket, and it works the same through <code>podman machine</code> on Windows.</li>
+      <li>Named volumes keep the data across restarts. Seeding is idempotent, and <code>reset</code> rebuilds from scratch.</li>
+      <li>The same schema and data are seeded into all three engines, including <code>type_zoo</code>.</li>
+    </ul><div class="verify"><b>Verify:</b> <code>scripts/db.sh up</code> reports all three DBs ready, and <code>SELECT count(*) FROM sales.order_items</code> returns 29,850 on every engine.</div></div></details>
+
+  <details class="step" data-id="0.3" data-done="true"><summary><input type="checkbox"><span class="num">0.3</span><span class="title">Run / check scripts for Linux and Windows</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li><code>dev</code>, <code>db</code>, <code>check</code>, <code>build</code>, <code>service</code> and <code>ui</code> scripts, each in <code>.sh</code> and <code>.ps1</code>.</li>
+      <li><code>check</code> is the gate for every step. <code>--it</code> / <code>-It</code> adds the integration tests, which are marked <code>#[ignore]</code> and need <code>SQAIL2_IT=1</code>.</li>
+    </ul><div class="verify"><b>Verify:</b> <code>scripts/check.sh</code> is green. On Windows, run <code>.\scripts\check.ps1</code> once to confirm; the <code>.ps1</code> scripts are untested so far.</div></div></details>
+
+  <details class="step" data-id="0.4" data-done="true"><summary><input type="checkbox"><span class="num">0.4</span><span class="title">Repo hygiene: README, CHANGELOG, licence, CI placeholder</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li><code>README.md</code> with a quickstart for both OSes (prerequisites: rustup, podman, and on Windows the MSVC build tools).</li>
+      <li><code>CHANGELOG.md</code>, plus <code>cargo-deny</code> config for licences and advisories, hooked into <code>check</code>.</li>
+      <li>Decide whether sqail2 stays a folder in this repo or becomes its own repo, and where CI runs (Forgejo Actions on Codeberg or GitHub Actions). <i>Decided: it stays a folder here; CI is GitHub Actions (<code>.github/workflows/sqail2.yml</code>, path-filtered), and releases are tagged <code>sqail2-v*</code> so they don't collide with the Tauri app's <code>v*</code> tags.</i></li>
+    </ul><div class="verify"><b>Verify:</b> <code>cargo deny check</code> passes inside <code>scripts/check.sh</code>.</div></div></details>
+</section>
+
+<section class="phase" data-phase="1">
+  <div class="phase-head"><h2>Phase 1 · sqail-service core</h2><span class="count"></span></div>
+  <p class="intro">A secure HTTPS gateway that can run queries on all three engines. At the end, every feature works through <code>curl</code> and has integration tests.</p>
+
+  <details class="step" data-id="1.1" data-done="true"><summary><input type="checkbox"><span class="num">1.1</span><span class="title">HTTPS server skeleton</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li>axum + rustls (<code>axum-server</code> with <code>tls-rustls</code>) serving <code>GET /v1/health</code> and <code>GET /v1/info</code> (version and supported engines).</li>
+      <li>Config: <code>sqail-service.toml</code> plus <code>SQAIL_*</code> env overrides. Default bind is <code>127.0.0.1:7443</code>. Data dir from the <code>directories</code> crate.</li>
+      <li>If no cert is configured, generate a self-signed dev cert with <code>rcgen</code>, persist it, and log its SHA-256 fingerprint.</li>
+      <li><code>tracing</code> with a JSON or pretty format, request IDs, and graceful shutdown on Ctrl+C / SIGTERM.</li>
+    </ul><div class="verify"><b>Verify:</b> <code>scripts/service.sh</code>, then <code>curl -k https://127.0.0.1:7443/v1/health</code> returns <code>{"status":"ok",…}</code>. Plain <code>http://</code> is refused.</div></div></details>
+
+  <details class="step" data-id="1.2" data-done="true"><summary><input type="checkbox"><span class="num">1.2</span><span class="title">Service state store + secret encryption</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li><code>service.db</code> (rusqlite) with versioned migrations: <code>tokens</code>, <code>connections</code>, <code>audit_log</code>.</li>
+      <li>Master key: 32 random bytes in <code>master.key</code>, created with owner-only permissions, or taken from <code>SQAIL_MASTER_KEY</code>. AES-256-GCM encrypt/decrypt helpers with a random nonce per value.</li>
+      <li>Unit tests: an encryption round trip, and tamper detection (a changed ciphertext must fail).</li>
+    </ul><div class="verify"><b>Verify:</b> the first start creates <code>service.db</code> and <code>master.key</code>, and a restart reuses them. <code>check.sh</code> is green.</div></div></details>
+
+  <details class="step" data-id="1.3" data-done="true"><summary><input type="checkbox"><span class="num">1.3</span><span class="title">Authentication, authorization & request hardening</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li>API tokens <code>sq2_&lt;base62&gt;</code>, of which only a SHA-256 hash is stored. Scopes: <code>admin</code>, <code>query</code>, <code>read</code>. Comparisons are constant-time.</li>
+      <li>On first run, print a bootstrap admin token once. Add a CLI: <code>sqail-service token create|list|revoke</code>.</li>
+      <li>Middleware: bearer auth, a per-token rate limit (<code>tower_governor</code>), a body limit, a timeout, security headers, and no CORS.</li>
+      <li>Error model: <code>application/problem+json</code> that never leaks internals.</li>
+    </ul><div class="verify"><b>Verify:</b> <code>/v1/info</code> without a token returns 401, and with a token returns 200. A revoked token gets 401. Rate-limit tests pass.</div></div></details>
+
+  <details class="step" data-id="1.4" data-done="true"><summary><input type="checkbox"><span class="num">1.4</span><span class="title">Connection profiles API</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li><code>GET/POST /v1/connections</code> and <code>GET/PUT/DELETE /v1/connections/{id}</code>. The profile is a tagged enum per engine: host, port, db, user, password (write-only), TLS options, a <code>read_only</code> flag, colour and environment tag.</li>
+      <li><code>POST /v1/connections/{id}/test</code> and <code>POST /v1/connections/test</code> (for an unsaved profile) return the server version and latency.</li>
+      <li>Every change writes an audit entry.</li>
+    </ul><div class="verify"><b>Verify:</b> create a profile for each test DB with curl. <code>GET</code> never shows a password, and <code>service.db</code> only holds ciphertext.</div></div></details>
+
+  <details class="step" data-id="1.5" data-done="true"><summary><input type="checkbox"><span class="num">1.5</span><span class="title">Driver trait, value model & streaming protocol</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li>In <code>sqail-proto</code>: <code>LogicalType</code> plus JSON cell encoding (int as number, decimal as string, bytes as hex, temporals as ISO strings), <code>Column</code> (name, engine type name, logical type), and <code>QueryEvent</code>.</li>
+      <li>Service: <code>trait Driver { test, execute(stream), cancel, schema_* }</code> and a pool registry keyed by connection id, with idle eviction.</li>
+      <li><code>POST /v1/connections/{id}/query</code> takes <code>{sql, params?, max_rows?, timeout_ms?}</code> and streams NDJSON events: <code>started</code>, <code>result_start</code>, <code>rows</code> (batches of 500), <code>result_end</code>, <code>rows_affected</code>, <code>message</code>, <code>error</code>, <code>done</code>. The client may choose the query id (<code>X-Query-Id</code>).</li>
+    </ul><div class="verify"><b>Verify:</b> proto round-trip tests. A mock driver streams 1M rows through the endpoint while service memory stays flat.</div></div></details>
+
+  <details class="step" data-id="1.6" data-done="true"><summary><input type="checkbox"><span class="num">1.6</span><span class="title">PostgreSQL driver</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li>tokio-postgres + deadpool-postgres, with TLS through <code>tokio-postgres-rustls</code>. Uses the simple-query protocol when there are no params (multiple statements allowed) and the extended protocol when there are.</li>
+      <li>Maps every <code>type_zoo</code> column (arrays and intervals become text) and forwards NOTICE messages as <code>message</code> events.</li>
+      <li>Cancel through <code>CancelToken</code>. Read-only profiles run <code>SET default_transaction_read_only = on</code>.</li>
+    </ul><div class="verify"><b>Verify:</b> <code>check.sh --it</code> covers select, DML row counts, <code>type_zoo</code> values, cancelling <code>pg_sleep(30)</code>, and a write rejected on a read-only profile.</div></div></details>
+
+  <details class="step" data-id="1.7" data-done="true"><summary><input type="checkbox"><span class="num">1.7</span><span class="title">SQL Server driver</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li>tiberius + bb8 with rustls TLS and <code>TrustServerCertificate</code> as an explicit option. SQL auth everywhere; integrated auth on Windows.</li>
+      <li>Multiple result sets (<code>EXEC sales.customer_orders 5</code> returns two), PRINT/RAISERROR as messages, and <code>GO</code> batch splitting on the service side.</li>
+      <li>Cancel with <code>KILL &lt;spid&gt;</code> over a side connection. Read-only uses <code>ApplicationIntent=ReadOnly</code> plus the DB user's rights; this is documented as best-effort.</li>
+    </ul><div class="verify"><b>Verify:</b> integration tests cover the two result sets, all <code>type_zoo</code> types, cancelling <code>WAITFOR DELAY '00:00:30'</code>, and a GO-separated script.</div></div></details>
+
+  <details class="step" data-id="1.8" data-done="true"><summary><input type="checkbox"><span class="num">1.8</span><span class="title">SQLite driver</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li>rusqlite (bundled) on <code>spawn_blocking</code>, using the shared pool. Paths are restricted to an allow-list of directories (<code>sqlite.allowed_dirs</code> / <code>SQAIL_SQLITE_DIRS</code>).</li>
+      <li>Cancel through <code>InterruptHandle</code>. Read-only opens with <code>SQLITE_OPEN_READ_ONLY</code>.</li>
+    </ul><div class="verify"><b>Verify:</b> integration tests against <code>dev/data/sqail_test.db</code>. A path outside the allow-list is rejected.</div></div></details>
+
+  <details class="step" data-id="1.9" data-done="true"><summary><input type="checkbox"><span class="num">1.9</span><span class="title">Sessions, transactions, limits & cancel</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li><code>POST /v1/sessions</code> pins a dedicated connection with an idle TTL, so <code>BEGIN … COMMIT</code> works across requests. Queries without a session use the pool with autocommit.</li>
+      <li><code>DELETE /v1/queries/{id}</code> cancels a query. Per-query <code>timeout_ms</code> and <code>max_rows</code>, with server-side maximums.</li>
+      <li>A session reports whether a transaction is open, so the UI can warn about uncommitted work.</li>
+    </ul><div class="verify"><b>Verify:</b> for each engine, a test does BEGIN, INSERT, reads from a second session (the row is not visible), then ROLLBACK. Timeout and cancel tests pass.</div></div></details>
+
+  <details class="step" data-id="1.10" data-done="true"><summary><input type="checkbox"><span class="num">1.10</span><span class="title">Schema introspection API</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li><code>GET /v1/connections/{id}/schema/{databases|schemas|tables|views|columns|indexes|foreign-keys|routines}</code> with filters, lazy enough for large catalogs.</li>
+      <li><code>GET …/objects/{schema}/{name}/ddl</code> returns a best-effort CREATE script per engine.</li>
+      <li>Identifier quoting is done by the driver; no user string is ever pasted into catalog SQL.</li>
+    </ul><div class="verify"><b>Verify:</b> each engine returns the same logical <code>sales</code> model: tables, the PK/FK graph, the view, the routine.</div></div></details>
+
+  <details class="step" data-id="1.11" data-done="true"><summary><input type="checkbox"><span class="num">1.11</span><span class="title">OpenAPI, audit log & smoke script</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li><code>utoipa</code> serves the OpenAPI spec at <code>/v1/openapi.json</code> (and a docs UI in dev builds only).</li>
+      <li><code>GET /v1/audit</code> (admin only) with paging.</li>
+      <li><code>scripts/smoke.sh</code> / <code>.ps1</code>: start the service, create profiles, run a query on each engine with curl, then shut down.</li>
+    </ul><div class="verify"><b>Verify:</b> <code>scripts/smoke.sh</code> ends green. <b>Milestone: the service is feature-complete for v1.</b></div></div></details>
+<div class="note"><b>Phase 1 notes and known limitations.</b> These are recorded so later steps can close them.
+  <ul>
+    <li><b>SQL Server rows affected:</b> tiberius does not expose DONE counts on result streams. A batch that is a single INSERT/UPDATE/DELETE/MERGE reports its count. Other batches that return no result show "Commands completed successfully." instead.</li>
+    <li><b>SQL Server cancel:</b> this sends <code>KILL &lt;spid&gt;</code>, which needs <code>ALTER ANY CONNECTION</code>. Without that permission the connection is dropped instead. That stops the client at once, but the server finishes the batch in the background.</li>
+    <li><b>SQL Server <code>money</code></b> is decoded by tiberius as a float, so values beyond about 15 significant digits get rounded. <code>decimal</code>/<code>numeric</code> are exact.</li>
+    <li><b>SQL Server read-only profiles</b> set <code>ApplicationIntent=ReadOnly</code>, which only takes effect on availability groups. Use a login that can only read.</li>
+    <li><b>Postgres NOTICEs</b> can arrive slightly before the result of the statement that raised them. Statements such as <code>CREATE</code> report <code>rows_affected: 0</code>.</li>
+    <li>Running <code>BEGIN</code> without a session is safe: the open transaction is rolled back and a warning event is sent. Use <code>/v1/sessions</code> for transactions that span several requests.</li>
+  </ul>
+</div>
+</section>
+
+
+<section class="phase" data-phase="2">
+  <div class="phase-head"><h2>Phase 2 · Client & editor foundation</h2><span class="count"></span></div>
+  <p class="intro">A usable native editor: connect, write SQL, run it, look at results and browse the schema.</p>
+
+  <details class="step" data-id="2.1" data-done="true"><summary><input type="checkbox"><span class="num">2.1</span><span class="title">sqail-client crate</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li>reqwest with rustls, plus certificate pinning through a custom <code>ServerCertVerifier</code> (the SHA-256 fingerprint).</li>
+      <li>Typed methods for every endpoint. <code>query()</code> returns a <code>Stream&lt;QueryEvent&gt;</code> decoded from NDJSON, with <code>cancel()</code>.</li>
+      <li>Service integration tests move to the client, so both sides are tested together.</li>
+    </ul><div class="verify"><b>Verify:</b> <code>cargo run -p sqail-client --example query -- "SELECT 1"</code> prints a result from each engine.</div></div></details>
+
+  <details class="step" data-id="2.2" data-done="true"><summary><input type="checkbox"><span class="num">2.2</span><span class="title">UI shell (eframe / wgpu)</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li>Window with a sidebar (connections and schema), editor tabs, a resizable results panel and a status bar.</li>
+      <li>Embedded Inter and JetBrains Mono fonts. Light and dark themes that follow the OS, tuned to feel at home in Omarchy.</li>
+      <li>Async bridge: a background tokio runtime, commands in over channels, events out through <code>ctx.request_repaint()</code>. The UI thread never blocks.</li>
+      <li>Settings and window state saved as TOML in the config dir.</li>
+    </ul><div class="verify"><b>Verify:</b> <code>scripts/ui.sh</code> opens the window on Hyprland (Wayland) and on Windows. Resizing is smooth and idle CPU is about 0%.</div></div></details>
+
+  <details class="step" data-id="2.3" data-done="true"><summary><input type="checkbox"><span class="num">2.3</span><span class="title">Service profiles & first-run flow</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li>Add a service with URL and token. On first contact, show the certificate fingerprint and pin it once the user accepts.</li>
+      <li>Tokens are stored in the OS keyring (<code>keyring</code>: Secret Service or Credential Manager), falling back to an encrypted file.</li>
+      <li>Option: “start a local sqail-service automatically” for single-machine use.</li>
+    </ul><div class="verify"><b>Verify:</b> with <code>scripts/dev.sh</code>, the UI connects to the local service after first-run setup and remembers it after a restart.</div></div></details>
+
+  <details class="step" data-id="2.4" data-done="true"><summary><input type="checkbox"><span class="num">2.4</span><span class="title">Connection manager</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li>List, create, edit and delete profiles, with engine-specific forms and a Test button.</li>
+      <li>Environment tag and colour (for example, prod in red across the whole window), folders and search.</li>
+    </ul><div class="verify"><b>Verify:</b> create all three test connections from the UI, and all three tests pass.</div></div></details>
+
+  <details class="step" data-id="2.5" data-done="true"><summary><input type="checkbox"><span class="num">2.5</span><span class="title">SQL editor v1</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li>Multi-tab editor with SQL syntax highlighting (a hand-written tokenizer per dialect), line numbers, current-line highlight, bracket matching, and undo/redo.</li>
+      <li>Run the statement under the cursor (<kbd>Ctrl</kbd>+<kbd>Enter</kbd>), the selection, or everything (<kbd>F5</kbd>). Cancel with <kbd>Esc</kbd> or the Stop button.</li>
+      <li>Find/replace. Open and save <code>.sql</code> files. Dirty markers on tabs.</li>
+      <li>Each tab has its own connection and database selector.</li>
+    </ul><div class="verify"><b>Verify:</b> a 5,000-line script scrolls and types without lag, and running the statement at the cursor works on each engine.</div></div></details>
+
+  <details class="step" data-id="2.6" data-done="true"><summary><input type="checkbox"><span class="num">2.6</span><span class="title">Results grid</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li>Virtualised grid that handles 1M rows as they stream in, with column resize, client-side sort, and cell or range selection.</li>
+      <li>Copy as TSV or with headers. NULL styling, numbers right-aligned, long text truncated with a detail viewer (including JSON pretty-print).</li>
+      <li>A tab per result set, a Messages tab, and row count, elapsed time and a truncation notice.</li>
+    </ul><div class="verify"><b>Verify:</b> <code>SELECT * FROM sales.order_items</code> cross-joined with itself (to about 1M rows) stays above 60 fps while scrolling. The procedure shows two result tabs.</div></div></details>
+
+  <details class="step" data-id="2.7" data-done="true"><summary><input type="checkbox"><span class="num">2.7</span><span class="title">Schema browser</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li>Lazy tree: database → schema → tables / views / routines → columns / indexes / keys. Filter box and refresh.</li>
+      <li>Context actions: SELECT top 100, copy name, script CREATE, open in a new tab.</li>
+    </ul><div class="verify"><b>Verify:</b> browse <code>sales</code> on all three engines. “Select top 100” opens a tab and runs it. <b>Milestone: sqail2 is usable day to day (alpha).</b></div></div></details>
+<div class="note"><b>Phase 2 notes.</b>
+  <ul>
+    <li><b>UI tests:</b> <code>crates/sqail-ui/tests/ui.rs</code> drives the real app headlessly with <code>egui_kittest</code> against an in-process service: keys, clicks, typing, the connection form, cancel, transactions and the schema tree. It renders screenshots to <code>target/ui-shots/</code>. The <code>#[ignore]</code>d test covers all three engines and the 1M-row grid.</li>
+    <li><b>Measured</b> (release build, RTX 4080): about 1M Postgres rows streamed into the grid in about 0.5 s, and scrolling costs 0.8 ms per frame. On a 650 KB, 5,000-line script an edit costs about 9 ms per frame of editor work (18 ms inside the test harness, which also builds an AccessKit tree). Idle CPU is about 0.1%.</li>
+    <li><b>Each tab owns a service session</b>, so temp tables, <code>SET</code> options and transactions last across runs. An open transaction shows a badge with Commit and Rollback buttons, which covers part of step 3.7.</li>
+    <li><b>Tokens</b> are stored in the OS credential store, falling back to an owner-only <code>tokens.toml</code>. <code>SQAIL2_TOKEN_STORE=file</code> forces the file. The dev scripts keep UI settings in <code>.sqail2/ui/</code>, and <code>SQAIL2_AUTO_LOCAL=1</code> (set by <code>dev.sh</code>) sets up the local service on first run.</li>
+    <li><b>Open items:</b> the UI has not been run on Windows yet. Bracket matching covers parentheses only. Find/replace falls back to "no match" for scripts where lowercasing changes byte lengths. An SQLite file path refers to the service's machine.</li>
+  </ul>
+</div>
+</section>
+
+<section class="phase" data-phase="3">
+  <div class="phase-head"><h2>Phase 3 · Power features</h2><span class="count"></span></div>
+  <p class="intro">Features that make it pleasant to use for hours at a time.</p>
+
+  <details class="step" data-id="3.1" data-done="true"><summary><input type="checkbox"><span class="num">3.1</span><span class="title">Schema-aware autocomplete</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li>Completes keywords, schemas, tables, aliases and columns from a cached schema. Handles <code>alias.</code> context and JOIN hints from foreign keys.</li>
+    </ul><div class="verify"><b>Verify:</b> typing <code>SELECT o.</code> after <code>FROM sales.orders o</code> lists the columns of orders.</div></div></details>
+
+  <details class="step" data-id="3.2" data-done="true"><summary><input type="checkbox"><span class="num">3.2</span><span class="title">History, saved queries & workspace restore</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li>Local query history with connection, time, duration and status, plus search. Saved snippets. Open tabs and unsaved text come back after a restart.</li>
+    </ul><div class="verify"><b>Verify:</b> kill the app mid-edit, restart it, and the tabs and text are back.</div></div></details>
+
+  <details class="step" data-id="3.3" data-done="true"><summary><input type="checkbox"><span class="num">3.3</span><span class="title">Export & import</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li>Export results or a whole query to CSV, JSON, XLSX (<code>rust_xlsxwriter</code>) or SQL INSERTs, streamed to disk.</li>
+      <li>Import CSV into a table, with column mapping and a preview.</li>
+    </ul><div class="verify"><b>Verify:</b> exporting 1M rows to CSV completes with flat memory, and a CSV round trip reproduces the same rows.</div></div></details>
+
+  <details class="step" data-id="3.4" data-done="true"><summary><input type="checkbox"><span class="num">3.4</span><span class="title">Inline data editing</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li>Edit cells, add rows and delete rows for single-table results that include a primary key. Shows a preview of the generated parameterised DML, then applies it in one transaction.</li>
+    </ul><div class="verify"><b>Verify:</b> edit a product price on each engine. The change persists, and a read-only profile blocks editing.</div></div></details>
+
+  <details class="step" data-id="3.5" data-done="true"><summary><input type="checkbox"><span class="num">3.5</span><span class="title">Formatter, command palette & keybindings</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li>SQL formatting with <code>sqlformat</code>. Command palette on <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd>, and quick-open for tables and snippets on <kbd>Ctrl</kbd>+<kbd>P</kbd>. User keybindings in TOML.</li>
+    </ul><div class="verify"><b>Verify:</b> every menu action can be reached from the palette.</div></div></details>
+
+  <details class="step" data-id="3.6" data-done="true"><summary><input type="checkbox"><span class="num">3.6</span><span class="title">Query plan viewer</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li>New endpoint <code>POST …/explain</code>. It uses Postgres <code>EXPLAIN (FORMAT JSON)</code>, SQL Server showplan XML, and SQLite <code>EXPLAIN QUERY PLAN</code>, shown as a tree with the costly nodes highlighted.</li>
+    </ul><div class="verify"><b>Verify:</b> the plan for an order_totals join renders on each engine.</div></div></details>
+
+  <details class="step" data-id="3.7" data-done="true"><summary><input type="checkbox"><span class="num">3.7</span><span class="title">Transaction UX</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li>Autocommit toggle per tab, an “open transaction” badge, and Commit / Rollback buttons. Closing a tab or the app with pending work asks what to do.</li>
+    </ul><div class="verify"><b>Verify:</b> BEGIN + UPDATE in a tab shows the badge, and Rollback undoes the change. <b>Milestone: beta.</b></div></div></details>
+<div class="note"><b>Phase 3 notes.</b>
+  <ul>
+    <li><b>Autocomplete</b> reads the sidebar's schema cache and loads whatever it is missing. It suggests columns after <code>alias.</code>, tables after FROM/JOIN, and complete JOIN … ON clauses from foreign keys. It opens after <code>.</code> or two typed characters, or on Ctrl+Space. <i>Edit → Complete while typing</i> turns off the automatic part.</li>
+    <li><b>History</b> is stored in <code>history.jsonl</code> (the last 5,000 runs), <b>snippets</b> in <code>snippets.json</code>, and <b>open tabs</b> in <code>workspace.json</code>, autosaved about once a second.</li>
+    <li><b>Export</b> can save the shown result, or re-run the whole query and stream it to a file (CSV, JSON, Excel, SQL INSERTs). A 1,014,900-row CSV export grew memory by 10 MB. <b>Import</b> loads CSV into an existing table in one transaction, with batched, parameterised inserts, and rolls back on any error.</li>
+    <li><b>Data editing</b> is available for a single-table SELECT that includes the primary key. Double-click or F2 edits a cell; the context menu has Set NULL and Delete row. The generated SQL is shown for review, then applied in one transaction. An edit to a row that changed in the meantime fails and everything rolls back.</li>
+    <li><b>Commands</b> are defined once and drive shortcuts, menus and the palette (Ctrl+Shift+P). <code>keybindings.toml</code> in the config dir rebinds them, e.g. <code>"query.run" = "Ctrl+R"</code>. Quick-open is on Ctrl+P and formatting on Ctrl+Shift+F, which skips Postgres <code>$$</code> bodies and formats each GO batch separately.</li>
+    <li><b>Plans</b> come from a new endpoint, <code>POST …/explain</code>. <i>Explain analyze</i> runs the statement inside a transaction that is always rolled back (Postgres and SQL Server; SQLite has no actual plans).</li>
+    <li><b>Transactions:</b> each tab has an auto-commit toggle. With it off, the first run opens a transaction and a badge shows Commit and Rollback. Closing a tab or quitting with an open transaction asks first.</li>
+    <li><b>Open item:</b> in a headless screenshot the quick-open filter box looked empty even though the app state held the typed text. The behaviour was correct, but check it once in the real app.</li>
+  </ul>
+</div>
+</section>
+
+<section class="phase" data-phase="4">
+  <div class="phase-head"><h2>Phase 4 · Hardening, performance & release</h2><span class="count"></span></div>
+  <p class="intro">Make it safe to point at real servers, and ship installers.</p>
+
+  <details class="step" data-id="4.1" data-done="true"><summary><input type="checkbox"><span class="num">4.1</span><span class="title">Security review & hardening</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li>Threat model document. <code>cargo audit</code> and <code>cargo deny</code> in the gate. Optional mTLS. Fuzz the NDJSON decoder and the GO splitter (a stable, time-boxed fuzzer, <code>sqail-fuzz</code>, instead of nightly-only <code>cargo-fuzz</code>).</li>
+      <li>Review logging so no secret or row value ever reaches the logs.</li>
+    </ul><div class="verify"><b>Verify:</b> the threat-model checklist is complete, and fuzzing runs for 10 minutes without a crash.</div></div></details>
+
+  <details class="step" data-id="4.2" data-done="true"><summary><input type="checkbox"><span class="num">4.2</span><span class="title">Performance pass</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li>Benchmarks: rows/s through the service per engine, time to first row, UI frame time while streaming, memory per 1M rows. Record the numbers in <code>docs/benchmarks.md</code>.</li>
+    </ul><div class="verify"><b>Verify:</b> first row appears in under 50 ms locally, and the UI never drops below 60 fps during streaming.</div></div></details>
+
+  <details class="step" data-id="4.3" data-done="true"><summary><input type="checkbox"><span class="num">4.3</span><span class="title">Linux packaging</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li><code>scripts/package-linux.sh</code>: release tarball, <code>.desktop</code> file and icon, a <code>systemd --user</code> unit for the service, and a PKGBUILD for Arch/Omarchy.</li>
+    </ul><div class="verify"><b>Verify:</b> install on a clean Omarchy machine. The service starts at login and sqail2 shows up in the app launcher.</div></div></details>
+
+  <details class="step" data-id="4.4"><summary><input type="checkbox"><span class="num">4.4</span><span class="title">Windows packaging</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li><code>scripts/package-windows.ps1</code>: zip, plus an MSI via the WiX v4+ CLI (<code>packaging/wix/sqail2.wxs</code>), and the service installable as a Windows Service (<code>windows-service</code> crate). Optional code signing.</li>
+    </ul><div class="verify"><b>Verify:</b> the MSI installs on a clean Windows 11 VM, the service runs, and the UI connects.</div></div></details>
+
+  <details class="step" data-id="4.5"><summary><input type="checkbox"><span class="num">4.5</span><span class="title">CI pipeline</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li>On every push: the <code>check</code> gate on Linux and Windows, and integration tests on Linux with service containers for Postgres and SQL Server. Release builds on tags.</li>
+    </ul><div class="verify"><b>Verify:</b> a PR shows green checks on both OSes.</div></div></details>
+
+  <details class="step" data-id="4.6"><summary><input type="checkbox"><span class="num">4.6</span><span class="title">Docs & 1.0 release</span><span class="chev">›</span></summary>
+    <div class="body"><ul>
+      <li>User guide, service operations guide (certs, tokens, backups of <code>service.db</code>) and the API reference from OpenAPI.</li>
+    </ul><div class="verify"><b>Verify:</b> someone new installs and runs a query using only the docs. <b>Milestone: 1.0.</b></div></div></details>
+
+<div class="note"><b>Phase 4 notes.</b>
+  <ul>
+    <li><b>Security (4.1):</b> <code>docs/security.md</code> has the threat model and checklist, and each mitigation names the test that checks it. <code>check.sh</code> runs cargo-deny and cargo-audit. <code>tests/log_leak.rs</code> captures TRACE output and proves that no token, password or row value is logged. Optional mTLS is <code>tls.client_ca</code>. The fuzzer ran for 10 minutes (13.2M inputs, 0 crashes) after it had found and fixed a real panic in the GO splitter. On first start without a terminal, the admin token goes to a 0600 file instead of the log.</li>
+    <li><b>Performance (4.2):</b> <code>docs/benchmarks.md</code>. TCP_NODELAY took <code>SELECT 1</code> from 41 ms to 0.2 ms. The service streams 1.4–2M rows/s with flat memory. On a 1M-row query the first row takes 0.7–41 ms depending on the engine, so under 50 ms on all three. UI frames average 0.9 ms while streaming (worst 6.9 ms, so always above 60 fps).</li>
+    <li><b>Linux (4.3):</b> the tarball install and uninstall were verified with a prefix. The desktop entry passes <code>desktop-file-validate</code> and the unit passes <code>systemd-analyze verify</code>. The service also ran under the unit's exact hardening flags. <code>makepkg</code> built the PKGBUILD from a local tarball (15.8 MB package; it needed <code>options=('!lto')</code>, because makepkg's C-level LTO breaks linking aws-lc). Not yet done: an install on a clean Omarchy machine.</li>
+    <li><b>Windows (4.4), still to verify:</b> <code>sqail-service service install|uninstall</code> (LocalService, <code>%ProgramData%\sqail2\service</code> ACL'd with icacls, log file, admin token printed at install), the WiX source and <code>package-windows.ps1</code>. The service module type-checks for <code>x86_64-pc-windows-gnu</code>, but nothing has run on Windows yet. <b>You:</b> build the MSI on Windows (or let CI do it on a tag), install it on a clean VM, then run <code>service install</code> and connect.</li>
+    <li><b>CI (4.5), still to verify:</b> <code>.github/workflows/sqail2.yml</code> runs fmt, clippy and tests on Linux and Windows (on Windows the GPU UI suite is informational), plus deny and audit, integration tests and the smoke test against podman databases, a 2-minute fuzz, and release builds for <code>sqail2-v*</code> tags. <b>You:</b> push, and check that both OSes go green.</li>
+    <li><b>1.0 (4.6):</b> <code>docs/user-guide.md</code>, <code>docs/operations.md</code>, <code>docs/api.md</code>, <code>docs/openapi.json</code> (a test keeps it in sync with the served spec) and <code>CHANGELOG.md</code>. The version is bumped to 1.0.0. <b>You:</b> have someone new follow the docs, then tag <code>sqail2-v1.0.0</code>.</li>
+    <li><b>Windows setup kit (after 1.0 prep):</b> <code>scripts/package-windows.ps1</code> now builds a zip and MSI with <code>setup\</code>. It contains <code>Install-SqailService</code> (Program Files, config, service, firewall, health check), <code>Uninstall-SqailService</code>, <code>New-SqailToken</code> and <code>Add-SqailSqlServer</code>, which tests a SQL Server from the gateway and saves it via the API, keeping the token and password off the command line. Double-clickable <code>.cmd</code> launchers are included, and <code>SETUP.md</code> (<code>docs/windows-setup.md</code>) covers SQL Server preparation, certificates, Windows auth with a gMSA, and troubleshooting. Verification so far: under PowerShell 7 on Linux, <code>Add-SqailSqlServer</code> was run against the podman SQL Server in 8 scenarios. PSScriptAnalyzer finds no PowerShell 5.1 incompatibilities. The installer's TOML was loaded by the service. The package script was dry-run. The service side also gained SQL Browser (named instances), <code>SERVER\INSTANCE</code> and <code>SERVER,PORT</code> host parsing, readable certificate errors, and <code>sqail-service backup</code>. The MSI is pinned to WiX 5, because WiX 6+ requires accepting the OSMF EULA. <b>Still untested on real Windows.</b> The CI <i>Run workflow</i> button builds the zip and MSI as artifacts.</li>
+    <li>While checking the docs against the code, I found that a truncated result was only reported in <i>Messages</i>. Its result tab now reads <code>Result 1 (100,000+)</code> in the warning colour.</li>
+  </ul>
+</div>
+</section>
+
+</div>
+
+<h2>Backlog: after 1.0</h2>
+<div class="card"><ul>
+  <li><b>More engines:</b> MySQL/MariaDB (<code>mysql_async</code>), DuckDB, Oracle. Each one is a new <code>Driver</code> impl, seed files, and a podman container in <code>db.sh</code>.</li>
+  <li><b>AI assistant:</b> port the sqail v1 providers (text-to-SQL, explain, fix). It runs in the service, so keys stay server-side.</li>
+  <li><b>Multi-user service:</b> OIDC / Entra ID login, per-user profile sharing and RBAC.</li>
+  <li>ER diagram view, schema diff and migration scripts, Git-versioned snippets, and import of sqail v1 connections.</li>
+  <li>Service: master-key rotation, audit-log retention, a hard read-only mode for SQL Server, and an exe icon resource and code signing on Windows.</li>
+</ul></div>
+
+</div>
+
+<script>
+(() => {
+  const KEY = 'sqail2-plan-progress-v1';
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch { saved = {}; }
+  const store = () => { try { localStorage.setItem(KEY, JSON.stringify(saved)); } catch {} };
+
+  const steps = [...document.querySelectorAll('details.step')];
+  const isDone = s => s.dataset.id in saved ? saved[s.dataset.id] : s.dataset.done === 'true';
+
+  function render() {
+    let done = 0;
+    for (const s of steps) {
+      const d = isDone(s);
+      s.classList.toggle('done', d);
+      s.querySelector('input').checked = d;
+      if (d) done++;
+    }
+    for (const ph of document.querySelectorAll('section.phase')) {
+      const ps = [...ph.querySelectorAll('details.step')];
+      ph.querySelector('.count').textContent = `${ps.filter(isDone).length} / ${ps.length} done`;
+    }
+    const pct = steps.length ? Math.round(done / steps.length * 100) : 0;
+    document.getElementById('pct').textContent = pct + '%';
+    document.getElementById('barfill').style.width = pct + '%';
+    document.getElementById('counts').textContent = `${done} / ${steps.length} steps`;
+  }
+
+  for (const s of steps) {
+    const cb = s.querySelector('input');
+    cb.addEventListener('click', e => e.stopPropagation());   // don't toggle <details>
+    cb.addEventListener('change', () => { saved[s.dataset.id] = cb.checked; store(); render(); });
+  }
+  document.getElementById('reset').addEventListener('click', () => { saved = {}; store(); render(); });
+  const exp = document.getElementById('expand');
+  exp.addEventListener('click', () => {
+    const open = exp.textContent === 'Expand all';
+    steps.forEach(s => s.open = open);
+    exp.textContent = open ? 'Collapse all' : 'Expand all';
+  });
+  // open the first unfinished step so "what's next" is obvious
+  const next = steps.find(s => !isDone(s));
+  if (next) next.open = true;
+  render();
+})();
+</script>
+</body>
+</html>

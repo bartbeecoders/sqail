@@ -16,7 +16,7 @@ use crate::ai::provider::{AiHistoryEntry, AiProviderConfig, AiProviderType};
 use crate::auth::entra;
 use crate::crypto::{self, CryptoEnvelope};
 use crate::db::connections::{
-    build_mysql_connect_options, build_pg_connect_options, ConnectionConfig, Driver,
+    build_mysql_connect_options, build_pg_connect_options, ConnectionConfig, Driver, PgSslCerts,
     MssqlAuthMethod,
 };
 use crate::metadata::{ColumnMetadata, GeneratedMetadata, ObjectMetadata};
@@ -223,6 +223,7 @@ pub async fn test_connection(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn list_databases(
     host: String,
     port: u16,
@@ -230,14 +231,22 @@ pub async fn list_databases(
     password: String,
     driver: Driver,
     ssl_mode: String,
+    ssl_root_cert: Option<String>,
+    ssl_client_cert: Option<String>,
+    ssl_client_key: Option<String>,
 ) -> Result<Vec<String>, String> {
     match driver {
         Driver::Postgres => {
+            let certs = PgSslCerts::new(
+                ssl_root_cert.as_deref().unwrap_or(""),
+                ssl_client_cert.as_deref().unwrap_or(""),
+                ssl_client_key.as_deref().unwrap_or(""),
+            );
             let pool = PgPoolOptions::new()
                 .max_connections(1)
                 .acquire_timeout(Duration::from_secs(5))
                 .connect_with(build_pg_connect_options(
-                    &host, port, &user, &password, "postgres", &ssl_mode,
+                    &host, port, &user, &password, "postgres", &ssl_mode, certs,
                 ))
                 .await
                 .map_err(|e| format!("Connection failed: {e}"))?;

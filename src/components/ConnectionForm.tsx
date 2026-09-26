@@ -1,6 +1,17 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { X, Loader2, CheckCircle2, XCircle, ExternalLink, ChevronDown, Link, FormInput } from "lucide-react";
+import {
+  X,
+  Loader2,
+  CheckCircle2,
+  XCircle,
+  ExternalLink,
+  ChevronDown,
+  Link,
+  FormInput,
+  FolderOpen,
+} from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { cn } from "../lib/utils";
 import { useConnectionStore } from "../stores/connectionStore";
 import {
@@ -8,13 +19,16 @@ import {
   type Driver,
   type MssqlAuthMethod,
   type MssqlEncryption,
+  type PgSslMode,
   defaultConnection,
   defaultPort,
   parseConnectionString,
   toConnectionString,
+  toPgSslMode,
   DRIVER_LABELS,
   MSSQL_AUTH_LABELS,
   MSSQL_ENCRYPTION_LABELS,
+  PG_SSL_MODE_LABELS,
 } from "../types/connection";
 
 interface ConnectionFormProps {
@@ -336,6 +350,64 @@ export default function ConnectionForm({ initial, onClose }: ConnectionFormProps
                 </>
               )}
 
+              {/* Postgres SSL: libpq sslmode + certificate files (root CA, client cert/key) */}
+              {form.driver === "postgres" && (
+                <>
+                  <Field label="SSL Mode">
+                    <select
+                      value={toPgSslMode(form.sslMode)}
+                      onChange={(e) => set("sslMode", e.target.value as PgSslMode)}
+                      className="input"
+                    >
+                      {(Object.keys(PG_SSL_MODE_LABELS) as PgSslMode[]).map((m) => (
+                        <option key={m} value={m}>
+                          {PG_SSL_MODE_LABELS[m]}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  {toPgSslMode(form.sslMode) !== "disable" && (
+                    <>
+                      <CertFileField
+                        label="Root CA Certificate (sslrootcert)"
+                        value={form.sslRootCert}
+                        onChange={(v) => set("sslRootCert", v)}
+                        placeholder="/path/to/root.crt"
+                      />
+                      <div className="flex gap-2">
+                        <CertFileField
+                          label="Client Certificate (sslcert)"
+                          value={form.sslClientCert}
+                          onChange={(v) => set("sslClientCert", v)}
+                          placeholder="/path/to/client.crt"
+                          className="flex-1"
+                        />
+                        <CertFileField
+                          label="Client Key (sslkey)"
+                          value={form.sslClientKey}
+                          onChange={(v) => set("sslClientKey", v)}
+                          placeholder="/path/to/client.key"
+                          className="flex-1"
+                          filters={[{ name: "Private key", extensions: ["key", "pem", "pk8"] }]}
+                        />
+                      </div>
+                      {(!!form.sslClientCert !== !!form.sslClientKey) && (
+                        <p className="text-[11px] text-warning">
+                          Client authentication needs both the certificate and the key; a single one is
+                          ignored.
+                        </p>
+                      )}
+                      <p className="text-[11px] text-muted-foreground">
+                        PEM files. The client key must be unencrypted (PKCS#8, PKCS#1 or SEC1 are accepted).
+                        Supplying a CA certificate with the default mode verifies the server
+                        (<strong>Verify CA</strong>); pick <strong>Verify full</strong> to also check the
+                        hostname.
+                      </p>
+                    </>
+                  )}
+                </>
+              )}
+
               {/* Database — combobox for PG/MySQL, plain input for others */}
               <Field label="Database">
                 {supportsDbList ? (
@@ -348,6 +420,9 @@ export default function ConnectionForm({ initial, onClose }: ConnectionFormProps
                     user={form.user}
                     password={form.password}
                     sslMode={form.sslMode}
+                    sslRootCert={form.sslRootCert}
+                    sslClientCert={form.sslClientCert}
+                    sslClientKey={form.sslClientKey}
                     placeholder={form.driver === "postgres" ? "postgres" : "mydb"}
                   />
                 ) : (
@@ -568,6 +643,9 @@ interface DatabaseComboboxProps {
   user: string;
   password: string;
   sslMode: string;
+  sslRootCert: string;
+  sslClientCert: string;
+  sslClientKey: string;
   placeholder?: string;
 }
 
@@ -580,6 +658,9 @@ function DatabaseCombobox({
   user,
   password,
   sslMode,
+  sslRootCert,
+  sslClientCert,
+  sslClientKey,
   placeholder,
 }: DatabaseComboboxProps) {
   const [databases, setDatabases] = useState<string[]>([]);
@@ -602,6 +683,9 @@ function DatabaseCombobox({
         password,
         driver,
         sslMode,
+        sslRootCert,
+        sslClientCert,
+        sslClientKey,
       });
       setDatabases(dbs);
       setFetched(true);
@@ -611,13 +695,13 @@ function DatabaseCombobox({
     } finally {
       setLoading(false);
     }
-  }, [canFetch, host, port, user, password, driver, sslMode, loading]);
+  }, [canFetch, host, port, user, password, driver, sslMode, sslRootCert, sslClientCert, sslClientKey, loading]);
 
   // Reset fetched state when connection params change
   useEffect(() => {
     setFetched(false);
     setDatabases([]);
-  }, [host, port, user, password, driver, sslMode]);
+  }, [host, port, user, password, driver, sslMode, sslRootCert, sslClientCert, sslClientKey]);
 
   const handleOpen = () => {
     if (!canFetch) return;
@@ -704,6 +788,61 @@ function DatabaseCombobox({
         </div>
       )}
     </div>
+  );
+}
+
+// ── Certificate file picker ───────────────────────────────
+
+interface CertFileFieldProps {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  className?: string;
+  filters?: { name: string; extensions: string[] }[];
+}
+
+/** Text input for a PEM file path with a native "browse" button. */
+function CertFileField({
+  label,
+  value,
+  onChange,
+  placeholder,
+  className,
+  filters = [{ name: "Certificate", extensions: ["crt", "pem", "cer"] }],
+}: CertFileFieldProps) {
+  const browse = async () => {
+    try {
+      const picked = await openDialog({
+        multiple: false,
+        directory: false,
+        filters: [...filters, { name: "All files", extensions: ["*"] }],
+      });
+      if (typeof picked === "string") onChange(picked);
+    } catch {
+      // Dialog cancelled or unavailable — leave the field as-is.
+    }
+  };
+
+  return (
+    <Field label={label} className={className}>
+      <div className="relative">
+        <input
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder}
+          className="input pr-8"
+        />
+        <button
+          type="button"
+          onClick={browse}
+          className="absolute right-0 top-0 flex h-full items-center px-2 text-muted-foreground hover:text-foreground"
+          title="Browse…"
+        >
+          <FolderOpen size={12} />
+        </button>
+      </div>
+    </Field>
   );
 }
 

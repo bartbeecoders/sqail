@@ -172,7 +172,11 @@
       "Bash(kubectl -n stasid-dev get secret postgres-pgbouncer -o jsonpath='{.data}')",
       "Bash(kubectl -n stasid-dev get cm,secret)",
       "Bash(kubectl -n stasid-dev get pods -l postgres-operator.crunchydata.com/role=master -o custom-columns=NAME:.metadata.name,ROLE:.metadata.labels.postgres-operator\\\\\\\\.crunchydata\\\\\\\\.com/role)",
-      "Bash(kubectl -n stasid-dev get pods -l postgres-operator.crunchydata.com/instance-set=instance1 -L postgres-operator.crunchydata.com/role)"
+      "Bash(kubectl -n stasid-dev get pods -l postgres-operator.crunchydata.com/instance-set=instance1 -L postgres-operator.crunchydata.com/role)",
+      "Bash(grep -n '\"version\"' package.json src-tauri/tauri.conf.json)",
+      "Bash(cat build-number.json)",
+      "Bash(head -40 releases.json)",
+      "PowerShell(pnpm install *)"
     ]
   }
 }

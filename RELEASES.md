@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+### Connections
+- PostgreSQL: certificate-based SSL. The connection form gains an **SSL Mode** selector (`disable` … `verify-full`) plus file pickers for a root CA certificate (`sslrootcert`), client certificate (`sslcert`) and client key (`sslkey`) for mutual TLS. Also round-trips these as query parameters in `postgresql://…` connection strings
+- PostgreSQL/MySQL: TLS now uses rustls instead of the OS stack (SChannel/OpenSSL). Fixes client-certificate auth against TLS 1.3-only servers on Windows ("The credentials supplied to the package were not recognized") and accepts PKCS#1 and SEC1 client keys, not only PKCS#8. Server certificates are now validated by subject alternative name only (no CN fallback) under `verify-full`
+
 ## v0.6.8
 
 ### Query execution

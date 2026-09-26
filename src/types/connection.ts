@@ -1,6 +1,8 @@
 export type Driver = "postgres" | "mysql" | "sqlite" | "mssql" | "dbservice" | "surrealdb";
 export type MssqlAuthMethod = "sql_server" | "windows" | "entra_id";
 export type MssqlEncryption = "required" | "login_only" | "off";
+/** libpq-style sslmode values. Empty string means "not set" (driver default: prefer). */
+export type PgSslMode = "" | "disable" | "allow" | "prefer" | "require" | "verify-ca" | "verify-full";
 
 export interface ConnectionConfig {
   id: string;
@@ -13,6 +15,12 @@ export interface ConnectionConfig {
   password: string;
   filePath: string;
   sslMode: string;
+  /** Postgres: path to the CA certificate (PEM) used to verify the server. */
+  sslRootCert: string;
+  /** Postgres: path to the client certificate (PEM) for mutual TLS. */
+  sslClientCert: string;
+  /** Postgres: path to the client private key (unencrypted PEM: PKCS#8, PKCS#1 or SEC1). */
+  sslClientKey: string;
   integratedSecurity: boolean;
   trustServerCertificate: boolean;
   mssqlAuthMethod: MssqlAuthMethod;
@@ -57,6 +65,9 @@ export function defaultConnection(driver: Driver = "postgres"): ConnectionConfig
     password: "",
     filePath: "",
     sslMode: "",
+    sslRootCert: "",
+    sslClientCert: "",
+    sslClientKey: "",
     integratedSecurity: false,
     trustServerCertificate: false,
     mssqlAuthMethod: "sql_server",
@@ -92,6 +103,39 @@ export const MSSQL_ENCRYPTION_LABELS: Record<MssqlEncryption, string> = {
   off: "Off",
 };
 
+export const PG_SSL_MODE_LABELS: Record<PgSslMode, string> = {
+  "": "Default (prefer)",
+  disable: "Disable",
+  allow: "Allow",
+  prefer: "Prefer",
+  require: "Require",
+  "verify-ca": "Verify CA",
+  "verify-full": "Verify full",
+};
+
+const PG_SSL_MODES = new Set<string>(Object.keys(PG_SSL_MODE_LABELS));
+
+/** Narrow an arbitrary string (e.g. from a URL query) to a known sslmode, else "". */
+export function toPgSslMode(raw: string | undefined | null): PgSslMode {
+  const v = (raw ?? "").toLowerCase();
+  return PG_SSL_MODES.has(v) ? (v as PgSslMode) : "";
+}
+
+/** Parse the `?a=b&c=d` tail of a URL-style connection string. */
+function parseQuery(s: string): Map<string, string> {
+  const q = new Map<string, string>();
+  const idx = s.indexOf("?");
+  if (idx === -1) return q;
+  for (const part of s.slice(idx + 1).split("&")) {
+    if (!part) continue;
+    const eq = part.indexOf("=");
+    const key = decodeURIComponent(eq === -1 ? part : part.slice(0, eq)).toLowerCase();
+    const val = eq === -1 ? "" : decodeURIComponent(part.slice(eq + 1));
+    q.set(key, val);
+  }
+  return q;
+}
+
 /** Parse a connection string into a partial ConnectionConfig. */
 export function parseConnectionString(raw: string): Partial<ConnectionConfig> & { driver: Driver } {
   const s = raw.trim();
@@ -99,6 +143,8 @@ export function parseConnectionString(raw: string): Partial<ConnectionConfig> & 
   // PostgreSQL: postgresql://user:pass@host:port/db  or  postgres://...
   const pgMatch = s.match(/^(?:postgres(?:ql)?):\/\/(?:([^:@]+)(?::([^@]*))?@)?([^:/]+)(?::(\d+))?(?:\/([^?]*))?/i);
   if (pgMatch) {
+    // libpq query params: sslmode, sslrootcert, sslcert, sslkey
+    const q = parseQuery(s);
     return {
       driver: "postgres",
       user: decodeURIComponent(pgMatch[1] ?? ""),
@@ -106,6 +152,10 @@ export function parseConnectionString(raw: string): Partial<ConnectionConfig> & 
       host: pgMatch[3] ?? "localhost",
       port: pgMatch[4] ? Number(pgMatch[4]) : 5432,
       database: decodeURIComponent(pgMatch[5] ?? ""),
+      sslMode: toPgSslMode(q.get("sslmode")),
+      sslRootCert: q.get("sslrootcert") ?? "",
+      sslClientCert: q.get("sslcert") ?? "",
+      sslClientKey: q.get("sslkey") ?? "",
     };
   }
 
@@ -196,7 +246,14 @@ export function toConnectionString(c: ConnectionConfig): string {
   switch (c.driver) {
     case "postgres": {
       const auth = c.user ? `${encodeURIComponent(c.user)}${c.password ? ":" + encodeURIComponent(c.password) : ""}@` : "";
-      return `postgresql://${auth}${c.host}:${c.port}/${encodeURIComponent(c.database)}`;
+      const params: string[] = [];
+      const mode = toPgSslMode(c.sslMode);
+      if (mode) params.push(`sslmode=${mode}`);
+      if (c.sslRootCert) params.push(`sslrootcert=${encodeURIComponent(c.sslRootCert)}`);
+      if (c.sslClientCert) params.push(`sslcert=${encodeURIComponent(c.sslClientCert)}`);
+      if (c.sslClientKey) params.push(`sslkey=${encodeURIComponent(c.sslClientKey)}`);
+      const query = params.length ? "?" + params.join("&") : "";
+      return `postgresql://${auth}${c.host}:${c.port}/${encodeURIComponent(c.database)}${query}`;
     }
     case "mysql": {
       const auth = c.user ? `${encodeURIComponent(c.user)}${c.password ? ":" + encodeURIComponent(c.password) : ""}@` : "";

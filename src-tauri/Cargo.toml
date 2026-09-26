@@ -23,7 +23,11 @@ tauri-plugin-log = "2"
 tauri-plugin-sql = { version = "2", features = ["sqlite", "postgres", "mysql"] }
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-sqlx = { version = "0.8", features = ["runtime-tokio", "tls-native-tls", "postgres", "mysql", "sqlite", "chrono", "uuid", "json", "bigdecimal"] }
+# TLS via rustls (already linked through tauri-plugin-sql and reqwest), not the OS stack: on Windows,
+# SChannel cannot do TLS 1.3 client-certificate auth with a key native-tls imports (CAPI), failing
+# with SEC_E_UNKNOWN_CREDENTIALS. rustls also accepts PKCS#1/PKCS#8/SEC1 keys. Native roots keep the
+# OS trust store for verify-ca/verify-full, as before.
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls-ring-native-roots", "postgres", "mysql", "sqlite", "chrono", "uuid", "json", "bigdecimal"] }
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 hex = "0.4"

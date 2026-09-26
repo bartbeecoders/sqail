@@ -4,6 +4,9 @@
 
 ## Unreleased
 
+### Dev tooling
+- `scripts/run.sh` prefers an nvm Node ≥ 22.13 toolchain (so a newer `~/.npm-global` pnpm cannot hang on `pnpm install`), installs deps when the local Tauri CLI is missing, and launches via `pnpm exec tauri`
+
 ## v0.6.8
 
 ### Query execution

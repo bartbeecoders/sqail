@@ -1,0 +1,42 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+repository = "https://codeberg.org/bartbeecoders/sqail"
+# Application crates; not published to crates.io.
+publish = false
+
+[workspace.dependencies]
+sqail-proto = { path = "crates/sqail-proto" }
+sqail-client = { path = "crates/sqail-client" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# tokio-postgres with the column type OID exposed on simple-query results.
+# See vendor/tokio-postgres/SQAIL2-PATCH.md.
+[patch.crates-io]
+tokio-postgres = { path = "vendor/tokio-postgres" }
+
+# Optimised, but panics unwind so the fuzzer can catch and report them.
+[profile.fuzz]
+inherits = "release"
+panic = "unwind"
+debug = "line-tables-only"

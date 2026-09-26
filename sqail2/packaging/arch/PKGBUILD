@@ -1,0 +1,58 @@
+# Maintainer: bartbeecoders
+# Arch / Omarchy package built from source:  makepkg -si
+pkgname=sqail2
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Fast SQL editor (PostgreSQL, SQL Server, SQLite) with a secure HTTPS service"
+arch=('x86_64' 'aarch64')
+url="https://codeberg.org/bartbeecoders/sqail"
+license=('MIT')
+depends=('gcc-libs' 'glibc' 'fontconfig' 'libxkbcommon' 'wayland' 'vulkan-icd-loader')
+optdepends=('podman: local test databases for development'
+            'gnome-keyring: store the API token in the Secret Service')
+makedepends=('cargo' 'clang' 'cmake')
+# sqail2 releases are tagged sqail2-v<version> (plain v* tags are the Tauri app).
+source=("$pkgname-$pkgver.tar.gz::$url/archive/sqail2-v$pkgver.tar.gz")
+sha256sums=('SKIP')
+# makepkg's C-level LTO turns aws-lc into GCC bitcode that rust-lld cannot link;
+# Rust already builds with LTO (release profile).
+options=('!lto')
+
+prepare() {
+    cd "sqail/sqail2"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "sqail/sqail2"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --frozen --release -p sqail-ui -p sqail-service
+}
+
+check() {
+    cd "sqail/sqail2"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo test --frozen --release -p sqail-proto -p sqail-service --lib
+}
+
+package() {
+    cd "sqail/sqail2"
+    install -Dm755 target/release/sqail2 "$pkgdir/usr/bin/sqail2"
+    install -Dm755 target/release/sqail-service "$pkgdir/usr/bin/sqail-service"
+    install -Dm644 packaging/linux/sqail2.desktop "$pkgdir/usr/share/applications/sqail2.desktop"
+    for s in 16 32 48 64 128 256 512; do
+        install -Dm644 "packaging/icons/sqail2-$s.png" "$pkgdir/usr/share/icons/hicolor/${s}x${s}/apps/sqail2.png"
+    done
+    install -Dm644 packaging/icons/sqail2.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/sqail2.svg"
+    sed 's|%h/.local/bin/sqail-service|/usr/bin/sqail-service|' packaging/linux/sqail-service.service \
+        | install -Dm644 /dev/stdin "$pkgdir/usr/lib/systemd/user/sqail-service.service"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 crates/sqail-ui/assets/fonts/Inter-OFL.txt "$pkgdir/usr/share/licenses/$pkgname/Inter-OFL.txt"
+    install -Dm644 crates/sqail-ui/assets/fonts/JetBrainsMono-OFL.txt "$pkgdir/usr/share/licenses/$pkgname/JetBrainsMono-OFL.txt"
+    install -Dm644 dev/sqail-service.example.toml "$pkgdir/usr/share/doc/$pkgname/sqail-service.example.toml"
+    for d in docs/user-guide.md docs/operations.md docs/security.md docs/api.md; do
+        install -Dm644 "$d" "$pkgdir/usr/share/doc/$pkgname/$(basename "$d")"
+    done
+}

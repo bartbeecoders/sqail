@@ -1,0 +1,19 @@
+[package]
+name = "sqail-fuzz"
+description = "Time-boxed randomized fuzzing of sqail's parsers (stable Rust, no cargo-fuzz)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+sqail-proto.workspace = true
+sqail-client.workspace = true
+sqail-service = { path = "../sqail-service" }
+sqail-ui = { path = "../sqail-ui" }
+serde_json.workspace = true
+uuid = { version = "1", features = ["v4"] }
+
+[lints]
+workspace = true

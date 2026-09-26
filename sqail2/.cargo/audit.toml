@@ -1,0 +1,6 @@
+# cargo-audit config. Every ignore needs a reason:
+# RUSTSEC-2026-0097: rand 0.7 "unsound with a custom logger using rand::rng()",
+#   pulled in only by tiberius' Windows-only `winauth` (integrated auth); sqail
+#   never installs a logger that calls rand. Revisit when tiberius drops it.
+[advisories]
+ignore = ["RUSTSEC-2026-0097"]

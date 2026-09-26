@@ -1,0 +1,127 @@
+# sqail2
+
+A fast, native SQL editor (Rust UI) backed by **sqail-service**, an HTTPS REST
+gateway that holds the database connections. Supports PostgreSQL, SQL Server and
+SQLite; runs on Linux (Omarchy) and Windows.
+
+**Plan and progress:** open [`PLAN.html`](PLAN.html) in a browser.
+
+**Docs:** [user guide](docs/user-guide.md) · [Windows + SQL Server setup](docs/windows-setup.md) · [operations](docs/operations.md)
+(certificates, tokens, backups, services) · [REST API](docs/api.md) ·
+[security](docs/security.md) · [benchmarks](docs/benchmarks.md) ·
+[changelog](CHANGELOG.md)
+
+## Install
+
+| Platform | How |
+|---|---|
+| Linux | `dist/sqail2-<ver>-linux-x86_64.tar.gz` → `./install.sh` (per user; `--prefix /usr` system-wide) |
+| Arch / Omarchy | `makepkg -si` in `packaging/arch/` |
+| Windows | `sqail2-<ver>-windows-x64.msi`, or the portable `.zip` |
+
+Build the packages yourself with `scripts/package-linux.sh` or
+`.\scripts\package-windows.ps1` (MSI needs the WiX 5 CLI:
+`dotnet tool install --global wix --version 5.0.2`).
+
+## Quick start
+
+Prerequisites: Rust (rustup, 1.95+), podman, curl. On Windows you also need
+the MSVC build tools and Podman Desktop (`podman machine init; podman machine start`).
+
+```bash
+scripts/db.sh up         # test databases (Postgres, SQL Server, SQLite)
+scripts/check.sh --it    # fmt + clippy + unit and integration tests
+scripts/smoke.sh         # end-to-end curl test against all three engines
+scripts/dev.sh           # DBs + service + UI
+```
+
+Windows uses the same names: `.\scripts\db.ps1 up`, `.\scripts\check.ps1 -It`, …
+
+## sqail2 (the editor)
+
+`scripts/dev.sh` starts everything. On first run it sets up the local
+service and pins its certificate, and the token goes into the OS credential
+store. To use a remote service, choose **Service → Connect to a service…**
+and enter its URL and a token. You'll be asked to confirm the certificate
+fingerprint.
+
+| Keys | Action |
+|---|---|
+| Ctrl+Enter | Run the statement at the cursor, or the selection |
+| F5 / Ctrl+Shift+Enter | Run the whole script |
+| Esc | Cancel the running query |
+| Ctrl+E | Show the query plan of the statement at the cursor |
+| Ctrl+Space | Complete (also opens by itself while typing) |
+| Ctrl+Shift+F | Format the selection or the whole tab |
+| Ctrl+Shift+P / Ctrl+P | Command palette / open a table or snippet |
+| Ctrl+T / Ctrl+W | New / close tab |
+| Ctrl+O / Ctrl+S / Ctrl+Shift+S | Open / save / save as |
+| Ctrl+F | Find and replace |
+| F2 | Edit the selected cell (in edit mode) |
+
+Rebind keys in `keybindings.toml` in the config dir, for example
+`"query.run" = "Ctrl+R"`. Command ids are listed in the command palette's
+source, `crates/sqail-ui/src/commands.rs`.
+
+Each tab has its own server session, so `BEGIN … COMMIT` works across
+runs. You can also switch off **Auto-commit** for a tab. Result grids sort when you click a header. Click, or Shift+click, to
+select cells, and Ctrl+C copies them as TSV. Double-click a cell to see its
+full value. **Export** a result, or re-run the query straight to CSV, JSON,
+Excel or SQL. **✎ Edit data** edits a single-table result in place and
+applies the changes in one transaction. Right-click a table in the sidebar
+for *SELECT top 100*, *Import CSV…* or *Script CREATE*. History and snippets
+live in the sidebar, and open tabs come back after a restart.
+
+UI tests run headlessly (`cargo test -p sqail-ui`) and write screenshots to
+`target/ui-shots/`. The fuzzer runs time-boxed on stable Rust:
+`cargo run --profile fuzz -p sqail-fuzz -- 60`.
+
+## sqail-service
+
+```bash
+scripts/service.sh                                          # https://127.0.0.1:7443
+scripts/service.sh token create --name me --scope admin     # prints a new token
+scripts/service.sh token list | revoke <id>
+scripts/service.sh fingerprint                              # cert fingerprint to pin
+```
+
+On first start the service creates `service.db`, `master.key` and a
+self-signed certificate in its data directory. It also prints a one-time
+**admin token** (or, without a terminal, writes it to
+`bootstrap-admin-token.txt` there). On Windows, `sqail-service service
+install` runs it as a Windows service; on Linux a systemd user unit ships in
+`packaging/linux/`. See [docs/operations.md](docs/operations.md). The dev scripts use `.sqail2/service/` in this repo as the
+data directory. For configuration, see
+[`dev/sqail-service.example.toml`](dev/sqail-service.example.toml).
+
+API reference: `GET /v1/openapi.json`, or the interactive docs at `/docs` in
+debug builds. Query results stream as NDJSON, one `QueryEvent` per line:
+
+```bash
+curl -sk -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  https://127.0.0.1:7443/v1/connections/$ID/query -d '{"sql":"SELECT 1"}'
+```
+
+## Layout
+
+| Path | What |
+|---|---|
+| `crates/sqail-proto` | REST wire types shared by service and clients |
+| `crates/sqail-service` | the gateway: auth, profiles, drivers, streaming |
+| `crates/sqail-client` | typed async client with certificate pinning |
+| `crates/sqail-ui` | the desktop app (egui), binary `sqail2` |
+| `dev/seed` | identical test schema for every engine |
+| `crates/sqail-fuzz` | stable, time-boxed fuzzer for the parsers and the NDJSON decoder |
+| `vendor/tokio-postgres` | tokio-postgres plus a one-field patch; see its `SQAIL2-PATCH.md` |
+| `packaging/` | icons, desktop entry, systemd unit, installer, PKGBUILD, WiX source |
+| `docs/` | user, operations, API, security docs and `openapi.json` |
+
+## Releasing
+
+1. Bump `version` in `Cargo.toml` (and `pkgver` in `packaging/arch/PKGBUILD`),
+   add a `CHANGELOG.md` entry, regenerate `docs/openapi.json`
+   (`SQAIL2_BLESS=1 cargo test -p sqail-service --test it openapi`).
+2. `scripts/check.sh --it` and `scripts/smoke.sh`.
+3. Tag `sqail2-v<version>` and push it. CI (`.github/workflows/sqail2.yml`
+   in the repository root) runs every check and attaches the Linux tarball and the
+   Windows zip/MSI to a release.

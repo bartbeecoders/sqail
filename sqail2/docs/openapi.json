@@ -1,0 +1,2429 @@
+{
+  "components": {
+    "schemas": {
+      "AuditEntry": {
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "actor": {
+            "description": "Token name, or `cli` for local administrative commands.",
+            "type": "string"
+          },
+          "at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "duration_ms": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "success": {
+            "type": "boolean"
+          },
+          "target": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "at",
+          "actor",
+          "action",
+          "success"
+        ],
+        "type": "object"
+      },
+      "AuditPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AuditEntry"
+            },
+            "type": "array"
+          },
+          "next_before": {
+            "description": "Pass as `before` to fetch the next (older) page.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
+      "Column": {
+        "properties": {
+          "logical": {
+            "$ref": "#/components/schemas/LogicalType"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type_name": {
+            "description": "The engine's own type name, e.g. `int4`, `nvarchar`, `INTEGER`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "type_name",
+          "logical"
+        ],
+        "type": "object"
+      },
+      "ColumnInfo": {
+        "properties": {
+          "data_type": {
+            "type": "string"
+          },
+          "default": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "nullable": {
+            "type": "boolean"
+          },
+          "ordinal": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "primary_key": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "ordinal",
+          "data_type",
+          "nullable",
+          "primary_key"
+        ],
+        "type": "object"
+      },
+      "Connection": {
+        "description": "A stored connection profile as returned by the API (never includes secrets).",
+        "properties": {
+          "color": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "engine": {
+            "$ref": "#/components/schemas/Engine"
+          },
+          "environment": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "folder": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "has_password": {
+            "type": "boolean"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "params": {
+            "$ref": "#/components/schemas/ConnectionParams"
+          },
+          "read_only": {
+            "type": "boolean"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "engine",
+          "params",
+          "has_password",
+          "read_only",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "ConnectionInput": {
+        "description": "Body of `POST /v1/connections` and `PUT /v1/connections/{id}`.",
+        "properties": {
+          "color": {
+            "description": "UI accent colour, e.g. `#c0392b` for production.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "environment": {
+            "description": "Free-form environment tag, e.g. `dev`, `test`, `prod`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "folder": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "params": {
+            "$ref": "#/components/schemas/ConnectionParams"
+          },
+          "password": {
+            "description": "Write-only. On update: `None` keeps the stored password, `\"\"` clears it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "read_only": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "params"
+        ],
+        "type": "object"
+      },
+      "ConnectionParams": {
+        "description": "Engine-specific connection parameters. Secrets are *not* part of this type;\nsee [`ConnectionInput::password`].",
+        "oneOf": [
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PostgresParams"
+              },
+              {
+                "properties": {
+                  "engine": {
+                    "enum": [
+                      "postgres"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "engine"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/MssqlParams"
+              },
+              {
+                "properties": {
+                  "engine": {
+                    "enum": [
+                      "mssql"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "engine"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SqliteParams"
+              },
+              {
+                "properties": {
+                  "engine": {
+                    "enum": [
+                      "sqlite"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "engine"
+                ],
+                "type": "object"
+              }
+            ]
+          }
+        ]
+      },
+      "CreateSession": {
+        "properties": {
+          "connection_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "connection_id"
+        ],
+        "type": "object"
+      },
+      "CreateToken": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          }
+        },
+        "required": [
+          "name",
+          "scope"
+        ],
+        "type": "object"
+      },
+      "CreatedToken": {
+        "description": "Returned once on creation; the secret is never retrievable again.",
+        "properties": {
+          "info": {
+            "$ref": "#/components/schemas/TokenInfo"
+          },
+          "token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "info",
+          "token"
+        ],
+        "type": "object"
+      },
+      "Ddl": {
+        "properties": {
+          "ddl": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ddl"
+        ],
+        "type": "object"
+      },
+      "Engine": {
+        "description": "Database engines sqail knows how to talk to.",
+        "enum": [
+          "postgres",
+          "mssql",
+          "sqlite"
+        ],
+        "type": "string"
+      },
+      "ExplainRequest": {
+        "description": "Body of `POST /v1/connections/{id}/explain` and `/v1/sessions/{id}/explain`.",
+        "properties": {
+          "analyze": {
+            "description": "Execute the statement to get actual row counts and timings. It runs\ninside a transaction that is always rolled back (Postgres, SQL\nServer); SQLite has no analyze mode and returns the estimated plan.",
+            "type": "boolean"
+          },
+          "sql": {
+            "description": "One statement.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sql"
+        ],
+        "type": "object"
+      },
+      "ForeignKeyInfo": {
+        "properties": {
+          "columns": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          },
+          "ref_columns": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "ref_schema": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ref_table": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "columns",
+          "ref_table",
+          "ref_columns"
+        ],
+        "type": "object"
+      },
+      "Health": {
+        "description": "`GET /v1/health` — unauthenticated liveness probe.",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "version"
+        ],
+        "type": "object"
+      },
+      "IndexInfo": {
+        "properties": {
+          "columns": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          },
+          "primary": {
+            "type": "boolean"
+          },
+          "unique": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "columns",
+          "unique",
+          "primary"
+        ],
+        "type": "object"
+      },
+      "LogicalType": {
+        "description": "How a column's cells are encoded in JSON and should be displayed.\n\nCell encoding: `null` for SQL NULL; otherwise `Bool` → bool, `Int` → number\n(i64 — beware JavaScript clients past 2^53), `Float` → number (NaN/±Inf as\nstrings), `Bytes` → lowercase hex string, everything else → string\n(`Decimal` keeps full precision, temporals are ISO-8601, `Json` is JSON text).",
+        "enum": [
+          "bool",
+          "int",
+          "float",
+          "decimal",
+          "text",
+          "bytes",
+          "date",
+          "time",
+          "timestamp",
+          "timestamp_tz",
+          "uuid",
+          "json",
+          "other"
+        ],
+        "type": "string"
+      },
+      "MssqlAuth": {
+        "oneOf": [
+          {
+            "description": "SQL Server login; the password goes in [`ConnectionInput::password`].",
+            "properties": {
+              "method": {
+                "enum": [
+                  "sql"
+                ],
+                "type": "string"
+              },
+              "user": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "user",
+              "method"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Windows integrated auth (only when the service runs on Windows).",
+            "properties": {
+              "method": {
+                "enum": [
+                  "integrated"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "method"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "MssqlEncrypt": {
+        "enum": [
+          "off",
+          "on",
+          "required"
+        ],
+        "type": "string"
+      },
+      "MssqlParams": {
+        "properties": {
+          "auth": {
+            "$ref": "#/components/schemas/MssqlAuth"
+          },
+          "database": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "encrypt": {
+            "$ref": "#/components/schemas/MssqlEncrypt"
+          },
+          "host": {
+            "type": "string"
+          },
+          "instance": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "port": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "trust_server_certificate": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "host",
+          "auth"
+        ],
+        "type": "object"
+      },
+      "NamedItem": {
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "Param": {
+        "description": "A bind parameter. JSON `null`, booleans, numbers and strings map directly.",
+        "oneOf": [
+          {
+            "default": null,
+            "type": "null"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "format": "int64",
+            "type": "integer"
+          },
+          {
+            "format": "double",
+            "type": "number"
+          },
+          {
+            "type": "string"
+          }
+        ]
+      },
+      "PgSslMode": {
+        "description": "Same meaning as libpq's `sslmode`.",
+        "enum": [
+          "disable",
+          "prefer",
+          "require",
+          "verify-full"
+        ],
+        "type": "string"
+      },
+      "Plan": {
+        "properties": {
+          "analyzed": {
+            "type": "boolean"
+          },
+          "raw": {
+            "description": "The engine's own output (JSON, XML or text).",
+            "type": "string"
+          },
+          "roots": {
+            "description": "One root per statement.",
+            "items": {
+              "$ref": "#/components/schemas/PlanNode"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "roots",
+          "raw",
+          "analyzed"
+        ],
+        "type": "object"
+      },
+      "PlanNode": {
+        "description": "One operator in a query plan, engine-neutral.",
+        "properties": {
+          "actual_ms": {
+            "description": "Actual time of this subtree in ms (analyze only, Postgres).",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "actual_rows": {
+            "description": "Actual rows (analyze only).",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "children": {
+            "items": {
+              "$ref": "#/components/schemas/PlanNode"
+            },
+            "type": "array"
+          },
+          "cost": {
+            "description": "Estimated cost of this subtree (engine units).",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "label": {
+            "description": "Operator, e.g. `Hash Join`, `Clustered Index Seek`, `SCAN orders`.",
+            "type": "string"
+          },
+          "object": {
+            "description": "Object the operator works on (table/index), when known.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "props": {
+            "items": {
+              "$ref": "#/components/schemas/PlanProp"
+            },
+            "type": "array"
+          },
+          "rows": {
+            "description": "Estimated rows.",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "label",
+          "props",
+          "children"
+        ],
+        "type": "object"
+      },
+      "PlanProp": {
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "value"
+        ],
+        "type": "object"
+      },
+      "PostgresParams": {
+        "properties": {
+          "database": {
+            "type": "string"
+          },
+          "host": {
+            "type": "string"
+          },
+          "port": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "ssl_mode": {
+            "$ref": "#/components/schemas/PgSslMode"
+          },
+          "user": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "host",
+          "database",
+          "user"
+        ],
+        "type": "object"
+      },
+      "Problem": {
+        "description": "Error body for every non-2xx response (`application/problem+json`).",
+        "properties": {
+          "code": {
+            "description": "Stable machine-readable code, e.g. `unauthorized`, `not_found`.",
+            "type": "string"
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "status",
+          "code"
+        ],
+        "type": "object"
+      },
+      "QueryEvent": {
+        "description": "One line of a streamed query response.\n\nOrder: `started`, then for every statement either\n`result_start` → `rows`* → `result_end`, or `rows_affected`; `message`s may\nappear anywhere; finally exactly one `done`. An `error` ends the script\nearly but is still followed by `done`.",
+        "oneOf": [
+          {
+            "properties": {
+              "event": {
+                "enum": [
+                  "started"
+                ],
+                "type": "string"
+              },
+              "query_id": {
+                "format": "uuid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "query_id",
+              "event"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "columns": {
+                "items": {
+                  "$ref": "#/components/schemas/Column"
+                },
+                "type": "array"
+              },
+              "event": {
+                "enum": [
+                  "result_start"
+                ],
+                "type": "string"
+              },
+              "index": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "index",
+              "columns",
+              "event"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "event": {
+                "enum": [
+                  "rows"
+                ],
+                "type": "string"
+              },
+              "index": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "rows": {
+                "items": {
+                  "items": {
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "index",
+              "rows",
+              "event"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "event": {
+                "enum": [
+                  "result_end"
+                ],
+                "type": "string"
+              },
+              "index": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "row_count": {
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "truncated": {
+                "description": "`max_rows` was hit; further rows were discarded.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "index",
+              "row_count",
+              "truncated",
+              "event"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "count": {
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "event": {
+                "enum": [
+                  "rows_affected"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "count",
+              "event"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "event": {
+                "enum": [
+                  "message"
+                ],
+                "type": "string"
+              },
+              "severity": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "severity",
+              "text",
+              "event"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "db_code": {
+                "description": "SQLSTATE (Postgres) or error number (SQL Server), when known.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "event": {
+                "enum": [
+                  "error"
+                ],
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "event"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "cancelled": {
+                "type": "boolean"
+              },
+              "elapsed_ms": {
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "event": {
+                "enum": [
+                  "done"
+                ],
+                "type": "string"
+              },
+              "in_transaction": {
+                "description": "Session queries only: whether a transaction is still open.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "elapsed_ms",
+              "cancelled",
+              "event"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "QueryRequest": {
+        "description": "Body of `POST /v1/connections/{id}/query` and `POST /v1/sessions/{id}/query`.",
+        "properties": {
+          "max_rows": {
+            "description": "Row cap *per result set*; the service enforces its own maximum.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "params": {
+            "items": {
+              "$ref": "#/components/schemas/Param"
+            },
+            "type": "array"
+          },
+          "sql": {
+            "description": "One or more statements. SQL Server scripts may use `GO` separators.\nWith `params`, exactly one statement is allowed; placeholders are the\nengine's native ones (`$1` Postgres, `@P1` SQL Server, `?1` SQLite).",
+            "type": "string"
+          },
+          "timeout_ms": {
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "sql"
+        ],
+        "type": "object"
+      },
+      "RoutineInfo": {
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/RoutineKind"
+          },
+          "name": {
+            "type": "string"
+          },
+          "schema": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "RoutineKind": {
+        "enum": [
+          "function",
+          "procedure"
+        ],
+        "type": "string"
+      },
+      "Scope": {
+        "description": "What an API token may do. Ordered: `Admin` > `Query` > `Read`.",
+        "enum": [
+          "read",
+          "query",
+          "admin"
+        ],
+        "type": "string"
+      },
+      "ServiceInfo": {
+        "description": "`GET /v1/info` — what this service supports.",
+        "properties": {
+          "api_version": {
+            "type": "string"
+          },
+          "engines": {
+            "items": {
+              "$ref": "#/components/schemas/Engine"
+            },
+            "type": "array"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope",
+            "description": "Scope of the token that made the request."
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "api_version",
+          "engines",
+          "scope"
+        ],
+        "type": "object"
+      },
+      "SessionInfo": {
+        "properties": {
+          "busy": {
+            "type": "boolean"
+          },
+          "connection_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "idle_timeout_secs": {
+            "description": "Idle sessions are closed (and rolled back) after this many seconds.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "in_transaction": {
+            "type": "boolean"
+          },
+          "last_used_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "connection_id",
+          "created_at",
+          "last_used_at",
+          "in_transaction",
+          "busy",
+          "idle_timeout_secs"
+        ],
+        "type": "object"
+      },
+      "SqliteParams": {
+        "properties": {
+          "create": {
+            "description": "Create the file if it does not exist.",
+            "type": "boolean"
+          },
+          "path": {
+            "description": "Absolute path on the *service* host. Must be inside one of the\nservice's allowed SQLite directories.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "TableInfo": {
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/TableKind"
+          },
+          "name": {
+            "type": "string"
+          },
+          "schema": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "TableKind": {
+        "enum": [
+          "table",
+          "view",
+          "materialized_view"
+        ],
+        "type": "string"
+      },
+      "TestResult": {
+        "description": "Result of a connection test.",
+        "properties": {
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "latency_ms": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "server_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "ok",
+          "latency_ms"
+        ],
+        "type": "object"
+      },
+      "TokenInfo": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "last_used_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "revoked": {
+            "type": "boolean"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "scope",
+          "created_at",
+          "revoked"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "HTTPS gateway between sqail2 and SQL databases. Query results stream as NDJSON (`application/x-ndjson`), one `QueryEvent` per line.",
+    "license": {
+      "identifier": "MIT",
+      "name": "MIT"
+    },
+    "title": "sqail-service",
+    "version": "1.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/v1/audit": {
+      "get": {
+        "operationId": "list",
+        "parameters": [
+          {
+            "description": "Return entries older than this id (from `next_before`).",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Page size, 1-500 (default 100).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditPage"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Newest first.",
+        "tags": [
+          "audit"
+        ]
+      }
+    },
+    "/v1/connections": {
+      "get": {
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Connection"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "connections"
+        ]
+      },
+      "post": {
+        "operationId": "create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectionInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Connection"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/v1/connections/test": {
+      "post": {
+        "operationId": "test_unsaved",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectionInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestResult"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Test a profile before saving it. Admin only: it connects to arbitrary hosts.",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/v1/connections/{id}": {
+      "delete": {
+        "operationId": "delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "connections"
+        ]
+      },
+      "get": {
+        "operationId": "get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Connection"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "connections"
+        ]
+      },
+      "put": {
+        "operationId": "update",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectionInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Connection"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/v1/connections/{id}/ddl": {
+      "get": {
+        "operationId": "ddl",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Defaults to the connection's current schema.",
+            "in": "query",
+            "name": "schema",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Table, view or routine name.",
+            "in": "query",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ddl"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Best-effort CREATE script for a table, view or routine.",
+        "tags": [
+          "schema"
+        ]
+      }
+    },
+    "/v1/connections/{id}/explain": {
+      "post": {
+        "operationId": "on_connection",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExplainRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Plan"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Plan for one statement on a pooled connection.",
+        "tags": [
+          "queries"
+        ]
+      }
+    },
+    "/v1/connections/{id}/query": {
+      "post": {
+        "operationId": "run",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Client-chosen id, usable with DELETE /v1/queries/{id}",
+            "in": "header",
+            "name": "x-query-id",
+            "required": false,
+            "schema": {
+              "format": "uuid",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryEvent"
+                }
+              }
+            },
+            "description": "NDJSON stream of QueryEvent"
+          }
+        },
+        "summary": "Run a script on a pooled connection; the response streams `QueryEvent`s.",
+        "tags": [
+          "queries"
+        ]
+      }
+    },
+    "/v1/connections/{id}/schema/columns": {
+      "get": {
+        "operationId": "columns",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Defaults to the connection's current schema.",
+            "in": "query",
+            "name": "schema",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Table, view or routine name.",
+            "in": "query",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ColumnInfo"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "schema"
+        ]
+      }
+    },
+    "/v1/connections/{id}/schema/databases": {
+      "get": {
+        "operationId": "databases",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/NamedItem"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "schema"
+        ]
+      }
+    },
+    "/v1/connections/{id}/schema/foreign-keys": {
+      "get": {
+        "operationId": "foreign_keys",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Defaults to the connection's current schema.",
+            "in": "query",
+            "name": "schema",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Table, view or routine name.",
+            "in": "query",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ForeignKeyInfo"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "schema"
+        ]
+      }
+    },
+    "/v1/connections/{id}/schema/indexes": {
+      "get": {
+        "operationId": "indexes",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Defaults to the connection's current schema.",
+            "in": "query",
+            "name": "schema",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Table, view or routine name.",
+            "in": "query",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/IndexInfo"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "schema"
+        ]
+      }
+    },
+    "/v1/connections/{id}/schema/routines": {
+      "get": {
+        "operationId": "routines",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Limit to one schema.",
+            "in": "query",
+            "name": "schema",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RoutineInfo"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "schema"
+        ]
+      }
+    },
+    "/v1/connections/{id}/schema/schemas": {
+      "get": {
+        "operationId": "schemas",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/NamedItem"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "schema"
+        ]
+      }
+    },
+    "/v1/connections/{id}/schema/tables": {
+      "get": {
+        "operationId": "tables",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Limit to one schema.",
+            "in": "query",
+            "name": "schema",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/TableInfo"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "schema"
+        ]
+      }
+    },
+    "/v1/connections/{id}/test": {
+      "post": {
+        "operationId": "test_saved",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestResult"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Open a fresh connection with a stored profile and report the server version.",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/v1/health": {
+      "get": {
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ],
+        "summary": "Liveness probe (no authentication).",
+        "tags": [
+          "meta"
+        ]
+      }
+    },
+    "/v1/info": {
+      "get": {
+        "operationId": "info",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceInfo"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Service version and capabilities, plus the caller's scope.",
+        "tags": [
+          "meta"
+        ]
+      }
+    },
+    "/v1/queries/{id}": {
+      "delete": {
+        "operationId": "cancel",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {},
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Cancel a running query. Only its owner (or an admin) may cancel it.",
+        "tags": [
+          "queries"
+        ]
+      }
+    },
+    "/v1/sessions": {
+      "get": {
+        "operationId": "session_list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SessionInfo"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "sessions"
+        ]
+      },
+      "post": {
+        "operationId": "session_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSession"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionInfo"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Open a dedicated connection. Idle sessions close after `idle_timeout_secs`,\nrolling back any open transaction.",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/{id}": {
+      "delete": {
+        "operationId": "session_close",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {}
+        },
+        "summary": "Close a session. An open transaction is rolled back by the server.",
+        "tags": [
+          "sessions"
+        ]
+      },
+      "get": {
+        "operationId": "session_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionInfo"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/{id}/explain": {
+      "post": {
+        "operationId": "on_session",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExplainRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Plan"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Plan for one statement on a session (sees its temp tables and settings).",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/{id}/query": {
+      "post": {
+        "operationId": "session_run",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-query-id",
+            "required": false,
+            "schema": {
+              "format": "uuid",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryEvent"
+                }
+              }
+            },
+            "description": "NDJSON stream of QueryEvent"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Run a script on the session's connection. One query at a time per session.",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/tokens": {
+      "get": {
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/TokenInfo"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "tokens"
+        ]
+      },
+      "post": {
+        "operationId": "create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateToken"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedToken"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Create a token. The secret is returned once and never stored in clear.",
+        "tags": [
+          "tokens"
+        ]
+      }
+    },
+    "/v1/tokens/{id}": {
+      "delete": {
+        "operationId": "revoke",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "tokens"
+        ]
+      }
+    }
+  },
+  "security": [
+    {
+      "bearer": []
+    }
+  ],
+  "tags": [
+    {
+      "description": "Health and service info",
+      "name": "meta"
+    },
+    {
+      "description": "API tokens (admin)",
+      "name": "tokens"
+    },
+    {
+      "description": "Connection profiles",
+      "name": "connections"
+    },
+    {
+      "description": "Running SQL",
+      "name": "queries"
+    },
+    {
+      "description": "Dedicated connections for transactions",
+      "name": "sessions"
+    },
+    {
+      "description": "Catalog browsing",
+      "name": "schema"
+    },
+    {
+      "description": "Audit log (admin)",
+      "name": "audit"
+    }
+  ]
+}

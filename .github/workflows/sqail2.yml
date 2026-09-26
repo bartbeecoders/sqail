@@ -1,0 +1,140 @@
+name: sqail2
+
+# CI for the Rust rewrite in sqail2/. Kept separate from release.yml (the
+# Tauri app, tags v*); sqail2 releases use tags sqail2-v*.
+on:
+  push:
+    branches: [main]
+    paths: ["sqail2/**", ".github/workflows/sqail2.yml"]
+    tags: ["sqail2-v*"]
+  pull_request:
+    paths: ["sqail2/**", ".github/workflows/sqail2.yml"]
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: sqail2
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sqail2
+      - name: Software Vulkan for the headless UI tests
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Tests
+        if: runner.os == 'Linux'
+        run: cargo test --workspace
+      - name: Tests (without the GPU-rendered UI suite)
+        if: runner.os == 'Windows'
+        run: cargo test --workspace --exclude sqail-ui
+      - name: UI tests (WARP adapter; informational)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        run: cargo test -p sqail-ui
+
+  supply-chain:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-audit
+      - run: cargo deny check --hide-inclusion-graph
+      - run: cargo audit
+
+  integration:
+    # Postgres + SQL Server in podman (preinstalled on the Ubuntu runners),
+    # seeded by the same script developers use.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sqail2
+      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers sqlite3
+      - run: ./scripts/db.sh up
+      - run: SQAIL2_IT=1 cargo test --workspace -- --ignored
+      - run: ./scripts/smoke.sh
+      - name: Container logs on failure
+        if: failure()
+        run: podman logs sqail2-mssql | tail -50; podman logs sqail2-postgres | tail -50
+
+  fuzz:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sqail2
+      - run: cargo run --profile fuzz -p sqail-fuzz -- 120
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-crashes
+          path: sqail2/fuzz-crash-*.txt
+
+  package:
+    # Tags publish a release; "Run workflow" (workflow_dispatch) just builds
+    # the packages and attaches them to the run as downloadable artifacts.
+    if: startsWith(github.ref, 'refs/tags/sqail2-v') || github.event_name == 'workflow_dispatch'
+    needs: [check, supply-chain, integration]
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sqail2
+      - name: Linux tarball
+        if: runner.os == 'Linux'
+        run: ./scripts/package-linux.sh
+      - name: Windows zip + MSI
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # WiX 5: v6+ requires accepting the OSMF EULA.
+          dotnet tool install --global wix --version 5.0.2
+          ./scripts/package-windows.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sqail2-${{ runner.os }}
+          path: |
+            sqail2/dist/*.tar.gz
+            sqail2/dist/*.zip
+            sqail2/dist/*.msi
+            sqail2/dist/*.sha256
+      - if: startsWith(github.ref, 'refs/tags/sqail2-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            sqail2/dist/*.tar.gz
+            sqail2/dist/*.zip
+            sqail2/dist/*.msi
+            sqail2/dist/*.sha256
+          fail_on_unmatched_files: false

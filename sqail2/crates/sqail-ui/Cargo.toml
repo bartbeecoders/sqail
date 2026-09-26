@@ -1,0 +1,46 @@
+[package]
+name = "sqail-ui"
+description = "sqail2 desktop SQL editor (native Rust UI)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "sqail2"
+path = "src/main.rs"
+
+[dependencies]
+sqail-client.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "wayland", "x11", "default_fonts", "persistence"] }
+egui = "0.36"
+egui_extras = "0.36"
+tokio = { version = "1.53", features = ["rt-multi-thread", "sync", "time", "macros", "process"] }
+futures = "0.3"
+uuid = { version = "1", features = ["v4", "serde"] }
+directories = "6"
+toml = "1"
+keyring = "4"
+rfd = "0.17"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+csv = "1.4"
+rust_xlsxwriter = { version = "0.99", features = ["constant_memory"] }
+sqlformat = "0.5"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+egui_kittest = { version = "0.36", features = ["eframe", "wgpu", "snapshot"] }
+sqail-service = { path = "../sqail-service" }
+tempfile = "3"
+image = { version = "0.25.6", default-features = false, features = ["png"] }
+tokio = { version = "1.53", features = ["full"] }

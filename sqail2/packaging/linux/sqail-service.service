@@ -1,0 +1,31 @@
+# sqail-service as a systemd *user* service:
+#   systemctl --user enable --now sqail-service
+# Logs: journalctl --user -u sqail-service
+[Unit]
+Description=sqail-service (HTTPS gateway between sqail2 and SQL databases)
+Documentation=https://codeberg.org/bartbeecoders/sqail
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/sqail-service serve
+Restart=on-failure
+RestartSec=2
+Environment=SQAIL_LOG_FORMAT=json
+
+# Hardening (user services cannot use every option; these are safe).
+NoNewPrivileges=yes
+PrivateTmp=yes
+# `full` keeps /usr, /boot and /etc read-only but leaves your home writable:
+# the service keeps its data in ~/.local/share/sqail-service and SQLite
+# profiles may point anywhere inside sqlite.allowed_dirs.
+ProtectSystem=full
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,40 @@
+# sqail-service configuration. Copy to <data-dir>/sqail-service.toml, or pass
+# --config <file>. Every key is optional; the values below are the defaults.
+# Env overrides: SQAIL_BIND, SQAIL_DATA_DIR, SQAIL_SQLITE_DIRS (path list),
+# SQAIL_LOG_FORMAT, SQAIL_DOCS_UI, SQAIL_MASTER_KEY (base64), SQAIL_LOG (filter).
+
+bind = "127.0.0.1:7443"   # loopback only; use 0.0.0.0 to serve other machines
+log_format = "pretty"     # or "json"
+docs_ui = false           # interactive API docs at /docs (on in debug builds)
+
+[tls]
+# PEM files. Leave both unset to use a generated self-signed dev certificate.
+# cert = "/etc/sqail/cert.pem"
+# key = "/etc/sqail/key.pem"
+allow_tls12 = false
+# Mutual TLS: also require a client certificate signed by this CA (PEM).
+# Bearer tokens are still required. See docs/operations.md.
+# client_ca = "/etc/sqail/clients-ca.pem"
+
+[limits]
+default_max_rows = 100000      # per result set, when the request sets none
+max_rows = 5000000
+default_timeout_ms = 0         # 0 = no timeout unless the request sets one
+max_timeout_ms = 86400000
+body_limit_bytes = 8388608
+requests_per_second = 50       # per token
+burst = 200
+pool_size = 8                  # connections per profile
+request_timeout_secs = 60      # non-streaming requests
+
+[sessions]
+idle_timeout_secs = 1800       # idle sessions close; open transactions roll back
+max_per_token = 32
+
+[sqlite]
+# SQLite profiles may only open files inside these directories (empty = off).
+allowed_dirs = []
+
+[audit]
+log_sql = true                 # store query text (never row values)
+max_sql_len = 4096

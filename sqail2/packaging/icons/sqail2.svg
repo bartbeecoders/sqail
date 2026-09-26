@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3f9a80"/>
+      <stop offset="1" stop-color="#245a4c"/>
+    </linearGradient>
+    <linearGradient id="shell" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#d6ece4"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#bg)"/>
+  <!-- database cylinder -->
+  <g fill="none" stroke="#bfe6d8" stroke-width="7" opacity="0.9">
+    <ellipse cx="176" cy="74" rx="38" ry="12"/>
+    <path d="M138 74 v56 a38 12 0 0 0 76 0 v-56"/>
+    <path d="M138 102 a38 12 0 0 0 76 0"/>
+  </g>
+  <!-- snail body -->
+  <path d="M40 196 C 40 176, 70 170, 104 170 L 200 170 C 214 170, 222 180, 214 190 C 206 198, 180 200, 150 200 L 60 204 C 48 204, 40 202, 40 196 Z" fill="#e8f5ef"/>
+  <path d="M200 172 L 214 138 M 190 172 L 196 140" stroke="#e8f5ef" stroke-width="7" stroke-linecap="round"/>
+  <circle cx="214" cy="136" r="6" fill="#e8f5ef"/>
+  <circle cx="196" cy="138" r="6" fill="#e8f5ef"/>
+  <!-- shell with spiral -->
+  <circle cx="98" cy="136" r="50" fill="url(#shell)"/>
+  <path d="M98 136 m-4 0 a4 4 0 1 1 8 0 a12 12 0 1 1 -24 0 a22 22 0 1 1 44 0 a32 32 0 1 1 -64 0 a40 40 0 1 1 80 0"
+        fill="none" stroke="#2f6f5e" stroke-width="7" stroke-linecap="round"/>
+</svg>

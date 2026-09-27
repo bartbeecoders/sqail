@@ -1,6 +1,0 @@
-/target
-/dev/data/
-*.db
-*.db-shm
-*.db-wal
-/.sqail2/

@@ -1,186 +1,137 @@
-# sqail
+# sqail2
 
-**A fast, small, open-source SQL editor that makes AI-assisted querying feel native.**
+A fast, native SQL editor (Rust UI) backed by **sqail-service**, an HTTPS REST
+gateway that holds the database connections. Supports PostgreSQL, SQL Server and
+SQLite; runs on Linux (Omarchy) and Windows.
 
-sqail (pronounced *"snail"*) is a lightweight cross-platform desktop SQL client with first-class AI integration, built on Tauri v2. It launches in under a second, stays under 20 MB, and ships with natural-language-to-SQL, query explanation, and optimization out of the box — without telemetry, lock-in, or a paid tier.
+**Plan and progress:** open [`PLAN.html`](PLAN.html) in a browser.
 
-It speaks PostgreSQL, MySQL, SQLite, and Microsoft SQL Server today. It uses the same Monaco editor that powers VS Code, stores credentials locally in encrypted on-disk files, and lets you bring your own API key for Claude, OpenAI, Minimax, Z.ai, LM Studio, or any OpenAI-compatible endpoint. Everything else is up to you.
-
-[**Download for your OS →**](https://sqail.io) &nbsp;·&nbsp; [Codeberg](https://codeberg.org/bartbeecoders/sqail) &nbsp;·&nbsp; [GitHub mirror](https://github.com/bartbeecoders/sqail)
-
-## Why sqail
-
-- **Fast** — sub-20 MB binary, sub-second launch. No Electron, no JVM, no Chromium bundle.
-- **Smart** — schema-aware autocomplete and AI that actually knows your tables. NL-to-SQL, explain, optimize.
-- **Free** — open source forever. No account, no freemium, no feature gates.
-- **Private** — zero telemetry. Credentials stay on your machine. AI providers are only contacted when you configure them.
-- **Universal** — Postgres, MySQL, SQLite, SQL Server, one editor.
-
-## Features
-
-- Monaco-based editor with multi-cursor, split view, snippets, and dark/light themes
-- Tabbed workspace with query history you can search, filter, and re-run
-- Schema browser, connection manager, and SSH tunnel support
-- AI command palette: format, explain, optimize, generate SQL from natural language
-- Multi-provider AI: Claude, OpenAI, Minimax, Z.ai, LM Studio, Claude Code CLI, OpenAI-compatible
-- **Inline AI completion** — ghost-text SQL suggestions from a local llama.cpp sidecar, opt-in, no cloud calls
-- Keyboard-first shortcuts, fully customizable
-- Privacy-respecting: credentials in local encrypted files, no telemetry
-
-## Inline AI completion
-
-Ghost-text SQL suggestions powered by a local [llama.cpp](https://github.com/ggml-org/llama.cpp) sidecar — no network round-trips, nothing leaves your machine. Toggle it on in **Settings → Inline AI**, pick a model, and it starts suggesting completions as you type. Press `Tab` to accept, `Esc` to dismiss.
-
-Models are all Q4_K_M GGUF quants. Pick one from the catalog; it's downloaded once into your app-data dir and cached for life.
-
-| Tier | Model | VRAM | Download | Notes |
-| --- | --- | --- | --- | --- |
-| Default | Qwen2.5-Coder-3B | 2.5 GB | 2 GB | Fits any GPU ≥ 4 GB. Great quality across all our benchmarks. |
-| Performance | DeepSeek-Coder-V2-Lite (16B MoE) | 11 GB | 9.7 GB | Needs a 16 GB+ GPU. Slightly better quality, similar speed. |
-| Low-end / CPU | Qwen2.5-Coder-1.5B | 1.6 GB | 1.1 GB | Runs fine on CPU (~15 tok/s) when no GPU is available. |
-
-On a desktop-class NVIDIA GPU (RTX 4080 Super) the default model hits **~6 ms first-token latency** and **~200 tok/s** throughput — well under the budget for real-time ghost text. See [`Vibecoding/inline-ai-benchmarks.md`](./Vibecoding/inline-ai-benchmarks.md) for the full Phase A benchmark results, and [`Vibecoding/inline-ai.md`](./Vibecoding/inline-ai.md) for the architecture plan.
-
-Feature is **off by default** — you have to flip the toggle. Nothing is downloaded or run until you do.
-
-**Sidecar runtime:** sqail fetches the `llama-server` binary from the official [llama.cpp release](https://github.com/ggml-org/llama.cpp/releases) on first enable — Windows Vulkan, macOS Metal (arm64 / x86_64), Linux Vulkan. Downloaded once into `<app_data>/inline-ai/bin/` and cached. Power users can override with `SQAIL_LLAMA_SERVER_PATH` (e.g. to run a CUDA build).
+**Docs:** [user guide](docs/user-guide.md) · [Windows + SQL Server setup](docs/windows-setup.md) · [operations](docs/operations.md)
+(certificates, tokens, backups, services) · [REST API](docs/api.md) ·
+[security](docs/security.md) · [benchmarks](docs/benchmarks.md) ·
+[changelog](CHANGELOG.md)
 
 ## Install
 
-Prebuilt binaries for Linux, macOS, and Windows are available from [sqail.io](https://sqail.io). If you prefer to build from source, see [Development](#development).
+| Platform | How |
+|---|---|
+| Linux | `dist/sqail2-<ver>-linux-x86_64.tar.gz` → `./install.sh` (per user; `--prefix /usr` system-wide) |
+| Arch / Omarchy | `makepkg -si` in `packaging/arch/` |
+| Windows | `sqail2-<ver>-windows-x64.msi`, or the portable `.zip` |
 
-### macOS note: Gatekeeper warnings on first launch
+Build the packages yourself with `scripts/package-linux.sh` or
+`.\scripts\package-windows.ps1` (MSI needs the WiX 5 CLI:
+`dotnet tool install --global wix --version 5.0.2`).
 
-sqail is not yet signed with an Apple Developer ID, so macOS Gatekeeper will refuse to launch it after download with one of two misleading errors, depending on your macOS version:
+## Quick start
 
-- **"sqail is damaged and cannot be opened"** (older macOS)
-- **"Apple could not verify 'sqail' is free of malware"** (Sonoma / Sequoia and later)
-
-Both mean the same thing: the app has a quarantine attribute from being downloaded, and it isn't notarized. The app is fine — you just need to remove the quarantine attribute once. After dragging sqail to `/Applications`, run:
-
-```bash
-xattr -cr /Applications/sqail.app
-```
-
-Alternatively, open **System Settings → Privacy & Security**, scroll to the bottom, and click **"Open Anyway"** next to the sqail warning after your first failed launch attempt.
-
-You only need to do this once per install. Proper signing + notarization is on the roadmap.
-
-## Prerequisites
-
-All platforms require:
-
-- [Rust](https://rustup.rs) (1.77.2+)
-- [Node.js](https://nodejs.org) (20+)
-- [pnpm](https://pnpm.io) (9+)
-
-### Linux (Debian/Ubuntu)
+Prerequisites: Rust (rustup, 1.95+), podman, curl. On Windows you also need
+the MSVC build tools and Podman Desktop (`podman machine init; podman machine start`).
 
 ```bash
-sudo apt install libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+scripts/db.sh up         # test databases (Postgres, SQL Server, SQLite)
+scripts/check.sh --it    # fmt + clippy + unit and integration tests
+scripts/smoke.sh         # end-to-end curl test against all three engines
+scripts/dev.sh           # DBs + service + UI
 ```
 
-### Linux (Fedora)
+Windows uses the same names: `.\scripts\db.ps1 up`, `.\scripts\check.ps1 -It`, …
+
+## sqail2 (the editor)
+
+`scripts/dev.sh` starts everything. On first run it sets up the local
+service and pins its certificate, and the token goes into the OS credential
+store. To use a remote service, choose **Service → Connect to a service…**
+and enter its URL and a token. You'll be asked to confirm the certificate
+fingerprint.
+
+| Keys | Action |
+|---|---|
+| Ctrl+Enter | Run the statement at the cursor, or the selection |
+| F5 / Ctrl+Shift+Enter | Run the whole script |
+| Esc | Cancel the running query |
+| Ctrl+E | Show the query plan of the statement at the cursor |
+| Ctrl+Space | Complete (also opens by itself while typing) |
+| Ctrl+Shift+F | Format the selection or the whole tab |
+| Ctrl+Shift+P / Ctrl+P | Command palette / open a table or snippet |
+| Ctrl+T / Ctrl+W | New / close tab |
+| Ctrl+O / Ctrl+S / Ctrl+Shift+S | Open / save / save as |
+| Ctrl+F | Find and replace |
+| F2 | Edit the selected cell (in edit mode) |
+
+Rebind keys in `keybindings.toml` in the config dir, for example
+`"query.run" = "Ctrl+R"`. Command ids are listed in the command palette's
+source, `crates/sqail-ui/src/commands.rs`.
+
+Each tab has its own server session, so `BEGIN … COMMIT` works across
+runs. You can also switch off **Auto-commit** for a tab. Result grids sort when you click a header. Click, or Shift+click, to
+select cells, and Ctrl+C copies them as TSV. Double-click a cell to see its
+full value. **Export** a result, or re-run the query straight to CSV, JSON,
+Excel or SQL. **✎ Edit data** edits a single-table result in place and
+applies the changes in one transaction. Right-click a table in the sidebar
+for *SELECT top 100*, *Import CSV…* or *Script CREATE*. History and snippets
+live in the sidebar, and open tabs come back after a restart.
+
+UI tests run headlessly (`cargo test -p sqail-ui`) and write screenshots to
+`target/ui-shots/`. The fuzzer runs time-boxed on stable Rust:
+`cargo run --profile fuzz -p sqail-fuzz -- 60`.
+
+## sqail-service
 
 ```bash
-sudo dnf install webkit2gtk4.1-devel libappindicator-gtk3-devel librsvg2-devel openssl-devel
+scripts/service.sh                                          # https://127.0.0.1:7443
+scripts/service.sh token create --name me --scope admin     # prints a new token
+scripts/service.sh token list | revoke <id>
+scripts/service.sh fingerprint                              # cert fingerprint to pin
 ```
 
-### Linux (Arch)
+On first start the service creates `service.db`, `master.key` and a
+self-signed certificate in its data directory. It also prints a one-time
+**admin token** and a sign-in link for the **admin page** (or, without a
+terminal, writes the token to `bootstrap-admin-token.txt` there).
+
+The admin page, at `https://127.0.0.1:7443/admin/`, is built into the binary.
+Everything after installing is done there: who can connect, the
+certificate, SQLite folders, limits, connections, tokens, backups and the
+audit log. Settings are applied with an in-process restart, and are only
+saved once the service runs with them. `sqail-service admin-link` prints a
+new sign-in link.
+
+Installing is a single step with no options: `setup\Install-SqailService.cmd`
+(as Administrator) on Windows, or `install.sh` on Linux (systemd user unit).
+Both start the service and hand you the sign-in link. See
+[docs/operations.md](docs/operations.md). The dev scripts use
+`.sqail2/service/` in this repo as the data directory. Every setting is also
+in [`dev/sqail-service.example.toml`](dev/sqail-service.example.toml).
+
+API reference: `GET /v1/openapi.json`, or the interactive docs at `/docs` in
+debug builds. Query results stream as NDJSON, one `QueryEvent` per line:
 
 ```bash
-sudo pacman -S webkit2gtk-4.1 libappindicator-gtk3 librsvg openssl
+curl -sk -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  https://127.0.0.1:7443/v1/connections/$ID/query -d '{"sql":"SELECT 1"}'
 ```
 
-### macOS
+## Layout
 
-```bash
-xcode-select --install
-```
+| Path | What |
+|---|---|
+| `crates/sqail-proto` | REST wire types shared by service and clients |
+| `crates/sqail-service` | the gateway: auth, profiles, drivers, streaming |
+| `crates/sqail-client` | typed async client with certificate pinning |
+| `crates/sqail-ui` | the desktop app (egui), binary `sqail2` |
+| `dev/seed` | identical test schema for every engine |
+| `crates/sqail-fuzz` | stable, time-boxed fuzzer for the parsers and the NDJSON decoder |
+| `vendor/tokio-postgres` | tokio-postgres plus a one-field patch; see its `SQAIL2-PATCH.md` |
+| `packaging/` | icons, desktop entry, systemd unit, installer, PKGBUILD, WiX source |
+| `docs/` | user, operations, API, security docs and `openapi.json` |
 
-### Windows
+## Releasing
 
-Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the "Desktop development with C++" workload. WebView2 is included in Windows 10 (1803+) and Windows 11.
-
-## Development
-
-```bash
-pnpm install
-pnpm tauri dev
-```
-
-Or use the helper script:
-
-```bash
-./scripts/run.sh dev
-```
-
-Note: On Linux, if you see a blank screen, the `run.sh` script sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` to work around a WebKitGTK DMA-BUF issue with some GPU drivers.
-
-## Building for Release
-
-Each build script checks prerequisites, builds the frontend and Rust backend, and produces distributable outputs.
-
-### Linux
-
-```bash
-./scripts/build-linux.sh
-```
-
-**Output:** `src-tauri/target/release/bundle/appimage/sqlail_<version>_amd64.AppImage`
-
-The AppImage is a single portable executable:
-
-```bash
-chmod +x sqlail_*.AppImage
-./sqlail_*.AppImage
-```
-
-Also produces `.deb` and `.rpm` packages for system installation.
-
-### macOS
-
-```bash
-./scripts/build-macos.sh
-```
-
-**Output:** `src-tauri/target/release/bundle/dmg/sqlail_<version>_aarch64.dmg`
-
-Open the `.dmg` and drag the app to Applications. Also produces a `.app` bundle directly.
-
-### Windows
-
-```powershell
-.\scripts\build-windows.ps1
-```
-
-**Output:** `src-tauri\target\release\bundle\nsis\sqlail_<version>_x64-setup.exe`
-
-The NSIS `.exe` is a single-file installer. Run it to install. Also produces an `.msi` installer.
-
-## Linting and Type Checking
-
-```bash
-pnpm check        # TypeScript type check
-pnpm lint         # ESLint
-./scripts/run.sh check  # All checks including cargo clippy
-```
-
-## Project Structure
-
-```
-src/              React frontend (TypeScript, Vite, Tailwind CSS)
-src-tauri/        Rust backend (Tauri v2, sqlx, tiberius)
-sqail.portal/     Marketing website (sqail.io)
-scripts/          Build and development helper scripts
-marketing/        Brand, strategy, and plan documents
-Vibecoding/       Planning and architecture documents
-```
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md). Bug reports, docs fixes, and migration guides from other tools are all welcome.
-
-## License
-
-MIT
+1. Bump `version` in `Cargo.toml` (and `pkgver` in `packaging/arch/PKGBUILD`),
+   add a `CHANGELOG.md` entry, regenerate `docs/openapi.json`
+   (`SQAIL2_BLESS=1 cargo test -p sqail-service --test it openapi`).
+2. `scripts/check.sh --it` and `scripts/smoke.sh`.
+3. Tag `sqail2-v<version>` and push it. CI (`.github/workflows/sqail2.yml`
+   in the repository root) runs every check and attaches the Linux tarball and the
+   Windows zip/MSI to a release.

@@ -36,15 +36,29 @@ function Start-Mssql {
         mcr.microsoft.com/mssql/server:2022-latest
 }
 
+function MssqlHas($name) {
+    $r = SqlcmdIn -h -1 -W -Q "SET NOCOUNT ON; SELECT CASE WHEN OBJECT_ID('sqail_test.$name') IS NULL THEN 0 ELSE 1 END"
+    return ("$r".Trim() -eq '1')
+}
+
 function Seed-Mssql {
-    $seeded = SqlcmdIn -h -1 -W -Q "SET NOCOUNT ON; SELECT CASE WHEN OBJECT_ID('sqail_test.sales.type_zoo') IS NULL THEN 0 ELSE 1 END"
-    if ("$seeded".Trim() -eq '1') { Ok 'mssql already seeded'; return }
-    Info 'seeding SQL Server'
-    foreach ($f in Get-ChildItem "$Root/dev/seed/mssql/*.sql" | Sort-Object Name) {
-        SqlcmdIn -i "/seed/$($f.Name)" | Out-Null
-        if ($LASTEXITCODE -ne 0) { Die "seeding $($f.Name) failed - fix it, then: .\scripts\db.ps1 reset" }
+    if (MssqlHas 'sales.type_zoo') {
+        Ok 'mssql already seeded'
+    } else {
+        Info 'seeding SQL Server'
+        foreach ($f in Get-ChildItem "$Root/dev/seed/mssql/*.sql" | Sort-Object Name) {
+            SqlcmdIn -i "/seed/$($f.Name)" | Out-Null
+            if ($LASTEXITCODE -ne 0) { Die "seeding $($f.Name) failed - fix it, then: .\scripts\db.ps1 reset" }
+        }
+        Ok 'mssql seeded'
     }
-    Ok 'mssql seeded'
+    # Added after the first seed: bring older dev databases up to date.
+    if (-not (MssqlHas 'sales.big_orders')) {
+        Info 'adding sales.big_orders (1,000,000 rows)'
+        SqlcmdIn -i '/seed/10_big_orders.sql' | Out-Null
+        if ($LASTEXITCODE -ne 0) { Die 'seeding 10_big_orders.sql failed' }
+        Ok 'sales.big_orders added'
+    }
 }
 
 function Seed-Sqlite {

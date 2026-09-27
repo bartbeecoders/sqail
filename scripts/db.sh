@@ -22,16 +22,25 @@ wait_for() {  # name, command...
 
 sqlcmd_in() { podman exec sqail-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -b "$@"; }
 
+mssql_has() { [[ "$(sqlcmd_in -h -1 -W -Q "SET NOCOUNT ON; SELECT CASE WHEN OBJECT_ID('sqail_test.$1') IS NULL THEN 0 ELSE 1 END")" == "1" ]]; }
+
 seed_mssql() {
-    if [[ "$(sqlcmd_in -h -1 -W -Q "SET NOCOUNT ON; SELECT CASE WHEN OBJECT_ID('sqail_test.sales.type_zoo') IS NULL THEN 0 ELSE 1 END")" == "1" ]]; then
-        ok "mssql already seeded"; return
+    if mssql_has sales.type_zoo; then
+        ok "mssql already seeded"
+    else
+        info "seeding SQL Server"
+        for f in "$ROOT"/dev/seed/mssql/*.sql; do
+            sqlcmd_in -i "/seed/$(basename "$f")" >/dev/null \
+                || die "seeding $(basename "$f") failed — fix it, then: scripts/db.sh reset"
+        done
+        ok "mssql seeded"
     fi
-    info "seeding SQL Server"
-    for f in "$ROOT"/dev/seed/mssql/*.sql; do
-        sqlcmd_in -i "/seed/$(basename "$f")" >/dev/null \
-            || die "seeding $(basename "$f") failed — fix it, then: scripts/db.sh reset"
-    done
-    ok "mssql seeded"
+    # Added after the first seed: bring older dev databases up to date.
+    if ! mssql_has sales.big_orders; then
+        info "adding sales.big_orders (1,000,000 rows)"
+        sqlcmd_in -i /seed/10_big_orders.sql >/dev/null || die "seeding 10_big_orders.sql failed"
+        ok "sales.big_orders added"
+    fi
 }
 
 seed_sqlite() {

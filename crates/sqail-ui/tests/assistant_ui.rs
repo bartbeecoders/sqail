@@ -41,9 +41,11 @@ fn fake_claude(dir: &Path) -> PathBuf {
         dir.join("args.txt").display()
     ));
     script.push_str(&format!("cat > '{}'\n", dir.join("stdin.txt").display()));
+    // printf, not echo: dash's echo (Ubuntu's /bin/sh) turns the `\n` in
+    // JSON strings into real newlines.
     for l in lines {
         script.push_str(&format!(
-            "echo '{}'\n",
+            "printf '%s\\n' '{}'\n",
             l.to_string().replace('\'', "'\\''")
         ));
     }
@@ -58,7 +60,8 @@ fn step_until(h: &mut Harness<'_, SqailApp>, what: &str, done: impl Fn(&SqailApp
     while !done(h.state()) {
         assert!(
             start.elapsed() < Duration::from_secs(20),
-            "timed out waiting for {what}"
+            "timed out waiting for {what}; conversation: {:?}",
+            h.state().assistant.entries
         );
         h.step();
         std::thread::sleep(Duration::from_millis(10));

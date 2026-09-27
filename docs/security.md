@@ -50,9 +50,17 @@ sqail ──TLS 1.3 + bearer token (+ optional client cert)──▶ sqail-servi
 | Crashes on hostile input | Lexers, splitters, completer, formatter and the NDJSON decoder are fuzzed | `cargo run --profile fuzz -p sqail-fuzz -- <secs>` (10 min: 13.2M inputs, 0 crashes; one real bug found and fixed; 2 min on every CI run) |
 | Abandoned transactions holding locks | A transaction left open outside a session is rolled back and reported; idle sessions close (rollback); the UI asks before closing a tab or quitting with one open | `open_transaction_outside_session_is_rolled_back`, UI test |
 | EXPLAIN ANALYZE changing data | Runs inside a transaction that is always rolled back | engine matrix (`sum(price)` unchanged) |
+| The AI assistant changing data, or doing more than read | The CLI runs with no built-in tools (Claude Code `--tools ""` + `--strict-mcp-config`; Grok `--tools search_tool,use_tool` + `--permission-mode dontAsk` + an allow list of sqail's tools, which also denies the user's other MCP servers). `run_query` accepts one `SELECT`/`WITH`/`VALUES` statement without writing keywords or side-effect functions, and runs it in a transaction that is always rolled back (`BEGIN READ ONLY` on Postgres). The service token reaches `sqail mcp` through the environment, never arguments or files | `assistant::guard` tests, `mcp_tools_on_sql_server` (a forced `INSERT` is rolled back), `postgres_assistant_transactions_are_read_only`, `assistant_panel_streams_an_answer_and_inserts_sql` |
 | Vulnerable or non-permissive dependencies | `cargo audit` and `cargo deny` (advisories, licences, sources) in the gate | `scripts/check.sh` |
 
 ## Known limitations (accepted for 1.0)
+
+* **The AI assistant sends data to its provider.** Questions, schema details
+  and up to `assistant.max_rows` rows per assistant query go to Anthropic
+  (Claude Code) or xAI (Grok) under the user's own account. It uses the
+  user's service token, so it sees exactly what the user may see. On SQL
+  Server a rolled-back transaction undoes writes but can't stop every side
+  effect of a procedure; the statement check refuses `EXEC` for that reason.
 
 * **SQL Server read-only profiles** use `ApplicationIntent=ReadOnly`, which is
   only enforced on availability-group secondaries. Use a login with read-only

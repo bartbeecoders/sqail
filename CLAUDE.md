@@ -37,6 +37,7 @@ scripts/package-linux.sh / scripts/package-windows.ps1  # release packages into 
 | `sqail-service` | the gateway: axum over rustls, token auth + scopes, encrypted connection profiles in `service.db`, drivers in `engine/` (tokio-postgres, tiberius, rusqlite), sessions, NDJSON streaming, admin page (`admin/`, embedded), Windows service mode (`winsvc.rs`) |
 | `sqail-client` | typed async client with certificate pinning, used by the UI |
 | `sqail-ui` | the editor, binary `sqail`. `app.rs` is the top-level state; the editor, grid, sidebar, palette and dialogs are separate modules; `sql/` holds the splitter, completion, formatter and drag-and-drop SQL; `worker.rs` runs async work off the UI thread |
+| `sqail-ui::assistant` | the AI assistant: `panel.rs` (UI), `cli.rs` (runs `claude`/`grok` headless with only sqail's tools), `stream.rs` (their NDJSON), `mcp.rs` (`sqail mcp`, the MCP server they start: schema tools + `run_query`), `guard.rs` (read-only statement check) |
 | `sqail-fuzz` | stable-Rust fuzzer for the parsers and the NDJSON decoder |
 
 `vendor/tokio-postgres` is patched to expose column type OIDs on simple-query results (see `SQAIL-PATCH.md`).
@@ -56,4 +57,4 @@ The UI stores settings, history and the workspace in the OS config dir (`~/.conf
 
 ## Release and deployment
 
-Tag `v<version>` (after bumping `Cargo.toml`, `packaging/arch/PKGBUILD` and the changelog). `.github/workflows/release.yml` reuses `ci.yml` for the checks, builds the Linux tarball and the Windows zip/MSI, publishes a GitHub release, uploads the files to the VPS (`/opt/sqail-releases`), and rebuilds and redeploys the portal (`sqail.portal/`, image in ACR, k3s deployment in `k8s/portal/`). The portal reads the version from `sqail.portal/src/lib/constants.ts`, which CI rewrites.
+Tag `v<version>` (after bumping `Cargo.toml`, `packaging/arch/PKGBUILD` and the changelog). `.github/workflows/release.yml` reuses `ci.yml` for the checks, builds the Linux tarball and the Windows zip/MSI, publishes a GitHub release, uploads the files to the VPS (`/opt/sqail-releases`), and rebuilds and redeploys the portal (`sqail.portal/`, image in ACR, k3s deployment in `k8s/portal/`). The portal reads the current version and file names at runtime from `/releases/current.json`, which `release.yml` uploads next to the files, and renders its changelog from the root `CHANGELOG.md`.

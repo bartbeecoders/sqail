@@ -9,6 +9,13 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
 
 ### sqail
 
+- **AI assistant** (Ctrl+Shift+A): a chat panel that asks Claude Code or Grok,
+  through the CLI you already use, about the active connection. It can list
+  schemas and tables, describe tables and run read-only queries (one
+  `SELECT` at a time, up to 100 rows, always in a rolled-back transaction),
+  and proposes SQL with Insert / New tab / Copy buttons. The CLI gets no
+  other tools. New `sqail mcp` mode: the MCP server the CLI starts.
+
 - Large results use about half the memory: a result's cells are kept in one
   buffer, and short text (dates, decimals, codes) is stored inside the cell.
   A million rows × 10 columns now takes ~250 MB instead of ~470 MB.

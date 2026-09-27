@@ -4,6 +4,7 @@
 //! UI can be tested headlessly (see `tests/ui.rs`).
 
 pub mod app;
+pub mod assistant;
 pub mod commands;
 pub mod dialogs;
 pub mod editing;

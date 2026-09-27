@@ -65,6 +65,11 @@ pub enum Msg {
         text: String,
         error: bool,
     },
+    /// Progress of an AI assistant turn.
+    Assistant {
+        run: u64,
+        update: crate::assistant::Update,
+    },
     ImportPicked {
         conn: Uuid,
         schema: String,
@@ -140,6 +145,7 @@ pub struct SqailApp {
     /// Set once the user confirmed quitting despite open transactions.
     pub allow_close: bool,
     pub palette: Option<crate::palette::Palette>,
+    pub assistant: crate::assistant::Assistant,
 }
 
 impl SqailApp {
@@ -176,6 +182,7 @@ impl SqailApp {
             keymap: crate::commands::Keymap::load(),
             allow_close: false,
             palette: None,
+            assistant: Default::default(),
             settings,
         };
         app.restore_workspace();
@@ -726,6 +733,7 @@ impl SqailApp {
                 Err(e) => self.notify(format!("Save failed: {e}"), true),
             },
             Msg::Notice { text, error } => self.notify(text, error),
+            Msg::Assistant { run, update } => self.assistant_update(run, update),
             Msg::ImportPicked {
                 conn,
                 schema,
@@ -1125,8 +1133,15 @@ impl SqailApp {
             .tabs
             .get(self.active)
             .is_some_and(|t| t.run.as_ref().is_some_and(|r| r.running));
+        // Typing in the assistant: editor shortcuts (Ctrl+Enter, …) stay off.
+        let assistant_typing = ctx.memory(|m| m.has_focus(crate::assistant::panel::input_id()));
         let bindings = self.keymap.bindings().to_vec();
         for (sc, cmd) in bindings {
+            if assistant_typing
+                && !matches!(cmd, Command::ToggleAssistant | Command::CommandPalette)
+            {
+                continue;
+            }
             // Esc only means "cancel" while something is running.
             if cmd == Command::Cancel && !running {
                 continue;
@@ -1200,6 +1215,13 @@ impl SqailApp {
             Command::ShowConnections => self.sidebar = crate::sidebar::View::Connections,
             Command::ShowHistory => self.sidebar = crate::sidebar::View::History,
             Command::ShowSnippets => self.sidebar = crate::sidebar::View::Snippets,
+            Command::ToggleAssistant => {
+                self.settings.assistant.open = !self.settings.assistant.open;
+                self.settings.save();
+                if self.settings.assistant.open {
+                    ctx.memory_mut(|m| m.request_focus(crate::assistant::panel::input_id()));
+                }
+            }
             Command::NewConnection => {
                 self.dialog = Dialog::Connection(Box::new(ConnForm::new_default()))
             }
@@ -1425,6 +1447,7 @@ impl SqailApp {
                     Command::ShowConnections,
                     Command::ShowHistory,
                     Command::ShowSnippets,
+                    Command::ToggleAssistant,
                     Command::FontBigger,
                     Command::FontSmaller,
                 ] {
@@ -1842,6 +1865,13 @@ impl eframe::App for SqailApp {
             .default_size(280.0)
             .size_range(180.0..=520.0)
             .show(ui, |ui| crate::sidebar::ui(ui, self));
+        if self.settings.assistant.open {
+            egui::Panel::right("assistant")
+                .resizable(true)
+                .default_size(420.0)
+                .size_range(300.0..=900.0)
+                .show(ui, |ui| crate::assistant::panel::ui(ui, self));
+        }
         egui::CentralPanel::default().show(ui, |ui| self.central(ui));
 
         self.value_viewer(&ctx);

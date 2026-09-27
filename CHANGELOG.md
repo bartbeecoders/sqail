@@ -7,6 +7,8 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
 
 ## Unreleased
 
+## 1.1.1 — 2026-09-27
+
 ### sqail
 
 - **AI assistant** (Ctrl+Shift+A): a chat panel that asks Claude Code or Grok,

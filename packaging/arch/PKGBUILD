@@ -1,7 +1,7 @@
 # Maintainer: bartbeecoders
 # Arch / Omarchy package built from source:  makepkg -si
 pkgname=sqail
-pkgver=1.1.0
+pkgver=1.1.1
 pkgrel=1
 pkgdesc="Fast SQL editor (PostgreSQL, SQL Server, SQLite) with a secure HTTPS service"
 arch=('x86_64' 'aarch64')

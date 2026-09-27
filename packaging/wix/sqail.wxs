@@ -7,7 +7,8 @@
   not registered by the installer: run setup\Install-SqailService.cmd as
   Administrator when a machine-wide gateway is wanted; it opens the admin
   page for the rest of the setup (see SETUP.md).
-  Keep this file list in sync with the staging in package-windows.ps1.
+  Keep this file list in sync with the staging in package-windows.ps1. Each
+  unversioned file needs its own component (WIX0367, automatic GUIDs).
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package Name="sqail"
@@ -39,31 +40,59 @@
         <Component Id="Service">
           <File Id="sqail_service.exe" Source="$(var.StageDir)\sqail-service.exe" KeyPath="yes" />
         </Component>
-        <Component Id="Docs">
+        <Component Id="LICENSE.txt_c">
           <File Id="LICENSE.txt" Source="$(var.StageDir)\LICENSE.txt" KeyPath="yes" />
-          <File Id="README.txt" Source="$(var.StageDir)\README.txt" />
-          <File Id="SETUP.md" Source="$(var.StageDir)\SETUP.md" />
-          <File Id="example.toml" Source="$(var.StageDir)\sqail-service.example.toml" />
+        </Component>
+        <Component Id="README.txt_c">
+          <File Id="README.txt" Source="$(var.StageDir)\README.txt" KeyPath="yes" />
+        </Component>
+        <Component Id="SETUP.md_c">
+          <File Id="SETUP.md" Source="$(var.StageDir)\SETUP.md" KeyPath="yes" />
+        </Component>
+        <Component Id="example.toml_c">
+          <File Id="example.toml" Source="$(var.StageDir)\sqail-service.example.toml" KeyPath="yes" />
         </Component>
         <Directory Id="SetupFolder" Name="setup">
-          <Component Id="SetupKit">
+          <Component Id="Install.ps1_c">
             <File Id="Install.ps1" Source="$(var.StageDir)\setup\Install-SqailService.ps1" KeyPath="yes" />
-            <File Id="Install.cmd" Source="$(var.StageDir)\setup\Install-SqailService.cmd" />
-            <File Id="Uninstall.ps1" Source="$(var.StageDir)\setup\Uninstall-SqailService.ps1" />
-            <File Id="Uninstall.cmd" Source="$(var.StageDir)\setup\Uninstall-SqailService.cmd" />
-            <File Id="NewToken.ps1" Source="$(var.StageDir)\setup\New-SqailToken.ps1" />
-            <File Id="AddSqlServer.ps1" Source="$(var.StageDir)\setup\Add-SqailSqlServer.ps1" />
+          </Component>
+          <Component Id="Install.cmd_c">
+            <File Id="Install.cmd" Source="$(var.StageDir)\setup\Install-SqailService.cmd" KeyPath="yes" />
+          </Component>
+          <Component Id="Uninstall.ps1_c">
+            <File Id="Uninstall.ps1" Source="$(var.StageDir)\setup\Uninstall-SqailService.ps1" KeyPath="yes" />
+          </Component>
+          <Component Id="Uninstall.cmd_c">
+            <File Id="Uninstall.cmd" Source="$(var.StageDir)\setup\Uninstall-SqailService.cmd" KeyPath="yes" />
+          </Component>
+          <Component Id="NewToken.ps1_c">
+            <File Id="NewToken.ps1" Source="$(var.StageDir)\setup\New-SqailToken.ps1" KeyPath="yes" />
+          </Component>
+          <Component Id="AddSqlServer.ps1_c">
+            <File Id="AddSqlServer.ps1" Source="$(var.StageDir)\setup\Add-SqailSqlServer.ps1" KeyPath="yes" />
           </Component>
         </Directory>
         <Directory Id="DocsFolder" Name="docs">
-          <Component Id="DocsFolder">
+          <Component Id="user_guide.md_c">
             <File Id="user_guide.md" Source="$(var.StageDir)\docs\user-guide.md" KeyPath="yes" />
-            <File Id="windows_setup.md" Source="$(var.StageDir)\docs\windows-setup.md" />
-            <File Id="operations.md" Source="$(var.StageDir)\docs\operations.md" />
-            <File Id="security.md" Source="$(var.StageDir)\docs\security.md" />
-            <File Id="api.md" Source="$(var.StageDir)\docs\api.md" />
-            <File Id="Inter_OFL.txt" Source="$(var.StageDir)\docs\Inter-OFL.txt" />
-            <File Id="JetBrainsMono_OFL.txt" Source="$(var.StageDir)\docs\JetBrainsMono-OFL.txt" />
+          </Component>
+          <Component Id="windows_setup.md_c">
+            <File Id="windows_setup.md" Source="$(var.StageDir)\docs\windows-setup.md" KeyPath="yes" />
+          </Component>
+          <Component Id="operations.md_c">
+            <File Id="operations.md" Source="$(var.StageDir)\docs\operations.md" KeyPath="yes" />
+          </Component>
+          <Component Id="security.md_c">
+            <File Id="security.md" Source="$(var.StageDir)\docs\security.md" KeyPath="yes" />
+          </Component>
+          <Component Id="api.md_c">
+            <File Id="api.md" Source="$(var.StageDir)\docs\api.md" KeyPath="yes" />
+          </Component>
+          <Component Id="Inter_OFL.txt_c">
+            <File Id="Inter_OFL.txt" Source="$(var.StageDir)\docs\Inter-OFL.txt" KeyPath="yes" />
+          </Component>
+          <Component Id="JetBrainsMono_OFL.txt_c">
+            <File Id="JetBrainsMono_OFL.txt" Source="$(var.StageDir)\docs\JetBrainsMono-OFL.txt" KeyPath="yes" />
           </Component>
         </Directory>
         <Component Id="PathEntry">
@@ -79,9 +108,23 @@
     <Feature Id="Main" Title="sqail" Level="1">
       <ComponentRef Id="Editor" />
       <ComponentRef Id="Service" />
-      <ComponentRef Id="Docs" />
-      <ComponentRef Id="SetupKit" />
-      <ComponentRef Id="DocsFolder" />
+      <ComponentRef Id="LICENSE.txt_c" />
+      <ComponentRef Id="README.txt_c" />
+      <ComponentRef Id="SETUP.md_c" />
+      <ComponentRef Id="example.toml_c" />
+      <ComponentRef Id="Install.ps1_c" />
+      <ComponentRef Id="Install.cmd_c" />
+      <ComponentRef Id="Uninstall.ps1_c" />
+      <ComponentRef Id="Uninstall.cmd_c" />
+      <ComponentRef Id="NewToken.ps1_c" />
+      <ComponentRef Id="AddSqlServer.ps1_c" />
+      <ComponentRef Id="user_guide.md_c" />
+      <ComponentRef Id="windows_setup.md_c" />
+      <ComponentRef Id="operations.md_c" />
+      <ComponentRef Id="security.md_c" />
+      <ComponentRef Id="api.md_c" />
+      <ComponentRef Id="Inter_OFL.txt_c" />
+      <ComponentRef Id="JetBrainsMono_OFL.txt_c" />
       <ComponentRef Id="PathEntry" />
     </Feature>
   </Package>

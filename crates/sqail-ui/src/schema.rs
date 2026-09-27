@@ -11,7 +11,9 @@ use uuid::Uuid;
 
 use crate::app::{Msg, ServiceStatus, SqailApp};
 use crate::dialogs::{ConnForm, Dialog};
+use crate::editor::SqlDrop;
 use crate::sql;
+use crate::sql::drop::{DropItem, ObjectKind};
 use crate::theme;
 
 pub enum Load<T> {
@@ -468,6 +470,18 @@ fn schema_children(
                             };
                             let resp = ui.selectable_label(false, format!("{icon} {}", r.name));
                             let name = r.name.clone();
+                            let kind = if r.kind == sqail_client::proto::RoutineKind::Procedure {
+                                ObjectKind::Procedure
+                            } else {
+                                ObjectKind::Function
+                            };
+                            let item = DropItem {
+                                engine,
+                                schema: schema.into(),
+                                name: name.clone(),
+                                kind,
+                            };
+                            drag_source(ui, &resp, conn, item);
                             resp.context_menu(|ui| {
                                 if ui.button("Script definition").clicked() {
                                     actions.push(Action::Ddl {
@@ -620,6 +634,26 @@ fn table_node(
             }
         });
     let name = table.name.clone();
+    let kind = if table.kind == TableKind::Table {
+        ObjectKind::Table
+    } else {
+        ObjectKind::View
+    };
+    let item = DropItem {
+        engine,
+        schema: schema.into(),
+        name: name.clone(),
+        kind,
+    };
+    if drag_source(ui, &resp.header_response, conn, item).drag_started() {
+        // A drop on a blank line lists the columns; have them ready.
+        t.schema.ensure(
+            client,
+            t.worker,
+            conn,
+            SchemaKey::Columns(schema.into(), name.clone()),
+        );
+    }
     resp.header_response.context_menu(|ui| {
         if ui.button("SELECT top 100").clicked() {
             actions.push(Action::SelectTop {
@@ -662,6 +696,32 @@ fn table_node(
             table: name,
         });
     }
+}
+
+/// Make a tree row draggable into the editor. Re-registers the row's own id,
+/// so it keeps its click behaviour and gains drag.
+fn drag_source(
+    ui: &egui::Ui,
+    row: &egui::Response,
+    connection: Uuid,
+    item: DropItem,
+) -> egui::Response {
+    let drag = ui.interact(row.rect, row.id, egui::Sense::click_and_drag());
+    if drag.dragged()
+        && let Some(pos) = ui.ctx().pointer_latest_pos()
+    {
+        egui::Area::new(egui::Id::new("sql_drag_label"))
+            .order(egui::Order::Tooltip)
+            .interactable(false)
+            .fixed_pos(pos + egui::vec2(14.0, 10.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.label(RichText::new(item.qualified()).monospace());
+                });
+            });
+    }
+    drag.dnd_set_drag_payload(SqlDrop { connection, item });
+    drag
 }
 
 fn apply(app: &mut SqailApp, a: Action, ctx: &egui::Context) {

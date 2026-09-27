@@ -1,17 +1,17 @@
 <#
 .SYNOPSIS
-    Build the Windows release of sqail2 + sqail-service.
+    Build the Windows release of sqail + sqail-service.
 
 .DESCRIPTION
     Produces in dist\:
-      sqail2-<ver>-windows-x64.zip   portable: editor, service, setup kit, docs
-      sqail2-<ver>-windows-x64.msi   installer, when the WiX 5 CLI `wix` is on PATH
+      sqail-<ver>-windows-x64.zip   portable: editor, service, setup kit, docs
+      sqail-<ver>-windows-x64.msi   installer, when the WiX 5 CLI `wix` is on PATH
                                      (dotnet tool install --global wix --version 5.0.2;
                                      WiX 6+ needs its OSMF EULA accepted first)
       *.sha256                       checksums
 
-    Layout of the zip (the MSI installs the same tree to Program Files\sqail2):
-      sqail2.exe, sqail-service.exe
+    Layout of the zip (the MSI installs the same tree to Program Files\sqail):
+      sqail.exe, sqail-service.exe
       SETUP.md                      how to set up the service and SQL Server
       README.txt, LICENSE.txt
       setup\                        Install-/Uninstall-SqailService, New-SqailToken,
@@ -38,7 +38,7 @@ param(
 Set-Location $Root
 
 $Version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
-$Name = "sqail2-$Version-windows-x64"
+$Name = "sqail-$Version-windows-x64"
 $Dist = Join-Path $Root 'dist'
 $Stage = Join-Path $Dist $Name
 
@@ -57,16 +57,16 @@ if (-not $SkipBuild) {
     Info 'building release binaries'
     Invoke-Checked cargo build --release --locked -p sqail-ui -p sqail-service
 }
-foreach ($exe in 'sqail2.exe', 'sqail-service.exe') {
+foreach ($exe in 'sqail.exe', 'sqail-service.exe') {
     if (-not (Test-Path "target/release/$exe")) { Die "target/release/$exe missing (build without -SkipBuild)" }
 }
 
 Info "staging $Name"
 if (Test-Path $Stage) { Remove-Item -Recurse -Force $Stage }
 New-Item -ItemType Directory -Force -Path $Stage, "$Stage/setup", "$Stage/docs" | Out-Null
-Copy-Item target/release/sqail2.exe, target/release/sqail-service.exe $Stage
-foreach ($exe in 'sqail2.exe', 'sqail-service.exe') { Invoke-Sign (Join-Path $Stage $exe) }
-Copy-Item packaging/icons/sqail2.ico $Stage
+Copy-Item target/release/sqail.exe, target/release/sqail-service.exe $Stage
+foreach ($exe in 'sqail.exe', 'sqail-service.exe') { Invoke-Sign (Join-Path $Stage $exe) }
+Copy-Item packaging/icons/sqail.ico $Stage
 Copy-Item LICENSE (Join-Path $Stage 'LICENSE.txt')
 Copy-Item docs/windows-setup.md (Join-Path $Stage 'SETUP.md')
 Copy-Item dev/sqail-service.example.toml $Stage
@@ -76,11 +76,11 @@ foreach ($d in 'docs/user-guide.md', 'docs/windows-setup.md', 'docs/operations.m
     Copy-Item $d "$Stage/docs"
 }
 @"
-sqail2 ${Version}: a fast SQL editor backed by sqail-service
+sqail ${Version}: a fast SQL editor backed by sqail-service
 =============================================================
 
 Just me, on this PC
-    Run sqail2.exe and choose "Use the local service". Then add a
+    Run sqail.exe and choose "Use the local service". Then add a
     connection (+ New connection). Nothing else to install.
 
 A shared gateway for a team (connects to your SQL Servers)
@@ -90,7 +90,7 @@ A shared gateway for a team (connects to your SQL Servers)
     walks through it.
 
 Files
-    sqail2.exe              the editor
+    sqail.exe              the editor
     sqail-service.exe       the HTTPS gateway (all database access goes through it)
     SETUP.md                step-by-step setup, SQL Server preparation, troubleshooting
     setup\                  install/uninstall the Windows service, create tokens,
@@ -108,7 +108,7 @@ Ok "dist/$Name.zip"
 if (Get-Command wix -ErrorAction SilentlyContinue) {
     Info 'building MSI'
     $Msi = Join-Path $Dist "$Name.msi"
-    Invoke-Checked wix build packaging/wix/sqail2.wxs -arch x64 `
+    Invoke-Checked wix build packaging/wix/sqail.wxs -arch x64 `
         -d "Version=$Version" -d "StageDir=$Stage" -o $Msi
     Invoke-Sign $Msi
     Write-Checksum $Msi

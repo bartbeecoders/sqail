@@ -1,5 +1,5 @@
 //! Headless end-to-end test of the real app: an in-process sqail-service with
-//! an SQLite database, the sqail2 UI driven by egui_kittest (clicks, keys) and
+//! an SQLite database, the sqail UI driven by egui_kittest (clicks, keys) and
 //! rendered with wgpu. Screenshots land in `target/ui-shots/` for review.
 
 use std::path::PathBuf;

@@ -23,8 +23,8 @@ sqail-service [--data-dir DIR] [--config FILE] <command>
 |---|---|
 | Linux | `~/.local/share/sqail-service/` |
 | Windows (per user) | `%APPDATA%\bartbeecoders\sqail-service\data\` |
-| Windows service | `%ProgramData%\sqail2\service\` |
-| Dev scripts | `.sqail2/service/` in the repository |
+| Windows service | `%ProgramData%\sqail\service\` |
+| Dev scripts | `.sqail/service/` in the repository |
 
 `--data-dir` or `SQAIL_DATA_DIR` overrides the location. The directory
 contains:
@@ -55,7 +55,7 @@ When the service starts and no admin token exists, it creates one:
   the file is, but not the token. Copy the token somewhere safe and delete the
   file.
 
-Tokens are never logged. `serve --no-bootstrap-token` skips this step. sqail2
+Tokens are never logged. `serve --no-bootstrap-token` skips this step. sqail
 uses that flag when it starts a local service, because it creates its own token
 with `token create`. You can always make another admin token on the service
 host with `sqail-service token create --name me --scope admin`, or with
@@ -128,11 +128,11 @@ The service only speaks HTTPS, with TLS 1.3 by default
 **Self-signed (default):** on the first start the service generates a
 certificate for `localhost`, `127.0.0.1`, `::1` and the host name. Clients pin
 its fingerprint on first use. Tell your users the value of `sqail-service
-fingerprint` so they can compare it with what sqail2 shows. If you delete
+fingerprint` so they can compare it with what sqail shows. If you delete
 `tls/`, a new certificate is generated and every client has to re-pin it.
 
 **Your own certificate:** set both `tls.cert` (PEM chain, leaf first) and
-`tls.key`. Users then choose *Use system trust* in sqail2. To renew, replace
+`tls.key`. Users then choose *Use system trust* in sqail. To renew, replace
 the files and restart the service. Clients that pinned the old fingerprint
 must re-pin, so prefer system trust whenever you have a CA-issued
 certificate.
@@ -151,7 +151,7 @@ openssl x509 -req -in alice.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 3
 ```
 
 Give Alice `alice.crt` and `alice.key`. She adds them as `client_cert` and
-`client_key` to the service entry in her sqail2 `settings.toml` (see the
+`client_key` to the service entry in her sqail `settings.toml` (see the
 [user guide](user-guide.md#files-and-settings)).
 
 ## Serving other machines
@@ -199,7 +199,7 @@ sqail-service.exe service uninstall        # stops and removes it; data stays
 ```
 
 * The service runs as **LocalService**, starts automatically, and keeps its
-  data in `%ProgramData%\sqail2\service` (pass `--data-dir` / `--config` to
+  data in `%ProgramData%\sqail\service` (pass `--data-dir` / `--config` to
   `install` to change them).
 * `install` removes inherited permissions from the data directory. Only
   SYSTEM, Administrators and LocalService have access afterwards.
@@ -212,9 +212,9 @@ sqail-service.exe service uninstall        # stops and removes it; data stays
   Server, run the service as a domain account or gMSA that has a login there:
   `sc.exe config sqail-service obj= "DOMAIN\svc-sqail$"`. Then grant that
   account modify rights on the data directory.
-* sqail2's *Use the local service* creates tokens in the **per-user** data
+* sqail's *Use the local service* creates tokens in the **per-user** data
   directory. With the machine-wide service installed, create a token instead
-  (`sqail-service --data-dir "%ProgramData%\sqail2\service" token create
+  (`sqail-service --data-dir "%ProgramData%\sqail\service" token create
   --name alice` in an elevated prompt) and use *Connect to a service…* with
   `https://127.0.0.1:7443`.
 

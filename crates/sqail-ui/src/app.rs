@@ -188,7 +188,7 @@ impl SqailApp {
                 let mut form = WelcomeForm::default();
                 // Development convenience (scripts/dev.sh): skip the first-run
                 // choice and set up the local service directly.
-                if std::env::var_os("SQAIL2_AUTO_LOCAL").is_some()
+                if std::env::var_os("SQAIL_AUTO_LOCAL").is_some()
                     && local_service::find_binary().is_some()
                 {
                     form.busy = true;
@@ -1730,6 +1730,10 @@ impl SqailApp {
                 }
                 let conn = self.tabs.get(idx).and_then(|t| t.connection);
                 let catalog = conn.map(|c| crate::schema::TreeCatalog::new(&self.schema, c));
+                let style = crate::sql::format::Style {
+                    uppercase: self.settings.format_uppercase,
+                    indent: self.settings.format_indent,
+                };
                 if let Some(tab) = self.tabs.get_mut(idx) {
                     let env = crate::editor::EditorEnv {
                         engine,
@@ -1739,6 +1743,7 @@ impl SqailApp {
                             .as_ref()
                             .map(|c| c as &dyn crate::sql::complete::Catalog),
                         autocomplete: self.settings.autocomplete,
+                        format: &style,
                     };
                     crate::editor::editor_ui(ui, tab, &env);
                 }

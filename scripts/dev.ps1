@@ -13,9 +13,9 @@ for ($i = 0; $i -lt 50; $i++) {
     Start-Sleep -Milliseconds 200
 }
 try {
-    Info 'starting sqail2 UI'
-    $env:SQAIL2_AUTO_LOCAL = '1'
-    cargo run -q -p sqail-ui --bin sqail2
+    Info 'starting sqail UI'
+    $env:SQAIL_AUTO_LOCAL = '1'
+    cargo run -q -p sqail-ui --bin sqail
 } finally {
     Stop-Process -Id $service.Id -ErrorAction SilentlyContinue
 }

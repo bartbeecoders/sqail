@@ -30,7 +30,12 @@ param(
     [switch] $List,
     [Parameter(ParameterSetName = 'Revoke', Mandatory = $true)]
     [string] $Revoke,
-    [string] $DataDir = (Join-Path $env:ProgramData 'sqail2\service')
+    # Default: %ProgramData%\sqail\service, or sqail2\service when that is
+    # where an earlier sqail2 install keeps its data.
+    [string] $DataDir = $(if (-not (Test-Path (Join-Path $env:ProgramData 'sqail\service')) -and
+                              (Test-Path (Join-Path $env:ProgramData 'sqail2\service'))) {
+                            Join-Path $env:ProgramData 'sqail2\service' } else {
+                            Join-Path $env:ProgramData 'sqail\service' })
 )
 
 $ErrorActionPreference = 'Stop'
@@ -39,7 +44,7 @@ function Find-ServiceExe {
     $svc = Get-CimInstance Win32_Service -Filter "Name='sqail-service'" -ErrorAction SilentlyContinue
     if ($svc -and $svc.PathName -match '^"([^"]+)"') { return $Matches[1] }
     foreach ($p in (Join-Path (Split-Path -Parent $PSScriptRoot) 'sqail-service.exe'),
-                   (Join-Path $env:ProgramFiles 'sqail2\sqail-service.exe')) {
+                   (Join-Path $env:ProgramFiles 'sqail\sqail-service.exe')) {
         if (Test-Path $p) { return $p }
     }
     throw 'sqail-service.exe not found'
@@ -68,7 +73,7 @@ Write-Host "Token for $Name ($Scope scope). It is shown only now:" -ForegroundCo
 Write-Host ''
 Write-Host "    $token"
 Write-Host ''
-Write-Host 'In sqail2: Service > Connect to a service...'
+Write-Host 'In sqail: Service > Connect to a service...'
 Write-Host "    URL          https://$([Net.Dns]::GetHostEntry('').HostName):$port"
 Write-Host "    Token        (above)"
-Write-Host "    Fingerprint  $fingerprint   (compare when sqail2 asks)"
+Write-Host "    Fingerprint  $fingerprint   (compare when sqail asks)"

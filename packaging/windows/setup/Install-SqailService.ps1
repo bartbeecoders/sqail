@@ -8,7 +8,7 @@
     there: who may connect (network), the certificate, SQLite folders,
     limits, tokens and database connections.
 
-    1. Copies sqail-service.exe and sqail2.exe to -InstallDir (skipped when
+    1. Copies sqail-service.exe and sqail.exe to -InstallDir (skipped when
        they are already there, e.g. after the MSI).
     2. Registers and starts the "sqail-service" Windows service (LocalService,
        automatic start, restarts after a crash). The data directory is locked
@@ -29,8 +29,13 @@
 #>
 [CmdletBinding()]
 param(
-    [string] $InstallDir = (Join-Path $env:ProgramFiles 'sqail2'),
-    [string] $DataDir = (Join-Path $env:ProgramData 'sqail2\service'),
+    [string] $InstallDir = (Join-Path $env:ProgramFiles 'sqail'),
+    # Default: %ProgramData%\sqail\service, or sqail2\service when that is
+    # where an earlier sqail2 install keeps its data.
+    [string] $DataDir = $(if (-not (Test-Path (Join-Path $env:ProgramData 'sqail\service')) -and
+                              (Test-Path (Join-Path $env:ProgramData 'sqail2\service'))) {
+                            Join-Path $env:ProgramData 'sqail2\service' } else {
+                            Join-Path $env:ProgramData 'sqail\service' }),
     # Who may reach the service once it serves other PCs (Windows Firewall
     # syntax: LocalSubnet, Any, 10.0.0.0/8, 192.168.1.10, ...).
     [string[]] $FirewallRemoteAddress = @('LocalSubnet'),
@@ -66,7 +71,7 @@ $Exe = Join-Path $InstallDir 'sqail-service.exe'
 if ((Resolve-Path $PackageDir).Path.TrimEnd('\') -ne [IO.Path]::GetFullPath($InstallDir).TrimEnd('\')) {
     Step "copying binaries to $InstallDir"
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-    foreach ($f in 'sqail-service.exe', 'sqail2.exe', 'LICENSE.txt') {
+    foreach ($f in 'sqail-service.exe', 'sqail.exe', 'LICENSE.txt') {
         $src = Join-Path $PackageDir $f
         if (Test-Path $src) { Copy-Item $src $InstallDir -Force }
     }

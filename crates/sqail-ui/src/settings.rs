@@ -11,7 +11,7 @@ pub struct Settings {
     pub services: Vec<ServiceProfile>,
     /// URL of the service to connect to on start.
     pub active_service: Option<String>,
-    /// Start the local sqail-service when sqail2 starts (if it is not running).
+    /// Start the local sqail-service when sqail starts (if it is not running).
     pub autostart_local: bool,
     pub theme: ThemePref,
     pub editor_font_size: f32,
@@ -29,7 +29,7 @@ pub struct ServiceProfile {
     pub url: String,
     /// Pinned certificate fingerprint; `None` = verify with the OS trust store.
     pub fingerprint: Option<String>,
-    /// Set up via "Use a local service" (sqail2 can start it).
+    /// Set up via "Use a local service" (sqail can start it).
     #[serde(default)]
     pub local: bool,
     /// Mutual TLS: client certificate and key (PEM files), when the service
@@ -75,17 +75,56 @@ pub fn override_config_dir(dir: PathBuf) {
     CONFIG_DIR.with(|c| *c.borrow_mut() = Some(dir));
 }
 
-/// `$SQAIL2_CONFIG_DIR`, else the OS config dir (e.g. `~/.config/sqail2`).
+/// `$SQAIL_CONFIG_DIR`, else the OS config dir (e.g. `~/.config/sqail`).
 pub fn config_dir() -> PathBuf {
     if let Some(d) = CONFIG_DIR.with(|c| c.borrow().clone()) {
         return d;
     }
-    if let Some(d) = std::env::var_os("SQAIL2_CONFIG_DIR") {
+    if let Some(d) = std::env::var_os("SQAIL_CONFIG_DIR") {
         return PathBuf::from(d);
     }
-    directories::ProjectDirs::from("dev", "bartbeecoders", "sqail2")
+    directories::ProjectDirs::from("dev", "bartbeecoders", "sqail")
         .map(|d| d.config_dir().to_path_buf())
-        .unwrap_or_else(|| PathBuf::from(".sqail2"))
+        .unwrap_or_else(|| PathBuf::from(".sqail"))
+}
+
+/// Up to 1.0 the app was called sqail2. Move its config dir (settings,
+/// tokens.toml, history, workspace) and eframe's window state to the new
+/// names, once, if the new ones do not exist yet.
+pub fn migrate_from_sqail2() {
+    let config = if std::env::var_os("SQAIL_CONFIG_DIR").is_some() {
+        None
+    } else {
+        directories::ProjectDirs::from("dev", "bartbeecoders", "sqail2")
+            .zip(directories::ProjectDirs::from(
+                "dev",
+                "bartbeecoders",
+                "sqail",
+            ))
+            .map(|(old, new)| {
+                (
+                    old.config_dir().to_path_buf(),
+                    new.config_dir().to_path_buf(),
+                )
+            })
+    };
+    let window = eframe::storage_dir("sqail2").zip(eframe::storage_dir("sqail"));
+    for (old, new) in config.into_iter().chain(window) {
+        if new.exists() || !old.is_dir() {
+            continue;
+        }
+        if let Some(parent) = new.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match std::fs::rename(&old, &new) {
+            Ok(()) => {
+                tracing::info!(from = %old.display(), to = %new.display(), "moved sqail2 data")
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, from = %old.display(), "could not move sqail2 data")
+            }
+        }
+    }
 }
 
 impl Settings {

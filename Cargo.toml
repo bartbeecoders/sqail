@@ -31,7 +31,7 @@ strip = true
 panic = "abort"
 
 # tokio-postgres with the column type OID exposed on simple-query results.
-# See vendor/tokio-postgres/SQAIL2-PATCH.md.
+# See vendor/tokio-postgres/SQAIL-PATCH.md.
 [patch.crates-io]
 tokio-postgres = { path = "vendor/tokio-postgres" }
 

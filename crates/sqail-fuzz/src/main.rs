@@ -104,6 +104,11 @@ const PIECES: &[&str] = &[
     "TOP (10)",
     "LIMIT 5",
     "AS",
+    "WITH",
+    "TOP",
+    "APPLY",
+    "LATERAL",
+    "*",
     "x",
 ];
 

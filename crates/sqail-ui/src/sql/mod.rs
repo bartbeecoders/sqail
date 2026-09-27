@@ -1,6 +1,7 @@
 //! SQL text helpers for the editor: lexing, highlighting, statement bounds.
 
 pub mod complete;
+pub mod drop;
 pub mod format;
 pub mod highlight;
 pub mod lex;
@@ -29,6 +30,21 @@ pub fn quote_ident(engine: sqail_client::proto::Engine, name: &str) -> String {
     }
 }
 
+/// `schema.table`, quoted; SQLite's default `main` schema is left out.
+pub fn qualified_name(
+    engine: sqail_client::proto::Engine,
+    schema: Option<&str>,
+    table: &str,
+) -> String {
+    use sqail_client::proto::Engine;
+    match schema {
+        Some(s) if engine != Engine::Sqlite || s != "main" => {
+            format!("{}.{}", quote_ident(engine, s), quote_ident(engine, table))
+        }
+        _ => quote_ident(engine, table),
+    }
+}
+
 /// `SELECT … first 100 rows` in the engine's dialect.
 pub fn select_top(
     engine: sqail_client::proto::Engine,
@@ -37,12 +53,7 @@ pub fn select_top(
     n: u32,
 ) -> String {
     use sqail_client::proto::Engine;
-    let name = match schema {
-        Some(s) if engine != Engine::Sqlite || s != "main" => {
-            format!("{}.{}", quote_ident(engine, s), quote_ident(engine, table))
-        }
-        _ => quote_ident(engine, table),
-    };
+    let name = qualified_name(engine, schema, table);
     match engine {
         Engine::Mssql => format!("SELECT TOP ({n}) *\nFROM {name};"),
         _ => format!("SELECT *\nFROM {name}\nLIMIT {n};"),

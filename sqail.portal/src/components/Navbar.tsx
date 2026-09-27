@@ -10,8 +10,8 @@ export default function Navbar() {
       <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-3">
         {/* Logo */}
         <a href="#" className="flex items-center gap-2.5">
-          <img src="/icon.png" alt="SQaiL" className="h-8 w-8" />
-          <span className="text-lg font-bold text-text-primary">SQaiL</span>
+          <img src="/icon.png" alt="sqail" className="h-8 w-8" />
+          <span className="text-lg font-bold text-text-primary">sqail</span>
         </a>
 
         {/* Desktop nav */}

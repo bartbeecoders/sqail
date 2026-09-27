@@ -1,4 +1,4 @@
-//! sqail2 desktop app entry point.
+//! sqail desktop app entry point.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 

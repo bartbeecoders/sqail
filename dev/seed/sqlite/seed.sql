@@ -1,4 +1,4 @@
--- sqail2 test schema for SQLite. Built into dev/data/sqail_test.db by scripts/db.sh.
+-- sqail test schema for SQLite. Built into dev/data/sqail_test.db by scripts/db.sh.
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE customers (

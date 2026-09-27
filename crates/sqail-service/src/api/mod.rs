@@ -39,7 +39,7 @@ use crate::store::StoredConnection;
 #[openapi(
     info(
         title = "sqail-service",
-        description = "HTTPS gateway between sqail2 and SQL databases. Query results stream as NDJSON (`application/x-ndjson`), one `QueryEvent` per line.",
+        description = "HTTPS gateway between sqail and SQL databases. Query results stream as NDJSON (`application/x-ndjson`), one `QueryEvent` per line.",
     ),
     modifiers(&BearerAuth),
     security(("bearer" = [])),

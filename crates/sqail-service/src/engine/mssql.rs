@@ -42,7 +42,7 @@ impl MssqlDriver {
         if let Some(db) = &p.database {
             config.database(db);
         }
-        config.application_name("sqail2");
+        config.application_name("sqail");
         config.encryption(match p.encrypt {
             MssqlEncrypt::Off => EncryptionLevel::Off,
             MssqlEncrypt::On => EncryptionLevel::On,

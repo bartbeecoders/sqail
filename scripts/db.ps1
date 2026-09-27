@@ -4,7 +4,7 @@
 param([string]$Command = 'status')
 . "$PSScriptRoot/common.ps1"
 
-function SqlcmdIn { podman exec sqail2-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P $MssqlSaPassword -b @args }
+function SqlcmdIn { podman exec sqail-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P $MssqlSaPassword -b @args }
 
 function WaitFor($name, [scriptblock]$probe) {
     Write-Host -NoNewline "    waiting for $name "
@@ -17,21 +17,21 @@ function WaitFor($name, [scriptblock]$probe) {
 }
 
 function Start-Postgres {
-    podman container exists sqail2-postgres
-    if ($LASTEXITCODE -eq 0) { podman start sqail2-postgres | Out-Null; return }
-    Invoke-Checked podman run -d --name sqail2-postgres `
+    podman container exists sqail-postgres
+    if ($LASTEXITCODE -eq 0) { podman start sqail-postgres | Out-Null; return }
+    Invoke-Checked podman run -d --name sqail-postgres `
         -e POSTGRES_USER=sqail -e POSTGRES_PASSWORD=sqail_dev_pw -e POSTGRES_DB=sqail_test `
-        -p 127.0.0.1:55432:5432 -v sqail2-pgdata:/var/lib/postgresql/data `
+        -p 127.0.0.1:55432:5432 -v sqail-pgdata:/var/lib/postgresql/data `
         -v "$Root/dev/seed/postgres:/docker-entrypoint-initdb.d:ro" `
         docker.io/library/postgres:17-alpine
 }
 
 function Start-Mssql {
-    podman container exists sqail2-mssql
-    if ($LASTEXITCODE -eq 0) { podman start sqail2-mssql | Out-Null; return }
-    Invoke-Checked podman run -d --name sqail2-mssql `
+    podman container exists sqail-mssql
+    if ($LASTEXITCODE -eq 0) { podman start sqail-mssql | Out-Null; return }
+    Invoke-Checked podman run -d --name sqail-mssql `
         -e ACCEPT_EULA=Y -e MSSQL_PID=Developer -e "MSSQL_SA_PASSWORD=$MssqlSaPassword" `
-        -p 127.0.0.1:51433:1433 -v sqail2-mssqldata:/var/opt/mssql `
+        -p 127.0.0.1:51433:1433 -v sqail-mssqldata:/var/opt/mssql `
         -v "$Root/dev/seed/mssql:/seed:ro" `
         mcr.microsoft.com/mssql/server:2022-latest
 }
@@ -62,7 +62,7 @@ function Seed-Sqlite {
 }
 
 function Show-Status {
-    podman ps -a --filter name=sqail2- --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+    podman ps -a --filter name=sqail- --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
     Write-Host ''
     Write-Host '  postgres  postgres://sqail:sqail_dev_pw@127.0.0.1:55432/sqail_test'
     Write-Host "  mssql     server=127.0.0.1,51433  db=sqail_test  user=sqail|sa  pw=$MssqlSaPassword"
@@ -70,8 +70,8 @@ function Show-Status {
 }
 
 function Destroy {
-    podman rm -f -i sqail2-postgres sqail2-mssql | Out-Null
-    podman volume rm -f sqail2-pgdata sqail2-mssqldata 2>$null | Out-Null
+    podman rm -f -i sqail-postgres sqail-mssql | Out-Null
+    podman volume rm -f sqail-pgdata sqail-mssqldata 2>$null | Out-Null
     Remove-Item -Recurse -Force $DataDir -ErrorAction SilentlyContinue
     Ok 'containers, volumes and sqlite file removed'
 }
@@ -81,7 +81,7 @@ function Up {
     Info 'starting test databases'
     Start-Postgres
     Start-Mssql
-    WaitFor postgres { podman exec sqail2-postgres psql -U sqail -d sqail_test -tAc 'SELECT 1 FROM sales.type_zoo LIMIT 1' }
+    WaitFor postgres { podman exec sqail-postgres psql -U sqail -d sqail_test -tAc 'SELECT 1 FROM sales.type_zoo LIMIT 1' }
     WaitFor mssql { SqlcmdIn -Q 'SELECT 1' }
     Seed-Mssql
     Seed-Sqlite
@@ -90,12 +90,12 @@ function Up {
 
 switch ($Command) {
     'up'      { Up }
-    'down'    { podman stop -i -t 30 sqail2-postgres sqail2-mssql | Out-Null; Ok 'stopped' }
+    'down'    { podman stop -i -t 30 sqail-postgres sqail-mssql | Out-Null; Ok 'stopped' }
     'reset'   { Destroy; Up }
     'destroy' { Destroy }
     'status'  { Show-Status }
-    'logs'    { podman logs -f --names sqail2-postgres sqail2-mssql }
-    'psql'    { podman exec -it sqail2-postgres psql -U sqail -d sqail_test }
-    'sqlcmd'  { podman exec -it sqail2-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P $MssqlSaPassword -d sqail_test }
+    'logs'    { podman logs -f --names sqail-postgres sqail-mssql }
+    'psql'    { podman exec -it sqail-postgres psql -U sqail -d sqail_test }
+    'sqlcmd'  { podman exec -it sqail-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P $MssqlSaPassword -d sqail_test }
     default   { Get-Content $PSCommandPath -TotalCount 3; exit 1 }
 }

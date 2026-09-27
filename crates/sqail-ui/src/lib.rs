@@ -1,4 +1,4 @@
-//! sqail2: a native SQL editor that talks to databases through sqail-service.
+//! sqail: a native SQL editor that talks to databases through sqail-service.
 //!
 //! The binary (`src/main.rs`) only calls [`run`]; everything lives here so the
 //! UI can be tested headlessly (see `tests/ui.rs`).
@@ -28,15 +28,16 @@ pub use app::SqailApp;
 pub fn run() -> eframe::Result {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("SQAIL2_LOG")
+            tracing_subscriber::EnvFilter::try_from_env("SQAIL_UI_LOG")
                 .unwrap_or_else(|_| "warn,sqail_ui=info".into()),
         )
         .init();
+    settings::migrate_from_sqail2();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("sqail2")
-            .with_app_id("sqail2")
+            .with_title("sqail")
+            .with_app_id("sqail")
             .with_inner_size([1400.0, 900.0])
             .with_min_inner_size([720.0, 480.0])
             .with_icon(
@@ -46,7 +47,7 @@ pub fn run() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "sqail2",
+        "sqail",
         options,
         Box::new(|cc| Ok(Box::new(app::SqailApp::new(cc)))),
     )

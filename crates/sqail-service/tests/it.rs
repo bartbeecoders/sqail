@@ -975,7 +975,7 @@ async fn postgres_types_and_notices() {
 }
 
 /// `docs/openapi.json` is the published API reference; it must match what
-/// the service serves. Regenerate with `SQAIL2_BLESS=1 cargo test -p
+/// the service serves. Regenerate with `SQAIL_BLESS=1 cargo test -p
 /// sqail-service --test it openapi`.
 #[tokio::test]
 async fn published_openapi_document_is_current() {
@@ -991,17 +991,17 @@ async fn published_openapi_document_is_current() {
         .unwrap();
     let path = repo_root().join("docs/openapi.json");
     let pretty = serde_json::to_string_pretty(&served).unwrap() + "\n";
-    if std::env::var_os("SQAIL2_BLESS").is_some() {
+    if std::env::var_os("SQAIL_BLESS").is_some() {
         std::fs::write(&path, &pretty).unwrap();
         return;
     }
     let published: Value = serde_json::from_str(
-        &std::fs::read_to_string(&path).expect("docs/openapi.json exists (SQAIL2_BLESS=1)"),
+        &std::fs::read_to_string(&path).expect("docs/openapi.json exists (SQAIL_BLESS=1)"),
     )
     .unwrap();
     assert!(
         published == served,
-        "docs/openapi.json is stale; regenerate with SQAIL2_BLESS=1"
+        "docs/openapi.json is stale; regenerate with SQAIL_BLESS=1"
     );
 }
 

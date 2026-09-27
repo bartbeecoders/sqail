@@ -18,6 +18,6 @@ else
 fi
 if [[ "${1:-}" == "--it" ]]; then
     "$ROOT/scripts/db.sh" up
-    info "integration tests"; SQAIL2_IT=1 cargo test --workspace -- --ignored
+    info "integration tests"; SQAIL_IT=1 cargo test --workspace -- --ignored
 fi
 ok "all checks passed"

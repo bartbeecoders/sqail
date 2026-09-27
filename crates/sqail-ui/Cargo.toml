@@ -1,6 +1,6 @@
 [package]
 name = "sqail-ui"
-description = "sqail2 desktop SQL editor (native Rust UI)"
+description = "sqail desktop SQL editor (native Rust UI)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,7 +11,7 @@ publish.workspace = true
 path = "src/lib.rs"
 
 [[bin]]
-name = "sqail2"
+name = "sqail"
 path = "src/main.rs"
 
 [dependencies]

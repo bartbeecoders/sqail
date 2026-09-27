@@ -1,0 +1,6 @@
+# Only the portal image is built from this context (sqail.portal/Dockerfile).
+*
+!CHANGELOG.md
+!sqail.portal/
+sqail.portal/node_modules/
+sqail.portal/dist/

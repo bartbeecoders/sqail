@@ -1,0 +1,133 @@
+name: release
+
+# Tag v<version> (matching `version` in Cargo.toml) to release:
+#   ci.yml checks → Linux tarball + Windows zip/MSI → GitHub release,
+#   upload to the download server (+ current.json) → portal redeploy.
+# "Run workflow" (workflow_dispatch) only builds the packages and attaches
+# them to the run as artifacts.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Cargo.toml version: $VERSION"
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$VERSION" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $VERSION"
+            exit 1
+          fi
+
+  package:
+    needs: [ci, version]
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux tarball
+        if: runner.os == 'Linux'
+        run: ./scripts/package-linux.sh
+      - name: Windows zip + MSI
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # WiX 5: v6+ requires accepting the OSMF EULA.
+          dotnet tool install --global wix --version 5.0.2
+          ./scripts/package-windows.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sqail-${{ runner.os }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.msi
+            dist/*.sha256
+          if-no-files-found: error
+
+  github-release:
+    if: github.ref_type == 'tag'
+    needs: [version, package]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Release notes from CHANGELOG.md
+        run: |
+          awk -v v="${{ needs.version.outputs.version }}" \
+            '/^## / { p = ($2 == v) ; next } p' CHANGELOG.md > notes.md
+          if [[ ! -s notes.md ]]; then
+            echo "::error::CHANGELOG.md has no '## ${{ needs.version.outputs.version }}' section"
+            exit 1
+          fi
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: sqail ${{ needs.version.outputs.version }}
+          body_path: notes.md
+          files: dist/*
+          fail_on_unmatched_files: true
+          make_latest: true
+
+  deploy-binaries:
+    if: github.ref_type == 'tag'
+    needs: [version, package]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: upload
+          merge-multiple: true
+      - name: Write current.json for the portal
+        run: |
+          cd upload
+          ls -1 | jq -R -s \
+            --arg version "${{ needs.version.outputs.version }}" \
+            --arg date "$(date -u +%Y-%m-%d)" \
+            '{version: $version, date: $date, files: (split("\n") | map(select(length > 0)))}' \
+            > current.json
+          cat current.json
+      - name: Upload to VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          source: "upload/*"
+          target: /opt/sqail-releases
+          strip_components: 1
+
+  deploy-portal:
+    # Rebuilt so the changelog on sqail.io includes this release.
+    if: github.ref_type == 'tag'
+    needs: [version, deploy-binaries]
+    uses: ./.github/workflows/portal.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+    secrets: inherit

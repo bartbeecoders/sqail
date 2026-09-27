@@ -1,7 +1,7 @@
 //! Windows service mode: `sqail-service service install|uninstall|run`.
 //!
 //! `install` registers an auto-start service running as `LocalService` with
-//! its data in `%ProgramData%\sqail2\service` (ACL'd to SYSTEM,
+//! its data in `%ProgramData%\sqail\service` (ACL'd to SYSTEM,
 //! Administrators and LocalService only) and prints the first admin token.
 //! The SCM then launches `sqail-service service run --data-dir <dir>`, which
 //! logs to `<data-dir>\logs\sqail-service.log`.
@@ -27,8 +27,8 @@ use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use windows_service::{define_windows_service, service_dispatcher};
 
 const NAME: &str = "sqail-service";
-const DISPLAY_NAME: &str = "sqail2 database gateway";
-const DESCRIPTION: &str = "HTTPS REST gateway between sqail2 and SQL databases.";
+const DISPLAY_NAME: &str = "sqail database gateway";
+const DESCRIPTION: &str = "HTTPS REST gateway between sqail and SQL databases.";
 
 #[derive(Subcommand)]
 pub enum ServiceCommand {
@@ -66,7 +66,13 @@ fn default_data_dir() -> PathBuf {
     let base = std::env::var_os("ProgramData")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
-    base.join("sqail2").join("service")
+    let dir = base.join("sqail").join("service");
+    // Installed as sqail2 (up to 1.0): keep using that data.
+    let sqail2 = base.join("sqail2").join("service");
+    if !dir.exists() && sqail2.is_dir() {
+        return sqail2;
+    }
+    dir
 }
 
 fn install(data_dir: Option<PathBuf>, config: Option<PathBuf>, start: bool) -> Result<()> {

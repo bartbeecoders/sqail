@@ -2,7 +2,7 @@
 #   systemctl --user enable --now sqail-service
 # Logs: journalctl --user -u sqail-service
 [Unit]
-Description=sqail-service (HTTPS gateway between sqail2 and SQL databases)
+Description=sqail-service (HTTPS gateway between sqail and SQL databases)
 Documentation=https://codeberg.org/bartbeecoders/sqail
 After=network-online.target
 Wants=network-online.target

@@ -28,7 +28,7 @@ the server. See `crates/sqail-client/examples/bench.rs`.
 * **Export:** 1,014,900 rows to CSV grew memory by 10 MB (`sqail-ui` test
   `million_row_export_streams_with_flat_memory`).
 
-## sqail2 UI
+## sqail UI
 
 Headless egui_kittest harness, release build (`crates/sqail-ui/tests/ui.rs`,
 `large_results_and_all_engines`). The harness also builds an AccessKit tree

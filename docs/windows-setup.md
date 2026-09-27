@@ -1,8 +1,8 @@
-# Setting up sqail2 on Windows
+# Setting up sqail on Windows
 
-sqail2 has two parts:
+sqail has two parts:
 
-* **sqail2.exe** is the editor that people use.
+* **sqail.exe** is the editor that people use.
 * **sqail-service.exe** is an HTTPS gateway. It holds the database
   connections and credentials, and every query goes through it. The editor
   never talks to SQL Server directly.
@@ -10,7 +10,7 @@ sqail2 has two parts:
 ```
  users' PCs                    gateway host                     database servers
 ┌──────────┐   HTTPS :7443   ┌──────────────────┐   TDS :1433   ┌──────────────┐
-│ sqail2   │ ───────────────▶│ sqail-service    │──────────────▶│ SQL Server   │
+│ sqail   │ ───────────────▶│ sqail-service    │──────────────▶│ SQL Server   │
 │ (editor) │  token + pinned │ (Windows service)│  login + TLS  │ (any number) │
 └──────────┘   certificate   └──────────────────┘               └──────────────┘
 ```
@@ -20,7 +20,7 @@ Pick the setup that fits:
 | | **A. Just me** | **B. Shared gateway** |
 |---|---|---|
 | Who | One person on their own PC | A team, or anyone who shouldn't hold the DB passwords |
-| Service runs | Next to the editor, as you, started by sqail2 | As a Windows service on a server |
+| Service runs | Next to the editor, as you, started by sqail | As a Windows service on a server |
 | SQL Server credentials | Stored on your PC (encrypted) | Stored on the gateway only; users never see them |
 | Windows authentication | As **you** | As the **service account** (see [B5](#b5-windows-authentication-optional)) |
 | Setup time | 1 minute | 15–30 minutes |
@@ -29,9 +29,9 @@ Pick the setup that fits:
 
 ## A. Just me
 
-1. Unzip `sqail2-<version>-windows-x64.zip` (or run the MSI) and start
-   **sqail2.exe**.
-2. Choose **Use the local service**. sqail2 starts `sqail-service.exe` from its
+1. Unzip `sqail-<version>-windows-x64.zip` (or run the MSI) and start
+   **sqail.exe**.
+2. Choose **Use the local service**. sqail starts `sqail-service.exe` from its
    own folder, creates a token and stores it in Windows Credential Manager.
 3. Click **+ Add** next to *Connections* in the sidebar (or *Connections →
    New connection…*) and choose **SQL Server**:
@@ -98,7 +98,7 @@ GRANT VIEW DEFINITION TO sqail_reader;               -- schema tree, "Script CRE
 
 Optional: `GRANT ALTER ANY CONNECTION TO sqail_reader;` (on `master`) lets
 **Cancel** stop a running query with `KILL` straight away. Without it,
-sqail2 still stops the query by closing its connection.
+sqail still stops the query by closing its connection.
 
 > **Read-only profiles:** a profile marked *read-only* tells SQL Server
 > `ApplicationIntent=ReadOnly`, which only routes to readable secondaries.
@@ -107,14 +107,14 @@ sqail2 still stops the query by closing its connection.
 
 ### B2. Install the gateway service
 
-1. Copy `sqail2-<version>-windows-x64.zip` to the gateway host. **Before
+1. Copy `sqail-<version>-windows-x64.zip` to the gateway host. **Before
    unzipping**, right-click the zip → *Properties* → tick **Unblock**, so that
    Windows doesn't block the setup scripts. Then unzip it anywhere, e.g. to
-   `C:\Temp\sqail2`. You can also run the MSI instead, which installs to
-   `C:\Program Files\sqail2`.
+   `C:\Temp\sqail`. You can also run the MSI instead, which installs to
+   `C:\Program Files\sqail`.
 2. Right-click **`setup\Install-SqailService.cmd`** → **Run as administrator**.
    There is nothing to choose. The script:
-   * copies the programs to `C:\Program Files\sqail2`;
+   * copies the programs to `C:\Program Files\sqail`;
    * registers the **sqail-service** Windows service. It runs as *Local
      Service*, starts automatically, restarts itself after a crash, and its
      data folder is locked down to SYSTEM, Administrators and the service;
@@ -136,14 +136,14 @@ sqail2 still stops the query by closing its connection.
 4. The first admin token is printed in the console once. The admin page
    stays signed in for the browser tab; to sign in again later, keep the
    token in your password manager. If you lose it, run
-   `sqail-service --data-dir "%ProgramData%\sqail2\service" admin-link`
+   `sqail-service --data-dir "%ProgramData%\sqail\service" admin-link`
    in an elevated prompt: it prints a new sign-in link.
 
 The admin page also shows the **URL and certificate fingerprint** users need
 (*Overview*), and manages connections, tokens, backups and the audit log.
 
 **Own certificate (recommended for teams).** With a certificate from your
-company CA, sqail2 can verify the gateway through the Windows trust store
+company CA, sqail can verify the gateway through the Windows trust store
 instead of pinning, so certificate renewals need no action from users. The
 admin page takes PEM files. To convert a `.pfx` (openssl comes with Git for
 Windows):
@@ -172,7 +172,7 @@ runs from the gateway, so it checks exactly the path users' queries take.
 **With the setup script**, for scripted setups, on the gateway, in PowerShell:
 
 ```powershell
-cd "C:\Program Files\sqail2\setup"
+cd "C:\Program Files\sqail\setup"
 powershell -ExecutionPolicy Bypass -File .\Add-SqailSqlServer.ps1 `
     -Name "Sales (prod)" -Server sqlserver01.corp.local -Database Sales `
     -User sqail_reader -ReadOnly -Environment prod -Color "#c0392b"
@@ -191,7 +191,7 @@ hint. More examples:
 .\Add-SqailSqlServer.ps1 -Name "DW" -Server dwsql -Database DW -WindowsAuth
 ```
 
-**With sqail2**, on any PC, signed in with the **admin** token: click
+**With sqail**, on any PC, signed in with the **admin** token: click
 **+ Add** next to *Connections*, fill in the form (see the table in [A](#a-just-me)),
 then **Test** and **Save**.
 
@@ -202,7 +202,7 @@ For each user (or group of users), create a token: on the admin page under
 to send along), or with the script on the gateway:
 
 ```powershell
-cd "C:\Program Files\sqail2\setup"
+cd "C:\Program Files\sqail\setup"
 powershell -ExecutionPolicy Bypass -File .\New-SqailToken.ps1 -Name alice             # query scope
 powershell -ExecutionPolicy Bypass -File .\New-SqailToken.ps1 -Name reports -Scope read
 ```
@@ -220,8 +220,8 @@ time with `.\New-SqailToken.ps1 -Revoke <id>`, and list tokens with
 
 On the user's PC:
 
-1. Install sqail2 (MSI or zip).
-2. Start **sqail2.exe**. On first start it asks how to connect. Later, use
+1. Install sqail (MSI or zip).
+2. Start **sqail.exe**. On first start it asks how to connect. Later, use
    *Service → Connect to a service…*.
 3. Under **Another service**, enter the URL
    (`https://sqail-gw.corp.local:7443`) and the token, then click
@@ -236,7 +236,7 @@ The token is stored in the user's Windows Credential Manager.
 ### B5. Windows authentication (optional)
 
 With *Windows* authentication, SQL Server sees the **account the service runs
-as**, not the person using sqail2. Every user of that profile shares that
+as**, not the person using sqail. Every user of that profile shares that
 identity. Local Service connects to *other* machines anonymously, so for
 Windows authentication to a remote SQL Server, run the service as a domain
 account. A group-managed service account (gMSA) is best:
@@ -245,7 +245,7 @@ account. A group-managed service account (gMSA) is best:
 # On the gateway (after your AD admin created the gMSA and allowed this host):
 Install-ADServiceAccount svc-sqail
 sc.exe config sqail-service obj= "CORP\svc-sqail$" password= ""
-icacls "C:\ProgramData\sqail2\service" /grant "CORP\svc-sqail$:(OI)(CI)M" /T
+icacls "C:\ProgramData\sqail\service" /grant "CORP\svc-sqail$:(OI)(CI)M" /T
 Restart-Service sqail-service
 ```
 
@@ -267,7 +267,7 @@ as-is: `CREATE LOGIN [NT AUTHORITY\LOCAL SERVICE] FROM WINDOWS`.
 - [ ] `curl.exe -sk https://127.0.0.1:7443/v1/health` on the gateway returns `{"status":"ok",…}`.
 - [ ] From a user PC: `Test-NetConnection sqail-gw.corp.local -Port 7443` succeeds.
 - [ ] From the gateway: `Test-NetConnection sqlserver01 -Port 1433` succeeds.
-- [ ] In sqail2 with a user token: the connection is listed, and
+- [ ] In sqail with a user token: the connection is listed, and
       `SELECT @@SERVERNAME, SUSER_NAME()` returns the expected login.
 
 ---
@@ -298,10 +298,10 @@ rejected: it is an old-style (X.509 v1) certificate…*
 | `SQL browser timeout during resolving instance` | The SQL Server Browser service isn't running, or UDP 1434 is blocked. Start the Browser service, or connect with `SERVER,PORT`. |
 | `Connection refused` / `timed out connecting` | TCP/IP is disabled, the port is wrong, or a firewall is in the way. Test from the gateway with `Test-NetConnection <server> -Port 1433`. |
 | `Login failed for user 'NT AUTHORITY\ANONYMOUS LOGON'` | Windows authentication from Local Service to a remote server. See [B5](#b5-windows-authentication-optional). |
-| sqail2: `the token is not valid` / HTTP 401 | The token was revoked, mistyped, or comes from another gateway. Create a new one with `New-SqailToken.ps1`. |
-| sqail2: `certificate fingerprint mismatch` | The gateway's certificate changed (a new install or a new certificate). Check the new fingerprint with `sqail-service --data-dir C:\ProgramData\sqail2\service fingerprint`, then in sqail2 use *Service → Forget this service* and connect again. If nothing changed on the gateway, treat it as a possible attack. |
-| sqail2 can't reach the gateway | Does the admin page's *Overview* say "Only this computer can connect"? Then choose *Settings → Network → Other computers too*. Is the gateway's network profile *Public*? (The firewall rule only covers Domain and Private.) Test with `Test-NetConnection <gateway> -Port 7443`. |
-| The service doesn't start | Read `C:\ProgramData\sqail2\service\logs\sqail-service.log` and *Event Viewer → Windows Logs → System* (source *Service Control Manager*). The usual causes are the port being in use, or an unreadable certificate or key file. |
+| sqail: `the token is not valid` / HTTP 401 | The token was revoked, mistyped, or comes from another gateway. Create a new one with `New-SqailToken.ps1`. |
+| sqail: `certificate fingerprint mismatch` | The gateway's certificate changed (a new install or a new certificate). Check the new fingerprint with `sqail-service --data-dir C:\ProgramData\sqail\service fingerprint`, then in sqail use *Service → Forget this service* and connect again. If nothing changed on the gateway, treat it as a possible attack. |
+| sqail can't reach the gateway | Does the admin page's *Overview* say "Only this computer can connect"? Then choose *Settings → Network → Other computers too*. Is the gateway's network profile *Public*? (The firewall rule only covers Domain and Private.) Test with `Test-NetConnection <gateway> -Port 7443`. |
+| The service doesn't start | Read `C:\ProgramData\sqail\service\logs\sqail-service.log` and *Event Viewer → Windows Logs → System* (source *Service Control Manager*). The usual causes are the port being in use, or an unreadable certificate or key file. |
 | `requires the 'query' scope` | The user's token is `read`-scoped and the profile isn't read-only. Give them a `query` token, or mark the profile read-only. |
 
 Logs never contain passwords, tokens or query results. Queries are recorded
@@ -315,18 +315,18 @@ in the audit log (admin: `GET /v1/audit`, see `docs\api.md`).
 safe while the service runs:
 
 ```powershell
-& "C:\Program Files\sqail2\sqail-service.exe" --data-dir C:\ProgramData\sqail2\service backup D:\Backup\sqail
+& "C:\Program Files\sqail\sqail-service.exe" --data-dir C:\ProgramData\sqail\service backup D:\Backup\sqail
 ```
 
 This writes `D:\Backup\sqail\service-<timestamp>.db`. For a nightly backup,
 create a scheduled task (elevated):
 
 ```powershell
-schtasks /Create /TN "sqail2 backup" /SC DAILY /ST 02:00 /RU SYSTEM /TR `
-  "\"C:\Program Files\sqail2\sqail-service.exe\" --data-dir C:\ProgramData\sqail2\service backup D:\Backup\sqail"
+schtasks /Create /TN "sqail backup" /SC DAILY /ST 02:00 /RU SYSTEM /TR `
+  "\"C:\Program Files\sqail\sqail-service.exe\" --data-dir C:\ProgramData\sqail\service backup D:\Backup\sqail"
 ```
 
-Also keep a copy of **`C:\ProgramData\sqail2\service\master.key`** somewhere
+Also keep a copy of **`C:\ProgramData\sqail\service\master.key`** somewhere
 **else**, such as a password manager or a vault. It encrypts the stored SQL
 passwords. Without it, a backup restores everything except the passwords.
 With it, anyone holding the backup can decrypt them.
@@ -342,7 +342,7 @@ Data is migrated automatically.
 **Remove:** right-click `setup\Uninstall-SqailService.cmd` → *Run as
 administrator*. Data is kept unless you run the `.ps1` with `-RemoveData`.
 
-**Settings** live in `C:\ProgramData\sqail2\service\sqail-service.toml`
+**Settings** live in `C:\ProgramData\sqail\service\sqail-service.toml`
 (row limits, timeouts, rate limits, audit options); every key is listed in
 `sqail-service.example.toml`. Restart the service after changing it. More
 detail is in `docs\operations.md`, and the threat model is in

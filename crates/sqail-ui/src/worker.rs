@@ -32,7 +32,7 @@ impl Worker {
     pub fn new(ctx: egui::Context) -> Self {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
-            .thread_name("sqail2-worker")
+            .thread_name("sqail-worker")
             .enable_all()
             .build()
             .expect("tokio runtime");

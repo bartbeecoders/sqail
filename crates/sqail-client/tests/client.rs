@@ -191,7 +191,7 @@ fn mtls_material(dir: &std::path::Path) -> (std::path::PathBuf, sqail_client::Id
     let ca_cert = ca_params.self_signed(&ca_key).unwrap();
     let issuer = Issuer::from_params(&ca_params, &ca_key);
     let client_key = KeyPair::generate().unwrap();
-    let mut client_params = CertificateParams::new(vec!["sqail2-client".to_string()]).unwrap();
+    let mut client_params = CertificateParams::new(vec!["sqail-client".to_string()]).unwrap();
     client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
     let client_cert = client_params.signed_by(&client_key, &issuer).unwrap();
     let ca_path = dir.join("client-ca.pem");

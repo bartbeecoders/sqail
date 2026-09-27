@@ -27,7 +27,7 @@ impl SimpleColumn {
     }
 
     /// Returns the OID of the column's type, as sent in `RowDescription`.
-    /// (sqail2 patch: upstream drops this, but simple-query callers need it to
+    /// (sqail patch: upstream drops this, but simple-query callers need it to
     /// interpret the text-format values.)
     pub fn type_oid(&self) -> u32 {
         self.type_oid

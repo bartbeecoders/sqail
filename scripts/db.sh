@@ -20,7 +20,7 @@ wait_for() {  # name, command...
     echo; die "$name did not become ready (scripts/db.sh logs)"
 }
 
-sqlcmd_in() { podman exec sqail2-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -b "$@"; }
+sqlcmd_in() { podman exec sqail-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -b "$@"; }
 
 seed_mssql() {
     if [[ "$(sqlcmd_in -h -1 -W -Q "SET NOCOUNT ON; SELECT CASE WHEN OBJECT_ID('sqail_test.sales.type_zoo') IS NULL THEN 0 ELSE 1 END")" == "1" ]]; then
@@ -49,7 +49,7 @@ seed_sqlite() {
 }
 
 status() {
-    podman ps -a --filter name=sqail2- --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+    podman ps -a --filter name=sqail- --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
     cat <<INFO
 
   postgres  postgres://sqail:sqail_dev_pw@127.0.0.1:55432/sqail_test
@@ -63,30 +63,30 @@ INFO
 # DEV ONLY: these credentials are throwaway. Ports bind to 127.0.0.1 only and
 # are non-standard so they never clash with a real local server.
 start_postgres() {
-    if podman container exists sqail2-postgres; then podman start sqail2-postgres >/dev/null; return; fi
-    podman run -d --name sqail2-postgres \
+    if podman container exists sqail-postgres; then podman start sqail-postgres >/dev/null; return; fi
+    podman run -d --name sqail-postgres \
         -e POSTGRES_USER=sqail -e POSTGRES_PASSWORD=sqail_dev_pw -e POSTGRES_DB=sqail_test \
         -p 127.0.0.1:55432:5432 \
-        -v sqail2-pgdata:/var/lib/postgresql/data \
+        -v sqail-pgdata:/var/lib/postgresql/data \
         -v "$ROOT/dev/seed/postgres:/docker-entrypoint-initdb.d:ro" \
         docker.io/library/postgres:17-alpine >/dev/null
 }
 
 start_mssql() {
-    if podman container exists sqail2-mssql; then podman start sqail2-mssql >/dev/null; return; fi
-    podman run -d --name sqail2-mssql \
+    if podman container exists sqail-mssql; then podman start sqail-mssql >/dev/null; return; fi
+    podman run -d --name sqail-mssql \
         -e ACCEPT_EULA=Y -e MSSQL_PID=Developer -e "MSSQL_SA_PASSWORD=$MSSQL_SA_PASSWORD" \
         -p 127.0.0.1:51433:1433 \
-        -v sqail2-mssqldata:/var/opt/mssql \
+        -v sqail-mssqldata:/var/opt/mssql \
         -v "$ROOT/dev/seed/mssql:/seed:ro" \
         mcr.microsoft.com/mssql/server:2022-latest >/dev/null
 }
 
-down() { podman stop -i -t 30 sqail2-postgres sqail2-mssql >/dev/null; ok "stopped"; }
+down() { podman stop -i -t 30 sqail-postgres sqail-mssql >/dev/null; ok "stopped"; }
 
 destroy() {
-    podman rm -f -i sqail2-postgres sqail2-mssql >/dev/null
-    podman volume rm -f sqail2-pgdata sqail2-mssqldata >/dev/null 2>&1 || true
+    podman rm -f -i sqail-postgres sqail-mssql >/dev/null
+    podman volume rm -f sqail-pgdata sqail-mssqldata >/dev/null 2>&1 || true
     rm -rf "$DATA_DIR"
     ok "containers, volumes and sqlite file removed"
 }
@@ -96,7 +96,7 @@ up() {
     info "starting test databases"
     start_postgres
     start_mssql
-    wait_for postgres podman exec sqail2-postgres psql -U sqail -d sqail_test -tAc "SELECT 1 FROM sales.type_zoo LIMIT 1"
+    wait_for postgres podman exec sqail-postgres psql -U sqail -d sqail_test -tAc "SELECT 1 FROM sales.type_zoo LIMIT 1"
     wait_for mssql sqlcmd_in -Q "SELECT 1"
     seed_mssql
     seed_sqlite
@@ -109,8 +109,8 @@ case "${1:-status}" in
     reset)  destroy; up ;;
     destroy) destroy ;;
     status) status ;;
-    logs)   podman logs -f --names sqail2-postgres sqail2-mssql ;;
-    psql)   podman exec -it sqail2-postgres psql -U sqail -d sqail_test ;;
-    sqlcmd) podman exec -it sqail2-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -d sqail_test ;;
+    logs)   podman logs -f --names sqail-postgres sqail-mssql ;;
+    psql)   podman exec -it sqail-postgres psql -U sqail -d sqail_test ;;
+    sqlcmd) podman exec -it sqail-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -d sqail_test ;;
     *)      sed -n '2,11p' "$0"; exit 1 ;;
 esac

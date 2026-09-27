@@ -17,7 +17,7 @@ mod winsvc;
 #[command(
     name = "sqail-service",
     version,
-    about = "HTTPS REST gateway between sqail2 and SQL databases"
+    about = "HTTPS REST gateway between sqail and SQL databases"
 )]
 struct Cli {
     /// Data directory (service.db, master.key, dev certificate).

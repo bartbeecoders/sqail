@@ -1,6 +1,6 @@
 [package]
 name = "sqail-service"
-description = "HTTPS REST gateway between sqail2 and SQL databases"
+description = "HTTPS REST gateway between sqail and SQL databases"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

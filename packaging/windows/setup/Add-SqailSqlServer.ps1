@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     Tests the connection from the service host first, then saves it as a
-    connection profile that every sqail2 user of this service can use. The
+    connection profile that every sqail user of this service can use. The
     password is sent to the service only, which stores it encrypted; it is
     never written to disk here and never shown again.
 
@@ -27,7 +27,7 @@
 #>
 [CmdletBinding()]
 param(
-    # Name shown in sqail2.
+    # Name shown in sqail.
     [Parameter(Mandatory = $true)] [string] $Name,
     # Host name or IP. Also accepts HOST\INSTANCE and HOST,PORT (as in SSMS).
     [Parameter(Mandatory = $true)] [string] $Server,
@@ -46,7 +46,7 @@ param(
     [switch] $TrustServerCertificate,
     [switch] $ReadOnly,
     [string] $Environment,
-    # Accent colour in sqail2, e.g. "#c0392b" for production.
+    # Accent colour in sqail, e.g. "#c0392b" for production.
     [string] $Color,
     [string] $Folder,
     [string] $ServiceUrl = 'https://127.0.0.1:7443',
@@ -161,4 +161,4 @@ if ($test.ok) {
 
 $conn = Invoke-Api 'POST' '/v1/connections' $json
 Write-Host " ok saved '$($conn.name)' (id $($conn.id))" -ForegroundColor Green
-Write-Host "    Users of $ServiceUrl now see it under Connections in sqail2 (Connections > Refresh)."
+Write-Host "    Users of $ServiceUrl now see it under Connections in sqail (Connections > Refresh)."

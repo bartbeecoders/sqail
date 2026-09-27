@@ -15,5 +15,5 @@ for _ in $(seq 1 50); do
     kill -0 $SERVICE_PID 2>/dev/null || die "sqail-service exited (is port 7443 in use?)"
     sleep 0.2
 done
-info "starting sqail2 UI"
-SQAIL2_AUTO_LOCAL=1 cargo run -q -p sqail-ui --bin sqail2
+info "starting sqail UI"
+SQAIL_AUTO_LOCAL=1 cargo run -q -p sqail-ui --bin sqail

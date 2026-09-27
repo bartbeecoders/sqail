@@ -1,4 +1,4 @@
-# Run the sqail2 desktop editor.
+# Run the sqail desktop editor.
 . "$PSScriptRoot/common.ps1"
 Set-Location $Root
-cargo run -p sqail-ui --bin sqail2 -- @args
+cargo run -p sqail-ui --bin sqail -- @args

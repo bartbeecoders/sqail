@@ -9,7 +9,12 @@
 #>
 [CmdletBinding()]
 param(
-    [string] $DataDir = (Join-Path $env:ProgramData 'sqail2\service'),
+    # Default: %ProgramData%\sqail\service, or sqail2\service when that is
+    # where an earlier sqail2 install keeps its data.
+    [string] $DataDir = $(if (-not (Test-Path (Join-Path $env:ProgramData 'sqail\service')) -and
+                              (Test-Path (Join-Path $env:ProgramData 'sqail2\service'))) {
+                            Join-Path $env:ProgramData 'sqail2\service' } else {
+                            Join-Path $env:ProgramData 'sqail\service' }),
     # Also delete the data directory. Stored database passwords are lost.
     [switch] $RemoveData
 )
@@ -26,7 +31,7 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 
 $svc = Get-CimInstance Win32_Service -Filter "Name='sqail-service'" -ErrorAction SilentlyContinue
 if ($svc) {
-    # PathName looks like: "C:\Program Files\sqail2\sqail-service.exe" --data-dir ...
+    # PathName looks like: "C:\Program Files\sqail\sqail-service.exe" --data-dir ...
     $exe = if ($svc.PathName -match '^"([^"]+)"') { $Matches[1] } else { ($svc.PathName -split ' ')[0] }
     Step 'removing the Windows service'
     & $exe service uninstall

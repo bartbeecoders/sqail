@@ -24,7 +24,7 @@ fn exe_name() -> &'static str {
     }
 }
 
-/// Next to the sqail2 executable first, then `$PATH`.
+/// Next to the sqail executable first, then `$PATH`.
 pub fn find_binary() -> Option<PathBuf> {
     if let Some(dir) = std::env::current_exe()
         .ok()
@@ -51,7 +51,7 @@ pub async fn ensure_running(url: &str) -> Result<()> {
     if is_up(url).await {
         return Ok(());
     }
-    let bin = find_binary().context("sqail-service binary not found next to sqail2 or on PATH")?;
+    let bin = find_binary().context("sqail-service binary not found next to sqail or on PATH")?;
     tracing::info!(bin = %bin.display(), "starting local sqail-service");
     let mut cmd = Command::new(&bin);
     // provision() creates this user's token itself; a bootstrap token
@@ -91,7 +91,7 @@ pub async fn provision() -> Result<Provisioned> {
             "token",
             "create",
             "--name",
-            &format!("sqail2 on {host}"),
+            &format!("sqail on {host}"),
             "--scope",
             "admin",
         ])

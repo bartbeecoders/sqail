@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { ChevronDown, Rocket, Plug, Sparkles, Keyboard } from "lucide-react";
+import { BookOpen, ChevronDown, Keyboard, Rocket, Server } from "lucide-react";
+import { docUrl } from "../lib/constants";
 
 interface DocSection {
   id: string;
@@ -8,246 +9,127 @@ interface DocSection {
   body: React.ReactNode;
 }
 
+const kbd = "font-mono text-text-primary";
+
+const SHORTCUTS: [string, string][] = [
+  ["Ctrl+Enter", "Run the statement at the cursor, or the selection"],
+  ["F5 / Ctrl+Shift+Enter", "Run the whole script"],
+  ["Esc", "Cancel the running query"],
+  ["Ctrl+E", "Show the plan of the statement at the cursor"],
+  ["Ctrl+Space", "Complete (also opens by itself while typing)"],
+  ["Ctrl+Shift+F", "Format the selection or the whole tab"],
+  ["Ctrl+Shift+P", "Command palette"],
+  ["Ctrl+P", "Quick open: a table or snippet"],
+  ["Ctrl+T / Ctrl+W", "New / close tab"],
+  ["Ctrl+O / Ctrl+S / Ctrl+Shift+S", "Open / save / save as"],
+  ["Ctrl+F", "Find and replace"],
+  ["F2", "Edit the selected cell (in edit mode)"],
+];
+
+const DOCS: [string, string, string][] = [
+  ["User guide", "user-guide.md", "Everything the editor does, settings and files"],
+  ["Windows + SQL Server setup", "windows-setup.md", "A shared service on Windows, step by step"],
+  ["Operations", "operations.md", "Certificates, tokens, backups, running as a service"],
+  ["Security", "security.md", "Threat model and what protects against what"],
+  ["REST API", "api.md", "Use sqail-service from scripts"],
+];
+
 const SECTIONS: DocSection[] = [
   {
     id: "getting-started",
-    title: "Getting Started",
+    title: "Getting started",
     icon: <Rocket size={18} />,
     body: (
       <div className="space-y-4 text-sm leading-relaxed text-text-muted">
-        <p>
-          Download sqail for your OS from the{" "}
-          <a href="#download" className="text-brand-cyan hover:underline">
-            Downloads
-          </a>{" "}
-          section and install it. sqail runs as a native desktop app on Windows,
-          macOS, and Linux. No browser, no sign-up, no account.
-        </p>
-        <div className="overflow-hidden rounded-xl border border-border">
-          <img
-            src="/screenshots/editor.png"
-            alt="sqail editor — write SQL, see results"
-            className="h-auto w-full"
-          />
-        </div>
         <ol className="ml-5 list-decimal space-y-2">
-          <li>Launch sqail. You'll land on an empty workspace.</li>
           <li>
-            Open the left sidebar and click{" "}
-            <span className="font-mono text-text-primary">+ New Connection</span>.
+            Install sqail from the{" "}
+            <a href="#download" className="text-brand-cyan hover:underline">
+              downloads
+            </a>
+            : the MSI on Windows, <span className={kbd}>./install.sh</span> from the tarball on Linux.
           </li>
           <li>
-            Pick a driver, enter your credentials, and click{" "}
-            <span className="font-mono text-text-primary">Test</span> before
-            saving.
+            Start sqail and choose <span className={kbd}>Use the local service</span>. sqail starts sqail-service
+            next to it, creates a token for you and pins its certificate. There is nothing else to set up.
           </li>
           <li>
-            Open a new query tab, write SQL, and press{" "}
-            <span className="font-mono text-text-primary">F5</span> to run it.
+            Click <span className={kbd}>+ Add</span> next to Connections and enter a PostgreSQL, SQL Server or
+            SQLite connection. The password goes to the service, encrypted, and never comes back.
+          </li>
+          <li>
+            Write SQL and press <span className={kbd}>Ctrl+Enter</span> to run the statement at the cursor.
           </li>
         </ol>
-        <p>
-          Everything is keyboard-driven. Press{" "}
-          <span className="font-mono text-text-primary">Ctrl+K</span> to summon
-          the AI command palette at any time.
-        </p>
       </div>
     ),
   },
   {
-    id: "connections",
-    title: "Connections",
-    icon: <Plug size={18} />,
+    id: "shared-service",
+    title: "Connecting to a shared service",
+    icon: <Server size={18} />,
     body: (
       <div className="space-y-4 text-sm leading-relaxed text-text-muted">
         <p>
-          sqail speaks four database dialects out of the box. Credentials are
-          stored locally in an encrypted SurrealDB embedded store — they never
-          leave your machine.
-        </p>
-        <ul className="ml-5 list-disc space-y-1">
-          <li>
-            <span className="text-text-primary">PostgreSQL</span> — schemas,
-            extensions, advanced types, notifications
-          </li>
-          <li>
-            <span className="text-text-primary">MySQL / MariaDB</span> — dialect
-            highlighting, utf8mb4, full DDL
-          </li>
-          <li>
-            <span className="text-text-primary">SQLite</span> — local files,
-            zero config
-          </li>
-          <li>
-            <span className="text-text-primary">SQL Server</span> — Windows,
-            Entra ID, and SQL authentication
-          </li>
-        </ul>
-        <p>
-          SSH tunnels are supported for Postgres and MySQL — point sqail at your
-          bastion host once and sqail will manage the tunnel lifecycle. Secrets
-          entered into tunnel fields are stored alongside the connection, also
-          encrypted.
+          On a server, install sqail-service (<span className={kbd}>setup\Install-SqailService.cmd</span> on
+          Windows, <span className={kbd}>install.sh</span> on Linux). The installer prints a sign-in link for the
+          admin page at <span className={kbd}>https://&lt;host&gt;:7443/admin/</span>, where you set the network,
+          certificate, connections and tokens.
         </p>
         <p>
-          Need to share a connection profile across machines without exposing
-          credentials? Run the optional{" "}
-          <span className="font-mono text-text-primary">sqail-dbservice</span>{" "}
-          backend and point sqail at its HTTPS endpoint instead of the raw
-          database.
-        </p>
-      </div>
-    ),
-  },
-  {
-    id: "ai-setup",
-    title: "AI Setup",
-    icon: <Sparkles size={18} />,
-    body: (
-      <div className="space-y-4 text-sm leading-relaxed text-text-muted">
-        <p>
-          sqail is bring-your-own-key. You pick the provider, you hold the
-          credential, and sqail only calls out when you ask it to.
-        </p>
-        <p>
-          Open{" "}
-          <span className="font-mono text-text-primary">Settings → AI</span>{" "}
-          (or press{" "}
-          <span className="font-mono text-text-primary">Ctrl+Shift+A</span>),
-          pick a provider, and paste your key:
-        </p>
-        <ul className="ml-5 list-disc space-y-1">
-          <li>Claude (Anthropic)</li>
-          <li>OpenAI</li>
-          <li>Minimax</li>
-          <li>Z.ai</li>
-          <li>LM Studio (local)</li>
-          <li>Claude Code CLI (local)</li>
-          <li>Any OpenAI-compatible endpoint</li>
-        </ul>
-        <p>
-          Once a provider is configured, press{" "}
-          <span className="font-mono text-text-primary">Ctrl+K</span> to open
-          the AI command palette. Ask in plain English — sqail injects the
-          current schema, so "top 10 customers by revenue last quarter" resolves
-          against your real table and column names, not a guess.
-        </p>
-        <p className="rounded-lg border border-brand-yellow/30 bg-brand-yellow/5 p-3 text-xs text-text-muted">
-          <span className="font-semibold text-brand-yellow">
-            Privacy note:
-          </span>{" "}
-          sqail sends your prompt, your schema (table and column names only,
-          never data), and the selected SQL to your chosen provider. It never
-          sends row contents or credentials. Choose a local provider (LM Studio,
-          Claude Code CLI) if you need zero network egress.
+          In sqail, choose <span className={kbd}>Service → Connect to a service…</span> and enter the URL and the
+          token you were given. With a self-signed certificate, sqail shows its fingerprint. Accept it only if it
+          matches the one on the admin page.
         </p>
       </div>
     ),
   },
   {
     id: "shortcuts",
-    title: "Keyboard Shortcuts",
+    title: "Keyboard shortcuts",
     icon: <Keyboard size={18} />,
     body: (
       <div className="space-y-4 text-sm leading-relaxed text-text-muted">
         <p>
-          Defaults below. Every shortcut is rebindable in{" "}
-          <span className="font-mono text-text-primary">
-            Settings → Shortcuts
-          </span>
-          . On macOS,{" "}
-          <span className="font-mono text-text-primary">Ctrl</span> maps to{" "}
-          <span className="font-mono text-text-primary">Cmd</span>.
+          The defaults. Rebind any of them in <span className={kbd}>keybindings.toml</span> in the config
+          folder, for example <span className={kbd}>"query.run" = "Ctrl+R"</span>.
         </p>
         <div className="overflow-x-auto rounded-lg border border-border">
           <table className="w-full text-sm">
             <thead className="bg-bg-card text-text-primary">
               <tr>
-                <th className="px-4 py-2 text-left font-semibold">Category</th>
+                <th className="px-4 py-2 text-left font-semibold">Keys</th>
                 <th className="px-4 py-2 text-left font-semibold">Action</th>
-                <th className="px-4 py-2 text-left font-semibold">Default</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border text-text-muted">
-              <tr>
-                <td className="px-4 py-2">Editor</td>
-                <td className="px-4 py-2">Run Query</td>
-                <td className="px-4 py-2 font-mono text-text-primary">F5</td>
-              </tr>
-              <tr>
-                <td className="px-4 py-2">Editor</td>
-                <td className="px-4 py-2">Format Query</td>
-                <td className="px-4 py-2 font-mono text-text-primary">
-                  Ctrl+Shift+F
-                </td>
-              </tr>
-              <tr>
-                <td className="px-4 py-2">Editor</td>
-                <td className="px-4 py-2">New Tab</td>
-                <td className="px-4 py-2 font-mono text-text-primary">
-                  Ctrl+N
-                </td>
-              </tr>
-              <tr>
-                <td className="px-4 py-2">Editor</td>
-                <td className="px-4 py-2">Close Tab</td>
-                <td className="px-4 py-2 font-mono text-text-primary">
-                  Ctrl+W
-                </td>
-              </tr>
-              <tr>
-                <td className="px-4 py-2">File</td>
-                <td className="px-4 py-2">Save Query</td>
-                <td className="px-4 py-2 font-mono text-text-primary">
-                  Ctrl+S
-                </td>
-              </tr>
-              <tr>
-                <td className="px-4 py-2">File</td>
-                <td className="px-4 py-2">Save Query As</td>
-                <td className="px-4 py-2 font-mono text-text-primary">
-                  Ctrl+Shift+S
-                </td>
-              </tr>
-              <tr>
-                <td className="px-4 py-2">File</td>
-                <td className="px-4 py-2">Open Query</td>
-                <td className="px-4 py-2 font-mono text-text-primary">
-                  Ctrl+O
-                </td>
-              </tr>
-              <tr>
-                <td className="px-4 py-2">Connections</td>
-                <td className="px-4 py-2">New Connection</td>
-                <td className="px-4 py-2 font-mono text-text-primary">
-                  Ctrl+Shift+N
-                </td>
-              </tr>
-              <tr>
-                <td className="px-4 py-2">AI</td>
-                <td className="px-4 py-2">AI Command Palette</td>
-                <td className="px-4 py-2 font-mono text-text-primary">
-                  Ctrl+K
-                </td>
-              </tr>
-              <tr>
-                <td className="px-4 py-2">AI</td>
-                <td className="px-4 py-2">Toggle AI Settings</td>
-                <td className="px-4 py-2 font-mono text-text-primary">
-                  Ctrl+Shift+A
-                </td>
-              </tr>
-              <tr>
-                <td className="px-4 py-2">App</td>
-                <td className="px-4 py-2">Open Settings</td>
-                <td className="px-4 py-2 font-mono text-text-primary">
-                  Ctrl+,
-                </td>
-              </tr>
+              {SHORTCUTS.map(([keys, action]) => (
+                <tr key={keys}>
+                  <td className="px-4 py-2 font-mono whitespace-nowrap text-text-primary">{keys}</td>
+                  <td className="px-4 py-2">{action}</td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>
       </div>
+    ),
+  },
+  {
+    id: "full-docs",
+    title: "Full documentation",
+    icon: <BookOpen size={18} />,
+    body: (
+      <ul className="space-y-3 text-sm">
+        {DOCS.map(([title, file, description]) => (
+          <li key={file}>
+            <a href={docUrl(file)} className="font-semibold text-brand-cyan hover:underline">
+              {title}
+            </a>
+            <span className="text-text-muted"> — {description}</span>
+          </li>
+        ))}
+      </ul>
     ),
   },
 ];
@@ -263,8 +145,8 @@ export default function Docs() {
             Docs
           </h2>
           <p className="mx-auto max-w-2xl text-text-muted">
-            The short version. Everything you need to get from install to first
-            AI-assisted query, plus the canonical shortcut list.
+            The short version: from install to your first query, plus the
+            shortcut list. The full guides live in the repository.
           </p>
         </div>
 

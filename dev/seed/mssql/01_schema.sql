@@ -1,4 +1,4 @@
--- sqail2 test schema for SQL Server. Run by scripts/db.sh via sqlcmd.
+-- sqail test schema for SQL Server. Run by scripts/db.sh via sqlcmd.
 IF DB_ID('sqail_test') IS NULL CREATE DATABASE sqail_test;
 GO
 USE sqail_test;

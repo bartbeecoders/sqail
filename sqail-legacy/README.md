@@ -1,4 +1,10 @@
-# sqail
+# sqail (legacy)
+
+> **Legacy.** This is the 0.x Tauri app (last release v0.6.9), kept for
+> reference and no longer developed or built by CI. The current sqail is the
+> native Rust editor at the [repository root](../README.md). Old releases
+> stay on the [GitHub releases page](https://github.com/bartbeecoders/sqail/releases?q=v0.&expanded=true).
+> To build it yourself, run the commands below from this folder.
 
 **A fast, small, open-source SQL editor that makes AI-assisted querying feel native.**
 

@@ -1,7 +1,7 @@
-# sqail2 security: threat model and checklist
+# sqail security: threat model and checklist
 
 This covers **sqail-service**, the only component that talks to databases, and
-the **sqail2** desktop client. Each mitigation below names the test that checks
+the **sqail** desktop client. Each mitigation below names the test that checks
 it.
 
 ## What we protect
@@ -17,12 +17,12 @@ it.
 ## Trust boundaries
 
 ```
-sqail2 ──TLS 1.3 + bearer token (+ optional client cert)──▶ sqail-service ──driver TLS──▶ databases
+sqail ──TLS 1.3 + bearer token (+ optional client cert)──▶ sqail-service ──driver TLS──▶ databases
    │                                                               │
    └─ config dir (settings, history, tokens.toml)                 └─ data dir (service.db, master.key, certs)
 ```
 
-* The **network** between sqail2 and the service is untrusted. It is always
+* The **network** between sqail and the service is untrusted. It is always
   HTTPS, and plain HTTP is refused.
 * The **service host** is trusted. Anyone who can read the data dir can read
   both `master.key` and `service.db`. Encryption at rest protects copies and

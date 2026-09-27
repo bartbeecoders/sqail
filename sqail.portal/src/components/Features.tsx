@@ -1,31 +1,13 @@
-import {
-  Zap,
-  Sparkles,
-  GitBranch,
-  ShieldCheck,
-  Database,
-  Network,
-} from "lucide-react";
+import { Zap, GitBranch, ShieldCheck, Database, Table, Keyboard } from "lucide-react";
 import { FEATURES } from "../lib/constants";
 
 const ICON_MAP: Record<string, React.ReactNode> = {
   Zap: <Zap size={24} />,
-  Sparkles: <Sparkles size={24} />,
   GitBranch: <GitBranch size={24} />,
   ShieldCheck: <ShieldCheck size={24} />,
   Database: <Database size={24} />,
-  Network: <Network size={24} />,
-};
-
-// Smart and Private use yellow per brand-guide §3 ("yellow owns intelligence / AI").
-// Fast, Free, Universal, Visual use cyan.
-const ACCENT_MAP: Record<string, "cyan" | "yellow"> = {
-  Fast: "cyan",
-  Smart: "yellow",
-  Visual: "cyan",
-  Free: "cyan",
-  Private: "yellow",
-  Universal: "cyan",
+  Table: <Table size={24} />,
+  Keyboard: <Keyboard size={24} />,
 };
 
 export default function Features() {
@@ -37,16 +19,14 @@ export default function Features() {
             Six things sqail does well
           </h2>
           <p className="mx-auto max-w-2xl text-text-muted">
-            Everything else is intentionally out of scope. We'd rather ship one
-            small, fast tool than a bloated Swiss Army knife.
+            A focused tool for people who write SQL all day: quick to start,
+            quick with big results, and careful with your credentials.
           </p>
         </div>
 
         <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-          {FEATURES.map((feature, idx) => {
-            const accent = ACCENT_MAP[feature.title] ?? "cyan";
-            const isCyan = accent === "cyan";
-            const isLast = idx === FEATURES.length - 1;
+          {FEATURES.map((feature) => {
+            const isCyan = feature.accent === "cyan";
             return (
               <div
                 key={feature.title}
@@ -54,10 +34,7 @@ export default function Features() {
                   isCyan
                     ? "hover:border-brand-cyan/40"
                     : "hover:border-brand-yellow/40"
-                } hover:bg-bg-card ${
-                  // Make the last card (Universal) span two columns on lg to fill the row
-                  isLast ? "lg:col-span-1" : ""
-                }`}
+                } hover:bg-bg-card`}
               >
                 <div
                   className={`mb-4 inline-flex rounded-lg p-2.5 transition-colors ${

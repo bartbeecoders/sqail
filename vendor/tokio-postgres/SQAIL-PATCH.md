@@ -1,4 +1,4 @@
-# Vendored tokio-postgres 0.7.18 (sqail2 patch)
+# Vendored tokio-postgres 0.7.18 (sqail patch)
 
 Upstream: https://github.com/sfackler/rust-postgres (MIT OR Apache-2.0)
 

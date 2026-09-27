@@ -1,10 +1,30 @@
 # Changelog
 
-All notable changes to sqail2 and sqail-service. Versions follow
+All notable changes to sqail and sqail-service. Versions follow
 [Semantic Versioning](https://semver.org/); releases are tagged
-`sqail2-v<version>`.
+`v<version>`. Version 1.0.0 was released as sqail2 (tag `sqail2-v1.0.0`);
+the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
 
 ## Unreleased
+
+### Renamed to sqail
+
+- The editor is now called **sqail**: binary `sqail`/`sqail.exe`, packages
+  `sqail-<ver>-linux-x86_64.tar.gz`, `sqail-<ver>-windows-x64.msi`/`.zip`,
+  Arch package `sqail` (replaces `sqail2`). Releases are tagged `v<version>`.
+- On first start sqail moves the sqail2 settings folder (`~/.config/sqail2`,
+  `%APPDATA%\bartbeecoders\sqail2\config`), its window state and the tokens
+  saved in the OS credential store to the new names.
+- The MSI upgrades an installed sqail2 in place (same upgrade code) and now
+  installs to `Program Files\sqail`. The Windows service keeps using
+  `%ProgramData%\sqail2\service` when that is where its data already is.
+- `install.sh` removes the old `sqail2` binary, desktop entry and icons.
+- Environment variables: `SQAIL2_CONFIG_DIR` → `SQAIL_CONFIG_DIR`,
+  `SQAIL2_TOKEN_STORE` → `SQAIL_TOKEN_STORE`, `SQAIL2_LOG` → `SQAIL_UI_LOG`
+  (`SQAIL_LOG` stays the service's).
+- Development: the repository root is now this workspace (it was `sqail2/`),
+  dev data lives in `.sqail/`, and the test containers are `sqail-postgres`
+  and `sqail-mssql`.
 
 ### sqail-service
 
@@ -28,6 +48,17 @@ All notable changes to sqail2 and sqail-service. Versions follow
   SQLite folders there. Scripts that passed the old options must drop them.
 - `install.sh` prints the admin page sign-in link after starting the
   systemd unit and removes the one-time token file.
+
+### sqail
+
+- Drag tables, views and routines from the sidebar into the editor. Dropped
+  inside a statement, a table or view inserts its qualified name; on a
+  blank line (or below the text) it becomes a formatted `SELECT` listing its
+  columns. Procedures become `EXEC name` (SQL Server) or `CALL name()`.
+- Completion after `alias.` also works for CTEs and subqueries, respects
+  subquery scope when an alias is reused, and finds unqualified tables
+  outside the default schema. Column names that appear in more than one
+  table are offered qualified (`o.id`).
 
 ## 1.0.0 — 2026-09-26
 

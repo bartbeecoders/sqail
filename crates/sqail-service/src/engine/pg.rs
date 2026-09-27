@@ -38,7 +38,7 @@ impl PgDriver {
             .port(p.port)
             .dbname(&p.database)
             .user(&p.user)
-            .application_name("sqail2")
+            .application_name("sqail")
             .connect_timeout(Duration::from_secs(10))
             .ssl_mode(match p.ssl_mode {
                 PgSslMode::Disable => tokio_postgres::config::SslMode::Disable,

@@ -12,7 +12,7 @@ if (Get-Command cargo-audit -ErrorAction SilentlyContinue) { Info 'cargo audit';
 else { Write-Host '    (cargo-audit not installed: cargo install --locked cargo-audit)' }
 if ($It) {
     & "$PSScriptRoot/db.ps1" up
-    Info 'integration tests'; $env:SQAIL2_IT = '1'
+    Info 'integration tests'; $env:SQAIL_IT = '1'
     Invoke-Checked cargo test --workspace -- --ignored
 }
 Ok 'all checks passed'

@@ -1,6 +1,49 @@
+# Rust build output and packages
 /target
+/dist/
+
+# Dev databases and the dev service's data dir
 /dev/data/
 *.db
 *.db-shm
 *.db-wal
-/.sqail2/
+/.sqail/
+
+# Portal (sqail.portal/)
+node_modules/
+sqail.portal/dist/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Secrets and credentials (source files such as secrets.rs are code, not secrets)
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.kdbx
+*.pkcs12
+*.cer
+*.crt
+*.der
+*.csr
+secrets.*
+!*.rs
+*.secret
+*.secrets
+
+# Raw screenshot captures, local only
+marketing/screenshots-raw/
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

@@ -1,0 +1,58 @@
+name: portal
+
+# Builds the sqail.io image (sqail.portal/, plus CHANGELOG.md from the root)
+# and rolls it out on the k3s host. The download list is not baked in: the
+# page reads /releases/current.json, which release.yml uploads with the files.
+on:
+  push:
+    branches: [main]
+    paths: ["sqail.portal/**", "k8s/portal/**", ".github/workflows/portal.yml"]
+  workflow_call:
+    inputs:
+      version:
+        description: "Release version, added as an image tag"
+        type: string
+        required: false
+  workflow_dispatch:
+
+env:
+  REGISTRY: beecodersregistry.azurecr.io
+  IMAGE_NAME: sqail-portal
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build and push portal image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: sqail.portal/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.version || github.sha }}
+
+      - name: Deploy to k3s
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            if command -v kubectl >/dev/null 2>&1; then
+              KUBECTL="kubectl"
+            else
+              KUBECTL="sudo k3s kubectl"
+            fi
+            $KUBECTL -n sqail rollout restart deployment sqail-portal
+            $KUBECTL -n sqail rollout status deployment sqail-portal --timeout=120s

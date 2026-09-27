@@ -1,10 +1,16 @@
-# sqail2
+# sqail
 
-A fast, native SQL editor (Rust UI) backed by **sqail-service**, an HTTPS REST
-gateway that holds the database connections. Supports PostgreSQL, SQL Server and
-SQLite; runs on Linux (Omarchy) and Windows.
+sqail (pronounced *"snail"*) is a fast, native SQL editor (Rust, egui) backed
+by **sqail-service**, an HTTPS REST gateway that holds the database
+connections. It supports PostgreSQL, SQL Server and SQLite and runs on Linux
+(Omarchy) and Windows.
 
-**Plan and progress:** open [`PLAN.html`](PLAN.html) in a browser.
+[**Download →**](https://sqail.io) · [Codeberg](https://codeberg.org/bartbeecoders/sqail) ·
+[GitHub mirror](https://github.com/bartbeecoders/sqail)
+
+> Version 1.0 was released under the name **sqail2**. The earlier Tauri app
+> (0.x, with AI features and MySQL) is kept in [`sqail-legacy/`](sqail-legacy/)
+> and is no longer developed.
 
 **Docs:** [user guide](docs/user-guide.md) · [Windows + SQL Server setup](docs/windows-setup.md) · [operations](docs/operations.md)
 (certificates, tokens, backups, services) · [REST API](docs/api.md) ·
@@ -15,9 +21,12 @@ SQLite; runs on Linux (Omarchy) and Windows.
 
 | Platform | How |
 |---|---|
-| Linux | `dist/sqail2-<ver>-linux-x86_64.tar.gz` → `./install.sh` (per user; `--prefix /usr` system-wide) |
+| Linux | `sqail-<ver>-linux-x86_64.tar.gz` → `./install.sh` (per user; `--prefix /usr` system-wide) |
 | Arch / Omarchy | `makepkg -si` in `packaging/arch/` |
-| Windows | `sqail2-<ver>-windows-x64.msi`, or the portable `.zip` |
+| Windows | `sqail-<ver>-windows-x64.msi`, or the portable `.zip` |
+
+Downloads are on [sqail.io](https://sqail.io) and the
+[GitHub releases](https://github.com/bartbeecoders/sqail/releases).
 
 Build the packages yourself with `scripts/package-linux.sh` or
 `.\scripts\package-windows.ps1` (MSI needs the WiX 5 CLI:
@@ -37,7 +46,7 @@ scripts/dev.sh           # DBs + service + UI
 
 Windows uses the same names: `.\scripts\db.ps1 up`, `.\scripts\check.ps1 -It`, …
 
-## sqail2 (the editor)
+## sqail (the editor)
 
 `scripts/dev.sh` starts everything. On first run it sets up the local
 service and pins its certificate, and the token goes into the OS credential
@@ -101,7 +110,7 @@ Installing is a single step with no options: `setup\Install-SqailService.cmd`
 (as Administrator) on Windows, or `install.sh` on Linux (systemd user unit).
 Both start the service and hand you the sign-in link. See
 [docs/operations.md](docs/operations.md). The dev scripts use
-`.sqail2/service/` in this repo as the data directory. Every setting is also
+`.sqail/service/` in this repo as the data directory. Every setting is also
 in [`dev/sqail-service.example.toml`](dev/sqail-service.example.toml).
 
 API reference: `GET /v1/openapi.json`, or the interactive docs at `/docs` in
@@ -119,19 +128,32 @@ curl -sk -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
 | `crates/sqail-proto` | REST wire types shared by service and clients |
 | `crates/sqail-service` | the gateway: auth, profiles, drivers, streaming |
 | `crates/sqail-client` | typed async client with certificate pinning |
-| `crates/sqail-ui` | the desktop app (egui), binary `sqail2` |
+| `crates/sqail-ui` | the desktop app (egui), binary `sqail` |
 | `dev/seed` | identical test schema for every engine |
 | `crates/sqail-fuzz` | stable, time-boxed fuzzer for the parsers and the NDJSON decoder |
-| `vendor/tokio-postgres` | tokio-postgres plus a one-field patch; see its `SQAIL2-PATCH.md` |
+| `vendor/tokio-postgres` | tokio-postgres plus a one-field patch; see its `SQAIL-PATCH.md` |
 | `packaging/` | icons, desktop entry, systemd unit, installer, PKGBUILD, WiX source |
 | `docs/` | user, operations, API, security docs and `openapi.json` |
+
+## Repository
+
+| Path | What |
+|---|---|
+| `crates/`, `packaging/`, `scripts/`, `docs/`, `dev/` | sqail and sqail-service (above) |
+| `sqail.portal/` | the website, [sqail.io](https://sqail.io) (Vite + React, served by nginx) |
+| `k8s/portal/` | the portal's Kubernetes manifests |
+| `marketing/` | brand guide and press kit |
+| `Vibecoding/` | planning notes, including the rewrite plan (`PLAN.html`) |
+| `sqail-legacy/` | the 0.x Tauri app, frozen; see its README |
 
 ## Releasing
 
 1. Bump `version` in `Cargo.toml` (and `pkgver` in `packaging/arch/PKGBUILD`),
-   add a `CHANGELOG.md` entry, regenerate `docs/openapi.json`
-   (`SQAIL2_BLESS=1 cargo test -p sqail-service --test it openapi`).
+   move the `CHANGELOG.md` entries from *Unreleased* to the new version,
+   regenerate `docs/openapi.json`
+   (`SQAIL_BLESS=1 cargo test -p sqail-service --test it openapi`).
 2. `scripts/check.sh --it` and `scripts/smoke.sh`.
-3. Tag `sqail2-v<version>` and push it. CI (`.github/workflows/sqail2.yml`
-   in the repository root) runs every check and attaches the Linux tarball and the
-   Windows zip/MSI to a release.
+3. Tag `v<version>` and push it. CI (`.github/workflows/ci.yml`) runs every
+   check, then `release.yml` attaches the Linux tarball and the Windows
+   zip/MSI to a GitHub release, uploads them to the download server and
+   redeploys the portal with the new version.

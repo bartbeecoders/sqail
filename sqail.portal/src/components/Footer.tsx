@@ -8,12 +8,12 @@ export default function Footer() {
           {/* Brand */}
           <div>
             <div className="mb-3 flex items-center gap-2">
-              <img src="/icon.png" alt="SQaiL" className="h-6 w-6" />
-              <span className="font-bold text-text-primary">SQaiL</span>
+              <img src="/icon.png" alt="sqail" className="h-6 w-6" />
+              <span className="font-bold text-text-primary">sqail</span>
             </div>
             <p className="text-sm text-text-muted">
-              A lightweight, cross-platform desktop SQL database editor with AI
-              integration.
+              A fast, native SQL editor for PostgreSQL, SQL Server and SQLite,
+              with a secure gateway for your connections.
             </p>
           </div>
 
@@ -61,13 +61,13 @@ export default function Footer() {
             </h4>
             <ul className="space-y-2 text-sm text-text-muted">
               <li>MIT License</li>
-              <li>&copy; {new Date().getFullYear()} SQaiL</li>
+              <li>&copy; {new Date().getFullYear()} sqail</li>
             </ul>
           </div>
         </div>
 
         <div className="mt-8 border-t border-border pt-6 text-center text-xs text-text-dim">
-          Built with Tauri + React + Rust
+          Built with Rust and egui
         </div>
       </div>
     </footer>

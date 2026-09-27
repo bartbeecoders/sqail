@@ -7,31 +7,12 @@ interface Shot {
 }
 
 const SHOTS: Shot[] = [
-  {
-    src: "/screenshots/editor.png",
-    alt: "sqail SQL editor with query results",
-    label: "Editor",
-  },
-  {
-    src: "/screenshots/connections.png",
-    alt: "sqail connection manager with multiple databases",
-    label: "Connections",
-  },
-  {
-    src: "/screenshots/ai.png",
-    alt: "sqail AI sidebar generating SQL from natural language",
-    label: "AI",
-  },
-  {
-    src: "/screenshots/split.png",
-    alt: "sqail split editor with two query panes",
-    label: "Split Editor",
-  },
-  {
-    src: "/screenshots/light.png",
-    alt: "sqail in light theme",
-    label: "Light Theme",
-  },
+  { src: "/screenshots/results.png", alt: "sqail editor with a query and its result grid", label: "Editor" },
+  { src: "/screenshots/million-rows.png", alt: "a million PostgreSQL rows streamed into the grid", label: "Big results" },
+  { src: "/screenshots/completion.png", alt: "schema-aware completion while typing", label: "Completion" },
+  { src: "/screenshots/editing.png", alt: "editing rows of a table in the result grid", label: "Edit data" },
+  { src: "/screenshots/plan.png", alt: "the estimated query plan as a tree", label: "Plans" },
+  { src: "/screenshots/connection.png", alt: "the connection form", label: "Connections" },
 ];
 
 export default function Screenshots() {
@@ -45,8 +26,8 @@ export default function Screenshots() {
             See it in action
           </h2>
           <p className="mx-auto max-w-2xl text-text-muted">
-            Dark and light themes, split editor, multi-database connections, and
-            AI — all in under 20 MB.
+            Streaming results, completion that knows your schema, in-place
+            editing and query plans, in a download of under 20 MB.
           </p>
         </div>
 
@@ -60,7 +41,7 @@ export default function Screenshots() {
         </div>
 
         {/* Thumbnail strip */}
-        <div className="flex justify-center gap-3">
+        <div className="flex flex-wrap justify-center gap-3">
           {SHOTS.map((shot, idx) => (
             <button
               key={shot.label}

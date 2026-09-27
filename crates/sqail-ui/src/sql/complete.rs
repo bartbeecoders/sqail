@@ -64,16 +64,49 @@ pub fn default_schema(engine: Engine) -> &'static str {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum Source {
+    /// A catalog table or view, or a CTE when unqualified and one has the name.
+    Table {
+        schema: Option<String>,
+        table: String,
+    },
+    /// `(SELECT …) alias`: byte range of the subquery.
+    Derived(Range<usize>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct TableRef {
-    schema: Option<String>,
-    table: String,
+    source: Source,
     alias: Option<String>,
+    /// The parenthesised group the reference sits in (the whole statement at
+    /// top level); it is visible inside it. `depth` is how deeply nested.
+    scope: Range<usize>,
+    depth: usize,
 }
 
 impl TableRef {
-    fn handle(&self) -> &str {
-        self.alias.as_deref().unwrap_or(&self.table)
+    fn table(&self) -> Option<&str> {
+        match &self.source {
+            Source::Table { table, .. } => Some(table),
+            Source::Derived(_) => None,
+        }
     }
+
+    /// How the query refers to it: the alias, else the table name.
+    fn handle(&self) -> &str {
+        self.alias.as_deref().or(self.table()).unwrap_or_default()
+    }
+
+    fn visible_at(&self, pos: usize) -> bool {
+        self.scope.start <= pos && pos <= self.scope.end
+    }
+}
+
+/// `WITH name [(columns)] AS (body)`.
+struct Cte {
+    name: String,
+    columns: Vec<String>,
+    body: Range<usize>,
 }
 
 fn unquote(s: &str) -> String {
@@ -93,76 +126,417 @@ fn is_ident(t: &Token) -> bool {
     matches!(t.kind, Kind::Word | Kind::QuotedIdent)
 }
 
-/// Table references in a statement: `FROM a`, `JOIN s.b AS x`, `UPDATE c y`, …
-fn table_refs(sql: &str, toks: &[Token]) -> Vec<TableRef> {
-    let sig: Vec<&Token> = toks
-        .iter()
-        .filter(|t| !matches!(t.kind, Kind::Space | Kind::Comment))
-        .collect();
-    let text = |t: &Token| &sql[t.range.clone()];
-    let mut out = Vec::new();
-    let mut i = 0;
-    let mut in_from = false;
-    while i < sig.len() {
-        let t = sig[i];
-        let word = text(t).to_ascii_uppercase();
-        let starts_ref = matches!(word.as_str(), "FROM" | "JOIN" | "UPDATE" | "INTO" | "TABLE")
-            || (in_from && t.kind == Kind::Punct && text(t) == ",");
-        if t.kind == Kind::Word
-            && matches!(
-                word.as_str(),
-                "WHERE"
-                    | "GROUP"
-                    | "ORDER"
-                    | "HAVING"
-                    | "ON"
-                    | "SET"
-                    | "VALUES"
-                    | "LIMIT"
-                    | "UNION"
-            )
-        {
-            in_from = false;
+/// A column that exists only in the query (CTE or subquery output).
+fn named_column(name: String) -> ColumnInfo {
+    ColumnInfo {
+        name,
+        ordinal: 0,
+        data_type: String::new(),
+        nullable: true,
+        default: None,
+        primary_key: false,
+    }
+}
+
+/// One statement's table references and CTEs, with enough structure to
+/// resolve an alias to its columns.
+struct Query<'a> {
+    sql: &'a str,
+    /// Tokens without whitespace and comments.
+    sig: Vec<&'a Token>,
+    /// For each `(` / `)` in `sig`, the index of its partner.
+    partner: Vec<Option<usize>>,
+    refs: Vec<TableRef>,
+    ctes: Vec<Cte>,
+}
+
+impl<'a> Query<'a> {
+    fn new(sql: &'a str, toks: &'a [Token]) -> Self {
+        let sig: Vec<&Token> = toks
+            .iter()
+            .filter(|t| !matches!(t.kind, Kind::Space | Kind::Comment))
+            .collect();
+        let mut partner = vec![None; sig.len()];
+        let mut open = Vec::new();
+        for (i, t) in sig.iter().enumerate() {
+            match t.kind {
+                Kind::Open => open.push(i),
+                Kind::Close => {
+                    if let Some(o) = open.pop() {
+                        partner[o] = Some(i);
+                        partner[i] = Some(o);
+                    }
+                }
+                _ => {}
+            }
         }
-        if starts_ref {
-            in_from = matches!(word.as_str(), "FROM" | "JOIN") || text(t) == ",";
-            // [schema .] table [AS] [alias]
+        let mut q = Self {
+            sql,
+            sig,
+            partner,
+            refs: Vec::new(),
+            ctes: Vec::new(),
+        };
+        q.ctes = q.find_ctes();
+        q.refs = q.find_refs();
+        q
+    }
+
+    fn text(&self, i: usize) -> &'a str {
+        self.sig.get(i).map_or("", |t| &self.sql[t.range.clone()])
+    }
+
+    fn is_word(&self, i: usize, w: &str) -> bool {
+        self.sig.get(i).is_some_and(|t| t.kind == Kind::Word)
+            && self.text(i).eq_ignore_ascii_case(w)
+    }
+
+    fn kind(&self, i: usize) -> Option<Kind> {
+        self.sig.get(i).map(|t| t.kind)
+    }
+
+    /// An identifier usable as a name (not a keyword) at `i`.
+    fn name_at(&self, i: usize) -> Option<String> {
+        let t = self.sig.get(i)?;
+        (is_ident(t) && (t.kind == Kind::QuotedIdent || !is_keyword(self.text(i))))
+            .then(|| unquote(self.text(i)))
+    }
+
+    /// Bytes inside the parentheses opened at `open`.
+    fn inside(&self, open: usize) -> Range<usize> {
+        let start = self.sig[open].range.end;
+        let end = self.partner[open].map_or(self.sql.len(), |c| self.sig[c].range.start);
+        start..end
+    }
+
+    /// `WITH [RECURSIVE] a [(x, y)] AS [NOT] [MATERIALIZED] (…), b AS (…)`.
+    fn find_ctes(&self) -> Vec<Cte> {
+        let mut out = Vec::new();
+        for i in 0..self.sig.len() {
+            // `WITH (NOLOCK)` is a table hint, not a CTE.
+            if !self.is_word(i, "WITH") || self.kind(i + 1) == Some(Kind::Open) {
+                continue;
+            }
             let mut j = i + 1;
-            if j < sig.len() && is_ident(sig[j]) && !is_keyword(text(sig[j])) {
-                let mut schema = None;
-                let mut table = unquote(text(sig[j]));
-                if j + 1 < sig.len() && text(sig[j + 1]) == "." {
-                    if j + 2 < sig.len() && is_ident(sig[j + 2]) {
+            if self.is_word(j, "RECURSIVE") {
+                j += 1;
+            }
+            while let Some(name) = self.name_at(j) {
+                j += 1;
+                let mut columns = Vec::new();
+                if self.kind(j) == Some(Kind::Open) {
+                    let Some(close) = self.partner[j] else { break };
+                    columns = (j + 1..close).filter_map(|k| self.name_at(k)).collect();
+                    j = close + 1;
+                }
+                if !self.is_word(j, "AS") {
+                    break;
+                }
+                j += 1;
+                if self.is_word(j, "NOT") {
+                    j += 1;
+                }
+                if self.is_word(j, "MATERIALIZED") {
+                    j += 1;
+                }
+                if self.kind(j) != Some(Kind::Open) {
+                    break;
+                }
+                out.push(Cte {
+                    name,
+                    columns,
+                    body: self.inside(j),
+                });
+                let Some(close) = self.partner[j] else { break };
+                j = close + 1;
+                if self.text(j) != "," {
+                    break;
+                }
+                j += 1;
+            }
+        }
+        out
+    }
+
+    /// `[AS] alias` at `j`: the alias and the index after it.
+    fn alias_at(&self, mut j: usize) -> (Option<String>, usize) {
+        if self.is_word(j, "AS") {
+            j += 1;
+        }
+        match self.name_at(j) {
+            Some(a) => (Some(a), j + 1),
+            None => (None, j),
+        }
+    }
+
+    /// Table references: `FROM a`, `JOIN s.b AS x`, `FROM (SELECT …) d`, …
+    fn find_refs(&self) -> Vec<TableRef> {
+        let n = self.sig.len();
+        let mut out = Vec::new();
+        let mut open: Vec<usize> = Vec::new();
+        // Per nesting level: inside a FROM list (a `,` starts a new table).
+        let mut in_from = vec![false];
+        let mut i = 0;
+        while i < n {
+            match self.sig[i].kind {
+                Kind::Open => {
+                    open.push(i);
+                    in_from.push(false);
+                    i += 1;
+                    continue;
+                }
+                Kind::Close => {
+                    open.pop();
+                    if in_from.len() > 1 {
+                        in_from.pop();
+                    }
+                    i += 1;
+                    continue;
+                }
+                _ => {}
+            }
+            let word = self.text(i).to_ascii_uppercase();
+            let is_word = self.sig[i].kind == Kind::Word;
+            let comma = self.sig[i].kind == Kind::Punct && word == ",";
+            let from_list = in_from.last_mut().expect("never empty");
+            if is_word
+                && matches!(
+                    word.as_str(),
+                    "WHERE"
+                        | "GROUP"
+                        | "ORDER"
+                        | "HAVING"
+                        | "ON"
+                        | "SET"
+                        | "VALUES"
+                        | "LIMIT"
+                        | "UNION"
+                        | "SELECT"
+                )
+            {
+                *from_list = false;
+            }
+            let starts_ref = (is_word
+                && matches!(
+                    word.as_str(),
+                    "FROM" | "JOIN" | "APPLY" | "UPDATE" | "INTO" | "TABLE"
+                ))
+                || (comma && *from_list);
+            if !starts_ref {
+                i += 1;
+                continue;
+            }
+            *from_list = comma || matches!(word.as_str(), "FROM" | "JOIN" | "APPLY");
+            let (scope, depth) = match open.last() {
+                Some(&o) => (self.inside(o), open.len()),
+                None => (0..self.sql.len(), 0),
+            };
+            let mut j = i + 1;
+            if self.is_word(j, "LATERAL") {
+                j += 1;
+            }
+            if self.kind(j) == Some(Kind::Open) {
+                // Derived table; carry on inside it for its own references.
+                if let Some(close) = self.partner[j]
+                    && let (Some(alias), _) = self.alias_at(close + 1)
+                {
+                    out.push(TableRef {
+                        source: Source::Derived(self.inside(j)),
+                        alias: Some(alias),
+                        scope,
+                        depth,
+                    });
+                }
+                i = j;
+                continue;
+            }
+            // [schema .] table [AS] [alias]
+            let Some(mut table) = self.name_at(j) else {
+                i = j;
+                continue;
+            };
+            let mut schema = None;
+            if self.text(j + 1) == "." {
+                match self.name_at(j + 2) {
+                    Some(t) => {
                         schema = Some(table);
-                        table = unquote(text(sig[j + 2]));
+                        table = t;
                         j += 2;
-                    } else {
+                    }
+                    None => {
                         // `FROM sales.` while typing: not a reference yet.
                         i = j + 2;
                         continue;
                     }
                 }
-                j += 1;
-                if j < sig.len() && text(sig[j]).eq_ignore_ascii_case("AS") {
-                    j += 1;
+            }
+            let (alias, next) = self.alias_at(j + 1);
+            out.push(TableRef {
+                source: Source::Table { schema, table },
+                alias,
+                scope,
+                depth,
+            });
+            i = next;
+        }
+        out
+    }
+
+    fn cte(&self, r: &TableRef) -> Option<&Cte> {
+        match &r.source {
+            Source::Table {
+                schema: None,
+                table,
+            } => self
+                .ctes
+                .iter()
+                .find(|c| c.name.eq_ignore_ascii_case(table)),
+            _ => None,
+        }
+    }
+
+    /// Visible references at `pos`, innermost scope first.
+    fn visible(&self, pos: usize) -> Vec<&TableRef> {
+        let mut v: Vec<&TableRef> = self.refs.iter().filter(|r| r.visible_at(pos)).collect();
+        v.sort_by_key(|r| std::cmp::Reverse(r.depth));
+        v
+    }
+
+    /// Columns of a reference: from the catalog, or what a CTE or subquery
+    /// selects.
+    fn columns(&self, r: &TableRef, cx: &Cx<'_>, level: u8) -> Vec<ColumnInfo> {
+        if level > 4 {
+            return Vec::new();
+        }
+        if let Some(c) = self.cte(r) {
+            return if c.columns.is_empty() {
+                self.select_columns(c.body.clone(), cx, level + 1)
+            } else {
+                c.columns.iter().cloned().map(named_column).collect()
+            };
+        }
+        match &r.source {
+            Source::Derived(body) => self.select_columns(body.clone(), cx, level + 1),
+            Source::Table { schema, table } => cx
+                .cat
+                .columns(&cx.schema_of(schema.as_deref(), table), table)
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Output columns of the `SELECT` in `body`, as far as they can be named.
+    fn select_columns(&self, body: Range<usize>, cx: &Cx<'_>, level: u8) -> Vec<ColumnInfo> {
+        let idx: Vec<usize> = (0..self.sig.len())
+            .filter(|&i| {
+                let r = &self.sig[i].range;
+                body.start <= r.start && r.end <= body.end
+            })
+            .collect();
+        // Top level of the body only.
+        let mut depth = 0i32;
+        let mut top = Vec::new();
+        for &i in &idx {
+            match self.sig[i].kind {
+                Kind::Open => {
+                    if depth == 0 {
+                        top.push(i);
+                    }
+                    depth += 1;
+                    continue;
                 }
-                let alias = (j < sig.len() && is_ident(sig[j]) && !is_keyword(text(sig[j])))
-                    .then(|| unquote(text(sig[j])));
-                if alias.is_some() {
-                    j += 1;
-                }
-                out.push(TableRef {
-                    schema,
-                    table,
-                    alias,
-                });
-                i = j;
-                continue;
+                Kind::Close => depth -= 1,
+                _ => {}
+            }
+            if depth == 0 {
+                top.push(i);
             }
         }
-        i += 1;
+        let Some(sel) = top.iter().position(|&i| self.is_word(i, "SELECT")) else {
+            return Vec::new();
+        };
+        let mut k = sel + 1;
+        while top
+            .get(k)
+            .is_some_and(|&i| self.is_word(i, "DISTINCT") || self.is_word(i, "ALL"))
+        {
+            k += 1;
+        }
+        if top.get(k).is_some_and(|&i| self.is_word(i, "TOP")) {
+            // `TOP n` or `TOP (n)` (only the parentheses are top level).
+            k += if top
+                .get(k + 1)
+                .is_some_and(|&i| self.sig[i].kind == Kind::Open)
+            {
+                3
+            } else {
+                2
+            };
+        }
+        let end = top[k.min(top.len())..]
+            .iter()
+            .position(|&i| {
+                ["FROM", "INTO", "WHERE", "UNION"]
+                    .iter()
+                    .any(|w| self.is_word(i, w))
+            })
+            .map_or(top.len(), |p| k + p);
+        let items = top.get(k..end).unwrap_or_default();
+
+        let here: Vec<&TableRef> = self.refs.iter().filter(|r| r.scope == body).collect();
+        let mut out = Vec::new();
+        for item in items.split(|&i| self.text(i) == ",") {
+            let Some(&last) = item.last() else { continue };
+            if self.text(last) == "*" {
+                let qual = (item.len() == 3).then(|| unquote(self.text(item[0])));
+                for r in &here {
+                    if qual
+                        .as_deref()
+                        .is_none_or(|q| r.handle().eq_ignore_ascii_case(q))
+                    {
+                        out.extend(self.columns(r, cx, level));
+                    }
+                }
+            } else if item.len() >= 3 && self.text(item[1]) == "=" {
+                // T-SQL `name = expr`.
+                out.extend(self.name_at(item[0]).map(named_column));
+            } else if let Some(name) = self.name_at(last) {
+                // `x`, `t.x`, `expr AS x`, `expr x`.
+                out.push(named_column(name));
+            }
+        }
+        out
     }
-    out
+}
+
+/// What resolving references needs besides the query text.
+struct Cx<'a> {
+    cat: &'a dyn Catalog,
+    default: &'a str,
+}
+
+impl Cx<'_> {
+    /// The schema of a table: as written, else the default schema, else the
+    /// first loaded schema that has it.
+    fn schema_of(&self, schema: Option<&str>, table: &str) -> String {
+        if let Some(s) = schema {
+            return s.to_string();
+        }
+        let has = |s: &str| {
+            self.cat
+                .tables(s)
+                .is_some_and(|ts| ts.iter().any(|t| t.name.eq_ignore_ascii_case(table)))
+        };
+        // Not loaded yet: assume the default; it is asked for again on load.
+        if self.cat.tables(self.default).is_none() || has(self.default) {
+            return self.default.to_string();
+        }
+        self.cat
+            .schemas()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|s| !s.eq_ignore_ascii_case(self.default) && has(s))
+            .unwrap_or_else(|| self.default.to_string())
+    }
 }
 
 /// Candidates for the cursor at byte `cursor` in `text`.
@@ -212,13 +586,15 @@ pub fn complete(
     });
     let qualifier = qualifier.flatten();
 
-    let refs = table_refs(sql, &toks);
+    let query = Query::new(sql, &toks);
+    let refs = query.visible(rel);
     let default = default_schema(engine);
-    let schema_of = |r: &TableRef| r.schema.clone().unwrap_or_else(|| default.to_string());
+    let cx = Cx { cat, default };
     let mut items = Vec::new();
 
     if let Some(q) = &qualifier {
-        // Aliases win over schema names, which win over bare table names.
+        // Aliases win over schema names, which win over bare table names;
+        // the innermost scope wins over outer ones.
         let by_alias = refs.iter().find(|r| {
             r.alias
                 .as_deref()
@@ -229,11 +605,14 @@ pub fn complete(
             .unwrap_or_default()
             .iter()
             .any(|s| s.eq_ignore_ascii_case(q));
-        let by_table = refs.iter().find(|r| r.table.eq_ignore_ascii_case(q));
+        let by_table = refs
+            .iter()
+            .find(|r| r.table().is_some_and(|t| t.eq_ignore_ascii_case(q)));
         let hit = by_alias.or(if is_schema { None } else { by_table });
         if let Some(r) = hit {
-            for c in cat.columns(&schema_of(r), &r.table).unwrap_or_default() {
-                items.push(column_cand(engine, &c, &r.table));
+            let source = r.table().unwrap_or(r.handle());
+            for c in query.columns(r, &cx, 0) {
+                items.push(column_cand(engine, &c, source));
             }
         } else if is_schema {
             for t in cat.tables(q).unwrap_or_default() {
@@ -276,20 +655,46 @@ pub fn complete(
                     });
                 }
             }
+            for c in &query.ctes {
+                items.push(Candidate {
+                    label: c.name.clone(),
+                    insert: quote_ident(engine, &c.name),
+                    kind: CandKind::Table,
+                    detail: "CTE".into(),
+                });
+            }
             if last.as_deref() == Some("JOIN") {
-                items.extend(join_hints(engine, &refs, default, cat));
+                items.extend(join_hints(engine, &query, &refs, &cx));
             }
         } else {
-            for r in &refs {
-                for c in cat.columns(&schema_of(r), &r.table).unwrap_or_default() {
-                    items.push(column_cand(engine, &c, &r.table));
+            let columns: Vec<(&TableRef, Vec<ColumnInfo>)> = refs
+                .iter()
+                .map(|r| (*r, query.columns(r, &cx, 0)))
+                .collect();
+            // A name in more than one table is offered qualified: `o.id`.
+            let mut seen = std::collections::HashMap::<String, usize>::new();
+            for (_, cols) in &columns {
+                for c in cols {
+                    *seen.entry(c.name.to_lowercase()).or_default() += 1;
+                }
+            }
+            for (r, cols) in &columns {
+                let source = r.table().unwrap_or(r.handle());
+                for c in cols {
+                    let mut cand = column_cand(engine, c, source);
+                    if seen[&c.name.to_lowercase()] > 1 {
+                        cand.label = format!("{}.{}", r.handle(), c.name);
+                        cand.insert =
+                            format!("{}.{}", quote_ident(engine, r.handle()), cand.insert);
+                    }
+                    items.push(cand);
                 }
                 if let Some(a) = &r.alias {
                     items.push(Candidate {
                         label: a.clone(),
-                        insert: a.clone(),
+                        insert: quote_ident(engine, a),
                         kind: CandKind::Table,
-                        detail: format!("alias of {}", r.table),
+                        detail: format!("alias of {source}"),
                     });
                 }
             }
@@ -320,9 +725,14 @@ pub fn complete(
         .into_iter()
         .filter_map(|c| {
             let l = c.label.to_lowercase();
-            let rank = if lower.is_empty() || l.starts_with(&lower) {
+            // Qualified columns (`o.id`) match on the column part.
+            let name = match c.kind {
+                CandKind::Column => l.rsplit('.').next().unwrap_or(&l),
+                _ => &l,
+            };
+            let rank = if lower.is_empty() || name.starts_with(&lower) {
                 0
-            } else if l.contains(&lower) {
+            } else if name.contains(&lower) {
                 1
             } else {
                 return None;
@@ -341,15 +751,16 @@ pub fn complete(
 }
 
 fn column_cand(engine: Engine, c: &ColumnInfo, table: &str) -> Candidate {
+    let ty = format!("{}{}", c.data_type, if c.primary_key { " PK" } else { "" });
     Candidate {
         label: c.name.clone(),
         insert: quote_ident(engine, &c.name),
         kind: CandKind::Column,
-        detail: format!(
-            "{}{} · {table}",
-            c.data_type,
-            if c.primary_key { " PK" } else { "" }
-        ),
+        detail: if ty.is_empty() {
+            table.to_string()
+        } else {
+            format!("{ty} · {table}")
+        },
     }
 }
 
@@ -380,14 +791,21 @@ fn table_cand(engine: Engine, t: &TableInfo, schema: Option<&str>) -> Candidate 
 /// `JOIN` suggestions from foreign keys of the tables already in the query.
 fn join_hints(
     engine: Engine,
-    refs: &[TableRef],
-    default: &str,
-    cat: &dyn Catalog,
+    query: &Query<'_>,
+    refs: &[&TableRef],
+    cx: &Cx<'_>,
 ) -> Vec<Candidate> {
+    let default = cx.default;
     let mut out = Vec::new();
     for r in refs {
-        let schema = r.schema.clone().unwrap_or_else(|| default.to_string());
-        for fk in cat.foreign_keys(&schema, &r.table).unwrap_or_default() {
+        let Source::Table { schema, table } = &r.source else {
+            continue;
+        };
+        if query.cte(r).is_some() {
+            continue;
+        }
+        let schema = cx.schema_of(schema.as_deref(), table);
+        for fk in cx.cat.foreign_keys(&schema, table).unwrap_or_default() {
             let target = &fk.ref_table;
             let alias = short_alias(target, refs);
             let conds: Vec<String> = fk
@@ -425,7 +843,7 @@ fn join_hints(
 }
 
 /// First letter(s) of the table, not clashing with existing handles.
-fn short_alias(table: &str, refs: &[TableRef]) -> String {
+fn short_alias(table: &str, refs: &[&TableRef]) -> String {
     let base: String = table
         .chars()
         .filter(|c| c.is_ascii_alphabetic())
@@ -480,15 +898,17 @@ mod tests {
                 _ => vec![t("notes")],
             })
         }
-        fn columns(&self, _schema: &str, table: &str) -> Option<Vec<ColumnInfo>> {
-            Some(match table {
-                "orders" => vec![
+        fn columns(&self, schema: &str, table: &str) -> Option<Vec<ColumnInfo>> {
+            // Strict about the schema, like the real catalog.
+            Some(match (schema, table) {
+                ("sales", "orders") => vec![
                     col("id", true),
                     col("customer_id", false),
                     col("status", false),
                 ],
-                "customers" => vec![col("id", true), col("name", false)],
-                _ => vec![col("body", false)],
+                ("sales", "customers") => vec![col("id", true), col("name", false)],
+                ("public", "notes") => vec![col("body", false)],
+                _ => return None,
             })
         }
         fn foreign_keys(&self, _schema: &str, table: &str) -> Option<Vec<ForeignKeyInfo>> {
@@ -566,5 +986,79 @@ mod tests {
         let t = "SELECT o.sta FROM sales.orders o";
         let c = complete(t, 12, Engine::Postgres, &Fake).unwrap();
         assert_eq!(&t[c.range.clone()], "sta");
+    }
+
+    #[test]
+    fn unqualified_table_found_in_its_schema() {
+        let l = labels("SELECT o.| FROM orders o");
+        assert_eq!(l, ["customer_id", "id", "status"]);
+    }
+
+    #[test]
+    fn alias_in_where_after_joins() {
+        let l = labels(
+            "SELECT * FROM sales.orders o JOIN sales.customers c ON c.id = o.customer_id WHERE c.|",
+        );
+        assert_eq!(l, ["id", "name"]);
+    }
+
+    #[test]
+    fn innermost_alias_wins() {
+        let l =
+            labels("SELECT * FROM sales.orders c WHERE x IN (SELECT c.| FROM sales.customers c)");
+        assert_eq!(l, ["id", "name"]);
+        let l =
+            labels("SELECT c.| FROM sales.orders c WHERE x IN (SELECT 1 FROM sales.customers c)");
+        assert_eq!(
+            l,
+            ["customer_id", "id", "status"],
+            "inner scope is not visible outside"
+        );
+    }
+
+    #[test]
+    fn cte_columns() {
+        let l = labels("WITH x AS (SELECT id, name FROM sales.customers) SELECT x.| FROM x");
+        assert_eq!(l, ["id", "name"]);
+        let l = labels("WITH x (a, b) AS (SELECT 1, 2) SELECT y.| FROM x y");
+        assert_eq!(l, ["a", "b"]);
+        let l = labels("WITH x AS (SELECT c.* FROM sales.customers c) SELECT x.| FROM x");
+        assert_eq!(l, ["id", "name"], "star expands to the table's columns");
+        let l = labels("WITH x AS (SELECT 1 AS n) SELECT * FROM |");
+        assert!(
+            l.contains(&"x".to_string()),
+            "CTEs are offered as tables: {l:?}"
+        );
+    }
+
+    #[test]
+    fn derived_table_columns() {
+        let l = labels("SELECT s.| FROM (SELECT id, status AS st, count(*) n FROM sales.orders) s");
+        assert_eq!(l, ["id", "n", "st"]);
+        let t = "SELECT d. FROM (SELECT TOP (5) id FROM sales.orders) d";
+        let c = complete(t, 9, Engine::Mssql, &Fake).unwrap();
+        let l: Vec<_> = c.items.into_iter().map(|i| i.label).collect();
+        assert_eq!(l, ["id"]);
+    }
+
+    #[test]
+    fn table_hint_is_not_an_alias() {
+        let t = "SELECT o. FROM sales.orders o WITH (NOLOCK)";
+        let c = complete(t, 9, Engine::Mssql, &Fake).unwrap();
+        assert_eq!(c.items.len(), 3);
+    }
+
+    #[test]
+    fn shared_column_names_are_qualified() {
+        let l = labels("SELECT i| FROM sales.orders o JOIN sales.customers c ON 1=1");
+        assert!(
+            l.contains(&"o.id".to_string()) && l.contains(&"c.id".to_string()),
+            "{l:?}"
+        );
+        assert!(!l.contains(&"id".to_string()), "{l:?}");
+        assert!(
+            l.contains(&"customer_id".to_string()),
+            "unique names stay bare: {l:?}"
+        );
     }
 }

@@ -1,64 +1,14 @@
-export const VERSION = "0.6.1";
-export const BUILD_NUMBER = "20260418-1";
 export const GITHUB_URL = "https://github.com/bartbeecoders/sqail";
+export const CODEBERG_URL = "https://codeberg.org/bartbeecoders/sqail";
+export const RELEASES_URL = `${GITHUB_URL}/releases`;
+/** Docs are Markdown files in the repository. */
+export const docUrl = (file: string) => `${CODEBERG_URL}/src/branch/main/docs/${file}`;
+
+/** Last release of the 0.x Tauri app (now in sqail-legacy/). */
+export const LEGACY_VERSION = "0.6.9";
+export const LEGACY_URL = `${GITHUB_URL}/releases/tag/v${LEGACY_VERSION}`;
 
 export type Platform = "windows" | "macos" | "linux";
-
-export interface DownloadInfo {
-  platform: Platform;
-  label: string;
-  fileName: string;
-  icon: string;
-  ext: string;
-}
-
-const FILE_PREFIX = `sqail_${VERSION}_${BUILD_NUMBER}`;
-
-export const DOWNLOADS: DownloadInfo[] = [
-  {
-    platform: "windows",
-    label: "Windows",
-    fileName: `${FILE_PREFIX}_x64-setup.exe`,
-    icon: "Monitor",
-    ext: ".exe",
-  },
-  {
-    platform: "macos",
-    label: "macOS (Universal)",
-    fileName: `${FILE_PREFIX}_universal.dmg`,
-    icon: "Apple",
-    ext: ".dmg",
-  },
-];
-
-export interface LinuxDownloadInfo {
-  label: string;
-  fileName: string;
-  description: string;
-}
-
-export const LINUX_DOWNLOADS: LinuxDownloadInfo[] = [
-  {
-    label: ".deb",
-    fileName: `${FILE_PREFIX}_amd64.deb`,
-    description: "Ubuntu, Debian, Pop!_OS, Mint",
-  },
-  {
-    label: ".rpm",
-    fileName: `${FILE_PREFIX}_amd64.rpm`,
-    description: "Fedora, RHEL, openSUSE",
-  },
-  {
-    label: "Arch (pacman)",
-    fileName: `${FILE_PREFIX}_x86_64.pkg.tar.zst`,
-    description: "Arch Linux, EndeavourOS, Manjaro",
-  },
-  {
-    label: "AppImage",
-    fileName: `${FILE_PREFIX}_amd64.AppImage`,
-    description: "Portable — runs on any distro",
-  },
-];
 
 export function detectPlatform(): Platform {
   const ua = navigator.userAgent.toLowerCase();
@@ -71,100 +21,80 @@ export function getDownloadUrl(fileName: string): string {
   return `/releases/${fileName}`;
 }
 
-export interface DbServiceDownloadInfo {
-  platform: Platform;
-  label: string;
-  fileName: string;
-  ext: string;
-}
-
-export const DBSERVICE_DOWNLOADS: DbServiceDownloadInfo[] = [
-  {
-    platform: "windows",
-    label: "Windows (x64)",
-    fileName: `${FILE_PREFIX}_dbservice_win-x64.zip`,
-    ext: ".zip",
-  },
-];
-
 export const FEATURES = [
   {
     icon: "Zap",
+    accent: "cyan",
     title: "Fast",
-    headline: "Opens before your terminal.",
-    description: "Under 20 MB, sub-second launch, native Tauri webview. No Electron, no JVM, no Chromium bundle.",
-  },
-  {
-    icon: "Sparkles",
-    title: "Smart",
-    headline: "Cloud AI or a local model — your call.",
-    description: "Schema-aware NL-to-SQL and inline completions, backed by your favorite API, a local llama.cpp sidecar, or a LoRA fine-tune trained on your own database.",
-  },
-  {
-    icon: "Network",
-    title: "Visual",
-    headline: "Drag-and-drop schema diagrams.",
-    description: "Drop tables from the object browser onto a canvas. Zoom, pan, recolor, annotate, and export as PNG, SVG, PDF, or .drawio — all in-app, no Graphviz install.",
-  },
-  {
-    icon: "GitBranch",
-    title: "Free",
-    headline: "Open source. Forever.",
-    description: "MIT licensed, hosted on Codeberg with a GitHub mirror. No account, no freemium, no feature gates.",
+    headline: "A million rows in under a second.",
+    description:
+      "Native Rust with a GPU-rendered UI. Results stream in while you scroll, sort and copy, and the grid stays smooth with millions of rows.",
   },
   {
     icon: "ShieldCheck",
-    title: "Private",
-    headline: "Your queries stay on your machine.",
-    description: "No telemetry. Credentials live in a local encrypted store. AI providers are only called when you configure them — and local mode stays fully offline.",
+    accent: "yellow",
+    title: "Secure",
+    headline: "No database passwords on the desktop.",
+    description:
+      "Connections live in sqail-service, an HTTPS gateway. The editor holds only a scoped token in the OS credential store and pins the service's certificate.",
   },
   {
     icon: "Database",
-    title: "Universal",
-    headline: "Postgres, MySQL, SQLite, SQL Server — one editor.",
-    description: "Multi-driver single UI with SSH tunnels, split editor, query history, and Monaco-powered editing.",
+    accent: "cyan",
+    title: "Real SQL work",
+    headline: "Transactions, plans, sessions.",
+    description:
+      "Every tab has its own server session. BEGIN … COMMIT spans runs, auto-commit can be switched off, and Explain shows one plan tree for every engine.",
   },
-] as const;
-
-export const AI_PROVIDERS = [
-  "Claude",
-  "OpenAI",
-  "Minimax",
-  "Z.ai",
-  "LM Studio",
-  "Claude Code CLI",
-  "OpenAI Compatible",
+  {
+    icon: "Table",
+    accent: "cyan",
+    title: "Edit & export",
+    headline: "Change data safely, take it anywhere.",
+    description:
+      "Edit single-table results in place and apply them in one transaction. Export to CSV, JSON, Excel or SQL, or stream the whole query straight to a file.",
+  },
+  {
+    icon: "Keyboard",
+    accent: "yellow",
+    title: "Keyboard-first",
+    headline: "Every action is one shortcut away.",
+    description:
+      "Statement-aware Ctrl+Enter, schema-aware completion, a formatter, a command palette and quick open. Every key binding can be changed.",
+  },
+  {
+    icon: "GitBranch",
+    accent: "cyan",
+    title: "Free",
+    headline: "Open source, no telemetry.",
+    description:
+      "MIT licensed, hosted on Codeberg with a GitHub mirror. No account, no paid tier, nothing sent home.",
+  },
 ] as const;
 
 export const DATABASES = [
   {
     name: "PostgreSQL",
-    description: "Full support including schemas, functions, and advanced types.",
+    description: "SSL modes like libpq, read-only sessions, EXPLAIN (ANALYZE) as a plan tree.",
     color: "#336791",
   },
   {
-    name: "MySQL",
-    description: "Complete MySQL support with dialect-specific syntax highlighting.",
-    color: "#4479A1",
+    name: "SQL Server",
+    description: "SQL or Windows authentication, named instances, GO batches, PRINT and RAISERROR messages.",
+    color: "#CC2927",
   },
   {
     name: "SQLite",
-    description: "Local and file-based databases with zero configuration.",
+    description: "Files on the service's machine, restricted to the folders its administrator allows.",
     color: "#003B57",
-  },
-  {
-    name: "SQL Server",
-    description: "MSSQL with Entra ID, Windows, and SQL Server authentication.",
-    color: "#CC2927",
   },
 ] as const;
 
 export const NAV_ITEMS = [
   { label: "Features", href: "#features" },
   { label: "Screenshots", href: "#screenshots" },
-  { label: "AI", href: "#ai" },
+  { label: "Service", href: "#service" },
   { label: "Databases", href: "#databases" },
-  { label: "Compare", href: "#compare" },
   { label: "Download", href: "#download" },
   { label: "Docs", href: "#docs" },
   { label: "Changelog", href: "#changelog" },

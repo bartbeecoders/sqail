@@ -1,4 +1,4 @@
-//! sqail-service: an HTTPS REST gateway between sqail2 and SQL databases.
+//! sqail-service: an HTTPS REST gateway between sqail and SQL databases.
 //!
 //! [`run`] serves until shutdown, restarting in place when the admin page
 //! changes the settings; [`start`] boots a single server. `main.rs` is a thin

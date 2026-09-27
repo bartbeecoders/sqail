@@ -1,4 +1,4 @@
--- sqail2 test schema for PostgreSQL. Mirrors dev/seed/mssql and dev/seed/sqlite.
+-- sqail test schema for PostgreSQL. Mirrors dev/seed/mssql and dev/seed/sqlite.
 CREATE SCHEMA sales;
 
 CREATE TABLE sales.customers (

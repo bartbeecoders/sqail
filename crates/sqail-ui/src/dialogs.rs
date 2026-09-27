@@ -72,9 +72,9 @@ fn welcome(ctx: &egui::Context, app: &mut SqailApp) {
 
     let resp = Modal::new(Id::new("welcome")).show(ctx, |ui| {
         ui.set_width(520.0);
-        ui.heading("Connect sqail2 to a sqail-service");
+        ui.heading("Connect sqail to a sqail-service");
         ui.label(
-            RichText::new("sqail2 never talks to databases directly. A sqail-service holds the connections and speaks HTTPS.")
+            RichText::new("sqail never talks to databases directly. A sqail-service holds the connections and speaks HTTPS.")
                 .weak(),
         );
         ui.add_space(8.0);
@@ -82,14 +82,14 @@ fn welcome(ctx: &egui::Context, app: &mut SqailApp) {
         ui.group(|ui| {
             ui.set_width(ui.available_width());
             ui.strong("This computer");
-            ui.label("Start (if needed) the sqail-service installed next to sqail2 and create a token for you.");
+            ui.label("Start (if needed) the sqail-service installed next to sqail and create a token for you.");
             ui.add_enabled_ui(!form.busy && local_available, |ui| {
                 if ui.button("Use the local service").clicked() {
                     provision = true;
                 }
             });
             if !local_available {
-                ui.label(RichText::new("sqail-service was not found next to sqail2 or on PATH.").weak().small());
+                ui.label(RichText::new("sqail-service was not found next to sqail or on PATH.").weak().small());
             }
         });
         ui.add_space(6.0);

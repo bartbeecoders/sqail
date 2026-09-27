@@ -11,7 +11,7 @@ use crate::state::AppState;
 const INDEX: &str = include_str!("../../admin/index.html");
 const SCRIPT: &str = include_str!("../../admin/app.js");
 const STYLE: &str = include_str!("../../admin/app.css");
-const ICON: &str = include_str!("../../../../packaging/icons/sqail2.svg");
+const ICON: &str = include_str!("../../../../packaging/icons/sqail.svg");
 
 /// Only our own files; no inline code, no framing, no form posts elsewhere.
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; \

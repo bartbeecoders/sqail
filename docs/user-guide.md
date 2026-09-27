@@ -1,34 +1,34 @@
-# sqail2 user guide
+# sqail user guide
 
-sqail2 is a native SQL editor for PostgreSQL, SQL Server and SQLite. It never
+sqail is a native SQL editor for PostgreSQL, SQL Server and SQLite. It never
 talks to a database itself. Every query goes through **sqail-service**, an
 HTTPS gateway that holds the connection profiles and credentials. That service
 can run on your own machine (the default) or on a server your team shares.
 
 ## Install
 
-**Linux:** unpack `sqail2-<version>-linux-x86_64.tar.gz` and run
+**Linux:** unpack `sqail-<version>-linux-x86_64.tar.gz` and run
 `./install.sh`. Both binaries go to `~/.local/bin`, and a launcher entry and
 icon are added. `./install.sh --prefix /usr` installs system-wide (as root),
 and `./install.sh --uninstall` removes everything again. On Arch/Omarchy you
 can also build the package from `packaging/arch/PKGBUILD`.
 
 **Windows:** run the MSI, or unzip the portable
-`sqail2-<version>-windows-x64.zip` anywhere and start `sqail2.exe`.
+`sqail-<version>-windows-x64.zip` anywhere and start `sqail.exe`.
 
 ## First start
 
-sqail2 offers two choices:
+sqail offers two choices:
 
-* **Use the local service**: sqail2 starts `sqail-service` from next to its
+* **Use the local service**: sqail starts `sqail-service` from next to its
   own executable, creates an admin token for you, pins the service's
   certificate and stores the token in the OS credential store (Secret Service
   on Linux, Credential Manager on Windows). There is nothing else to set up.
 * **Connect to a service…**: enter the service URL (for example
   `https://sql-gw.example.com:7443`) and a token from its administrator. When
-  the certificate is self-signed, sqail2 shows its SHA-256 fingerprint. Accept
+  the certificate is self-signed, sqail shows its SHA-256 fingerprint. Accept
   it only if it matches what the administrator gave you (`sqail-service
-  fingerprint`). From then on sqail2 refuses any other certificate for that
+  fingerprint`). From then on sqail refuses any other certificate for that
   URL. For services with a certificate from a public or company CA, choose
   *Verify with the system trust store* instead.
 
@@ -82,12 +82,15 @@ engine:
 The script splitter understands comments, string and identifier quoting,
 Postgres dollar quotes and SQL Server `GO` lines, so *Run statement* picks
 exactly the statement you're in. Completion knows keywords, schemas, tables,
-columns (including aliases like `o.` after `FROM orders o`) and functions of
-the current connection.
+columns and functions of the current connection. After `alias.` it lists
+that alias's columns: tables (`FROM orders o`), CTEs (`WITH x AS (…)`) and
+subqueries (`FROM (SELECT …) s`), with the innermost subquery winning when
+an alias is reused. A column name shared by several tables in the query is
+offered qualified (`o.id`, `c.id`).
 
 **Transactions:** every tab has its own server session. `BEGIN … COMMIT`
 spans runs, and the status bar shows **in transaction** while one is open.
-Switch off **Auto-commit** in the toolbar and sqail2 sends `BEGIN` before the
+Switch off **Auto-commit** in the toolbar and sqail sends `BEGIN` before the
 next run whenever no transaction is open. Finish with **Commit** or
 **Rollback** in the toolbar.
 Closing a tab with an open transaction asks whether to commit or roll back.
@@ -122,20 +125,26 @@ transaction that is **always rolled back**, so it is safe for `UPDATE` and
 
 * **Connections:** a tree of schemas, tables, views, columns, indexes, foreign
   keys and routines, loaded lazily. Right-click a table for *SELECT top 100*,
-  *Import CSV…*, *Script CREATE* or *Copy name*.
+  *Import CSV…*, *Script CREATE* or *Copy name*. Drag a table, view or routine
+  into the editor: inside a statement it inserts the qualified name; on a
+  blank line (or below the text) a table or view becomes a formatted
+  `SELECT` of all its columns. A procedure becomes `EXEC name` on SQL
+  Server or `CALL name()` on Postgres, and a function becomes
+  `SELECT name();`.
 * **History:** every query you ran, with its connection, duration and row
   count. Filter it, open an entry in a new tab, or clear it. The last 5 000
   entries are kept.
 * **Snippets:** save a selection with *Save as snippet…*, then insert it
   from the sidebar or with Ctrl+P.
 
-Open tabs, including unsaved text, are restored when you start sqail2 again.
+Open tabs, including unsaved text, are restored when you start sqail again.
 
 ## Files and settings
 
-sqail2 keeps its settings in `~/.config/sqail2/` on Linux and
-`%APPDATA%\bartbeecoders\sqail2\config\` on Windows
-(`SQAIL2_CONFIG_DIR` overrides it):
+sqail keeps its settings in `~/.config/sqail/` on Linux and
+`%APPDATA%\bartbeecoders\sqail\config\` on Windows
+(`SQAIL_CONFIG_DIR` overrides it). Version 1.0 was called sqail2; on first
+start sqail moves its `sqail2` settings folder and saved tokens over. The files:
 
 | File | Contents |
 |---|---|
@@ -146,7 +155,7 @@ sqail2 keeps its settings in `~/.config/sqail2/` on Linux and
 
 Example `keybindings.toml`. A list binds several shortcuts to one command,
 and an empty list `[]` removes a default shortcut. Problems (an unknown command
-or a shortcut that can't be parsed) are reported once when sqail2 starts.
+or a shortcut that can't be parsed) are reported once when sqail starts.
 
 ```toml
 "query.run" = "Ctrl+R"
@@ -171,8 +180,8 @@ Client certificate for a service that requires mTLS, in `settings.toml`:
 [[services]]
 name = "team gateway"
 url = "https://sql-gw.example.com:7443"
-client_cert = "/home/me/.config/sqail2/me.crt.pem"
-client_key = "/home/me/.config/sqail2/me.key.pem"
+client_cert = "/home/me/.config/sqail/me.crt.pem"
+client_key = "/home/me/.config/sqail/me.key.pem"
 ```
 
 ## Troubleshooting
@@ -182,4 +191,4 @@ client_key = "/home/me/.config/sqail2/me.key.pem"
   administrator replaced it. Otherwise treat it as an attack. After checking
   the new fingerprint, choose *Service → Forget this service*, then connect
   again.
-* **Logs:** start sqail2 from a terminal with `SQAIL2_LOG=debug`.
+* **Logs:** start sqail from a terminal with `SQAIL_UI_LOG=debug`.

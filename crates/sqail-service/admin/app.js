@@ -254,7 +254,7 @@ async function overview() {
       ', and add the databases they may use under ', h('a', { href: '#/connections' }, 'Connections'), '.'));
   } else if (s.connections === 0) {
     banners.push(h('div', { class: 'banner info' }, h('b', {}, 'Next: add a database'),
-      h('a', { href: '#/connections' }, 'Add a connection'), ' so sqail2 users have something to query.'));
+      h('a', { href: '#/connections' }, 'Add a connection'), ' so sqail users have something to query.'));
   }
 
   return [
@@ -268,14 +268,14 @@ async function overview() {
       stat(s.sessions, 'open sessions'),
       stat(s.running_queries, 'running queries')),
     h('div', { class: 'card' },
-      h('h2', {}, 'How sqail2 users connect'),
-      h('p', { class: 'muted' }, 'In sqail2: Service → Connect to a service…, then enter:'),
+      h('h2', {}, 'How sqail users connect'),
+      h('p', { class: 'muted' }, 'In sqail: Service → Connect to a service…, then enter:'),
       h('dl', { class: 'kv' },
         h('dt', {}, 'URL'), h('dd', {}, s.urls.map((u) => h('div', {}, copyable(u)))),
         h('dt', {}, 'Token'), h('dd', {}, 'one per person, from ', h('a', { href: '#/tokens' }, 'Tokens')),
         h('dt', {}, 'Fingerprint'), h('dd', {}, copyable(s.fingerprint),
           h('div', { class: 'hint' }, s.self_signed
-            ? 'Self-signed certificate: users compare this value when sqail2 asks them to trust it.'
+            ? 'Self-signed certificate: users compare this value when sqail asks them to trust it.'
             : 'Your own certificate: users can choose "Use system trust" if it is issued by a CA they trust.')))),
     h('div', { class: 'card' },
       h('h2', {}, 'Service'),
@@ -371,7 +371,7 @@ async function connections() {
       h('button', { class: 'small', onclick: () => editConnection(c) }, 'Edit'),
       h('button', { class: 'small danger', onclick: () => deleteConnection(c) }, 'Delete'))));
   return [
-    head('Connections', 'Databases that sqail2 users can query through this service. Passwords stay here, encrypted.',
+    head('Connections', 'Databases that sqail users can query through this service. Passwords stay here, encrypted.',
       h('button', { class: 'primary', onclick: () => editConnection(null) }, 'New connection')),
     h('div', { class: 'card table-wrap' }, list.length
       ? h('table', {}, h('thead', {}, h('tr', {}, ['Name', 'Engine', 'Target', 'Environment', '', ''].map((t) => h('th', {}, t)))), h('tbody', {}, rows))
@@ -395,7 +395,7 @@ function showTest(res) {
 
 async function deleteConnection(c) {
   const ok = await confirmModal(`Delete "${c.name}"?`,
-    'sqail2 users lose access to this connection. Its stored password is deleted.', 'Delete');
+    'sqail users lose access to this connection. Its stored password is deleted.', 'Delete');
   if (!ok) return;
   if (await attempt(() => api('DELETE', `/v1/connections/${c.id}`)) !== undefined) {
     toast('Connection deleted');
@@ -533,9 +533,9 @@ function editConnection(existing) {
   }
 
   modal((close) => [existing ? `Edit ${existing.name}` : 'New connection', [
-    h('div', { class: 'grid two' }, field('Name', f.name, 'Shown in sqail2.'), field('Database engine', f.engine)),
+    h('div', { class: 'grid two' }, field('Name', f.name, 'Shown in sqail.'), field('Database engine', f.engine)),
     engineBox,
-    h('h3', {}, 'In sqail2'),
+    h('h3', {}, 'In sqail'),
     h('div', { class: 'grid two' },
       field('Environment', f.environment),
       field('Colour', f.color, 'e.g. #c0392b to mark production.'),
@@ -605,7 +605,7 @@ async function showNewToken(created) {
     h('div', { class: 'banner warn' }, h('b', {}, 'Shown only now'), 'Copy it and hand it over through a secure channel. It cannot be displayed again.'),
     h('div', { class: 'secret mono' }, created.token),
     h('div', {}, copyButton(created.token)),
-    h('h3', {}, 'In sqail2: Service → Connect to a service…'),
+    h('h3', {}, 'In sqail: Service → Connect to a service…'),
     h('dl', { class: 'kv' },
       h('dt', {}, 'URL'), h('dd', {}, copyable(url)),
       h('dt', {}, 'Token'), h('dd', {}, '(above)'),
@@ -651,7 +651,7 @@ async function settings() {
   const port = locked('bind', num(bindPort, 1));
   const network = h('fieldset', {}, h('legend', {}, 'Network'),
     h('div', { class: 'radio-list' },
-      radio('local', 'This computer only', 'sqail2 on this machine can connect. The safe default.'),
+      radio('local', 'This computer only', 'sqail on this machine can connect. The safe default.'),
       radio('network', 'Other computers too', 'Listens on every network interface. Allow the port in the firewall, and consider your own certificate.'),
       radio('custom', 'One specific address of this computer', null)),
     h('div', { class: 'grid', style: 'margin-top:10px' }, field('Address', customHost), field('Port', port)),

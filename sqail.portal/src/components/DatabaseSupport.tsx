@@ -6,15 +6,16 @@ export default function DatabaseSupport() {
       <div className="mx-auto max-w-6xl px-6">
         <div className="mb-16 text-center">
           <h2 className="mb-4 text-3xl font-bold text-text-primary sm:text-4xl">
-            One app, four databases
+            One editor, three engines
           </h2>
           <p className="mx-auto max-w-2xl text-text-muted">
-            SQaiL speaks your database's dialect — with syntax highlighting,
-            autocomplete, and validation tuned to each engine.
+            The script splitter, completion and plan viewer understand each
+            engine's dialect, down to Postgres dollar quotes and SQL Server GO
+            batches.
           </p>
         </div>
 
-        <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
           {DATABASES.map((db) => (
             <div
               key={db.name}

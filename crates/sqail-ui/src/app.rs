@@ -1030,12 +1030,13 @@ impl SqailApp {
                 return;
             };
             let Some(rs) = run.results.get(i) else { return };
-            let (columns, rows) = (rs.columns.clone(), rs.rows.clone());
+            let (columns, cells) = (rs.columns.clone(), rs.cells().to_vec());
             self.worker.spawn(move |sink| async move {
                 let Some(path) = pick().await else { return };
                 let res = tokio::task::spawn_blocking(move || {
+                    let width = columns.len().max(1);
                     let mut ex = Exporter::create(&path, format, columns, engine, "exported")?;
-                    for r in &rows {
+                    for r in cells.chunks(width) {
                         ex.row(r)?;
                     }
                     ex.finish().map(|n| (n, path))

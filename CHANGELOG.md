@@ -7,6 +7,8 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
 
 ## Unreleased
 
+## 1.1.0 — 2026-09-27
+
 ### Renamed to sqail
 
 - The editor is now called **sqail**: binary `sqail`/`sqail.exe`, packages

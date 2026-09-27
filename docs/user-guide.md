@@ -78,6 +78,7 @@ engine:
 | Ctrl+O / Ctrl+S / Ctrl+Shift+S | Open / save / save as (`.sql` files) |
 | Ctrl+F | Find and replace |
 | Ctrl+= / Ctrl+- | Larger / smaller editor font |
+| Ctrl+Shift+A | Show / hide the [AI assistant](#ai-assistant) |
 
 The script splitter understands comments, string and identifier quoting,
 Postgres dollar quotes and SQL Server `GO` lines, so *Run statement* picks
@@ -138,6 +139,63 @@ transaction that is **always rolled back**, so it is safe for `UPDATE` and
   from the sidebar or with Ctrl+P.
 
 Open tabs, including unsaved text, are restored when you start sqail again.
+
+## AI assistant
+
+The assistant answers questions about your data and writes queries, using
+**Claude Code** or **Grok**, the command-line tools you already have. It runs
+the CLI in the background with sqail's own tools, so it can look at the
+schema and the data of the connection you're working on instead of guessing.
+
+**Set up:** install [Claude Code](https://claude.com/claude-code) (`claude`)
+or the Grok CLI (`grok`) and sign in once in a terminal. sqail finds them on
+`PATH`. Nothing else is needed; sqail does not hold an API key.
+
+**Use:** press **Ctrl+Shift+A** (or *View → Show / hide the AI assistant*),
+pick Claude Code or Grok, and ask, for example *"Which customers ordered the
+most last quarter?"* or *"Why is the query in my editor slow?"*. The answer
+streams in. Each query it proposes gets **Insert** (at the cursor in the
+editor), **New tab** and **Copy** buttons. Follow-up questions continue the
+same conversation; **New chat** starts over. Enter sends, Shift+Enter adds a
+line. *Include editor SQL* sends the active tab's SQL along with your question.
+
+A conversation stays on the connection of the tab that was active when it
+started (shown under the title). The assistant can:
+
+| Tool | What it does |
+|---|---|
+| `list_schemas`, `list_tables` | See what's in the database |
+| `describe_table` | Columns, types, keys, indexes and foreign keys |
+| `run_query` | Run **one read-only statement** and see up to 100 rows |
+
+Each tool call shows up in the conversation; click it to see the SQL and the
+result.
+
+**What it can't do:** change anything. `run_query` accepts only a single
+`SELECT` / `WITH` / `VALUES` statement: writes, DDL, `EXEC`, `SELECT … INTO`,
+`FOR UPDATE`, multiple statements and functions with side effects are
+refused. Every assistant query also runs in its own transaction that is always
+rolled back (read-only on PostgreSQL), so even something that slipped through
+would be undone. The CLI gets no other tools: no shell, no files, no web.
+When you ask for changes, it writes the SQL for you to review and run
+yourself.
+
+**What leaves your machine:** your questions, the schema details and the
+query results (up to 100 rows per query) the assistant looks at go to the
+provider you picked, under that provider's terms. Use it on data you're
+allowed to share with them.
+
+**Settings** (`[assistant]` in `settings.toml`):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `provider` | `"claude_code"` | or `"grok"` |
+| `claude_path`, `grok_path` | found on `PATH` | Full path to the CLI |
+| `claude_model`, `grok_model` | the CLI's default | e.g. `"sonnet"` |
+| `max_rows` | `100` | Most rows one assistant query returns to the model |
+
+On Windows, sqail uses the native `grok.exe` behind npm's `grok.cmd`. If it
+can't find it, set `grok_path`.
 
 ## Files and settings
 

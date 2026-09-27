@@ -328,6 +328,7 @@ The same form is used in sqail (**+ Add**) and on the admin page
 | Ctrl+O / Ctrl+S / Ctrl+Shift+S | Open / save / save as |
 | Ctrl+F | Find and replace |
 | F2 | Edit the selected cell (in edit mode) |
+| Ctrl+Shift+A | Show / hide the AI assistant |
 
 Rebind keys in `keybindings.toml` in the config folder
 (`~/.config/sqail/` on Linux, `%APPDATA%\bartbeecoders\sqail\config\` on
@@ -342,6 +343,10 @@ Windows), for example `"query.run" = "Ctrl+R"`.
   file.
 * **✎ Edit data** edits a single-table result in place and applies the
   changes in one transaction.
+* **AI assistant:** ask Claude Code or Grok (your own CLI and account)
+  about the data, or for a query. It explores the connection with
+  read-only tools and proposes SQL you can insert or open in a new tab.
+  See the [user guide](docs/user-guide.md#ai-assistant).
 * **Sidebar:** right-click a table for *SELECT top 100*, *Import CSV…* or
   *Script CREATE*, or drag it into the editor. History and snippets are
   there too, and open tabs come back after a restart.

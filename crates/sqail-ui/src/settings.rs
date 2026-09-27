@@ -21,6 +21,7 @@ pub struct Settings {
     pub autocomplete: bool,
     pub format_uppercase: bool,
     pub format_indent: u8,
+    pub assistant: crate::assistant::AssistantSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -61,6 +62,7 @@ impl Default for Settings {
             autocomplete: true,
             format_uppercase: true,
             format_indent: 2,
+            assistant: Default::default(),
         }
     }
 }

@@ -21,7 +21,7 @@ serde_json.workspace = true
 eframe = { version = "0.36", default-features = false, features = ["wgpu", "wayland", "x11", "default_fonts", "persistence"] }
 egui = "0.36"
 egui_extras = "0.36"
-tokio = { version = "1.53", features = ["rt-multi-thread", "sync", "time", "macros", "process"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "sync", "time", "macros", "process", "io-std", "io-util"] }
 futures = "0.3"
 uuid = { version = "1", features = ["v4", "serde"] }
 directories = "6"

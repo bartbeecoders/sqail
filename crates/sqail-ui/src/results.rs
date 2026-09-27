@@ -8,14 +8,125 @@ use serde_json::Value;
 use sqail_client::proto::{Column, LogicalType, QueryEvent};
 use uuid::Uuid;
 
-/// One cell, ~24 bytes. A million rows × a few columns stays manageable.
+/// Text of a cell. Up to [`CellStr::INLINE`] bytes (dates, decimals, codes,
+/// short names: most values) are stored inside the cell, so a result of a
+/// million rows doesn't make millions of small allocations.
+#[derive(Clone)]
+pub enum CellStr {
+    Inline { len: u8, buf: [u8; CellStr::INLINE] },
+    Heap(Box<str>),
+}
+
+impl CellStr {
+    pub const INLINE: usize = 22;
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            // Only ever filled from a &str, so this cannot fail.
+            CellStr::Inline { len, buf } => {
+                std::str::from_utf8(&buf[..*len as usize]).unwrap_or("")
+            }
+            CellStr::Heap(s) => s,
+        }
+    }
+}
+
+impl From<&str> for CellStr {
+    fn from(s: &str) -> Self {
+        if s.len() <= Self::INLINE {
+            let mut buf = [0; Self::INLINE];
+            buf[..s.len()].copy_from_slice(s.as_bytes());
+            CellStr::Inline {
+                len: s.len() as u8,
+                buf,
+            }
+        } else {
+            CellStr::Heap(s.into())
+        }
+    }
+}
+
+impl From<String> for CellStr {
+    fn from(s: String) -> Self {
+        if s.len() <= Self::INLINE {
+            s.as_str().into()
+        } else {
+            CellStr::Heap(s.into_boxed_str())
+        }
+    }
+}
+
+impl std::ops::Deref for CellStr {
+    type Target = str;
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl PartialEq for CellStr {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl std::fmt::Debug for CellStr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.as_str().fmt(f)
+    }
+}
+
+impl std::fmt::Display for CellStr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.as_str().fmt(f)
+    }
+}
+
+/// One cell, 24 bytes. A million rows × a few columns stays manageable.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Cell {
     Null,
     Bool(bool),
     Int(i64),
     Float(f64),
-    Text(Box<str>),
+    Text(CellStr),
+}
+
+/// A cell prepared for sorting: text that looks like a number (decimals
+/// travel as strings) is parsed once, not on every comparison.
+enum SortKey<'a> {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Text(Option<f64>, &'a str),
+}
+
+impl SortKey<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        use SortKey::*;
+        match (self, other) {
+            (Null, Null) => Ordering::Equal,
+            (Null, _) => Ordering::Less,
+            (_, Null) => Ordering::Greater,
+            (Bool(a), Bool(b)) => a.cmp(b),
+            (Int(a), Int(b)) => a.cmp(b),
+            (Float(a), Float(b)) => a.total_cmp(b),
+            (Int(a), Float(b)) => (*a as f64).total_cmp(b),
+            (Float(a), Int(b)) => a.total_cmp(&(*b as f64)),
+            (Text(Some(x), _), Text(Some(y), _)) => x.total_cmp(y),
+            (Text(_, a), Text(_, b)) => a.cmp(b),
+            (a, b) => a.rank().cmp(&b.rank()),
+        }
+    }
+
+    fn rank(&self) -> u8 {
+        match self {
+            SortKey::Null => 0,
+            SortKey::Bool(_) => 1,
+            SortKey::Int(_) | SortKey::Float(_) => 2,
+            SortKey::Text(..) => 3,
+        }
+    }
 }
 
 impl Cell {
@@ -27,8 +138,8 @@ impl Cell {
                 Some(i) => Cell::Int(i),
                 None => Cell::Float(n.as_f64().unwrap_or(f64::NAN)),
             },
-            Value::String(s) => Cell::Text(s.into_boxed_str()),
-            other => Cell::Text(other.to_string().into_boxed_str()),
+            Value::String(s) => Cell::Text(s.into()),
+            other => Cell::Text(other.to_string().into()),
         }
     }
 
@@ -41,7 +152,7 @@ impl Cell {
             Cell::Int(i) => Cow::Owned(i.to_string()),
             Cell::Float(f) => Cow::Owned(f.to_string()),
             Cell::Text(s) if logical == LogicalType::Bytes => Cow::Owned(format!("0x{s}")),
-            Cell::Text(s) => Cow::Borrowed(s),
+            Cell::Text(s) => Cow::Borrowed(s.as_str()),
         }
     }
 
@@ -49,39 +160,29 @@ impl Cell {
         matches!(self, Cell::Null)
     }
 
-    fn cmp(&self, other: &Cell) -> Ordering {
-        use Cell::*;
-        match (self, other) {
-            (Null, Null) => Ordering::Equal,
-            (Null, _) => Ordering::Less,
-            (_, Null) => Ordering::Greater,
-            (Bool(a), Bool(b)) => a.cmp(b),
-            (Int(a), Int(b)) => a.cmp(b),
-            (Float(a), Float(b)) => a.total_cmp(b),
-            (Int(a), Float(b)) => (*a as f64).total_cmp(b),
-            (Float(a), Int(b)) => a.total_cmp(&(*b as f64)),
-            (Text(a), Text(b)) => match (a.parse::<f64>(), b.parse::<f64>()) {
-                // Decimals travel as strings; compare them numerically.
-                (Ok(x), Ok(y)) => x.total_cmp(&y),
-                _ => a.cmp(b),
-            },
-            (a, b) => a.rank().cmp(&b.rank()),
+    fn sort_key(&self) -> SortKey<'_> {
+        match self {
+            Cell::Null => SortKey::Null,
+            Cell::Bool(b) => SortKey::Bool(*b),
+            Cell::Int(i) => SortKey::Int(*i),
+            Cell::Float(f) => SortKey::Float(*f),
+            Cell::Text(s) => SortKey::Text(s.parse::<f64>().ok(), s),
         }
     }
 
-    fn rank(&self) -> u8 {
-        match self {
-            Cell::Null => 0,
-            Cell::Bool(_) => 1,
-            Cell::Int(_) | Cell::Float(_) => 2,
-            Cell::Text(_) => 3,
-        }
+    #[cfg(test)]
+    fn cmp(&self, other: &Cell) -> Ordering {
+        self.sort_key().cmp(&other.sort_key())
     }
 }
 
 pub struct ResultSet {
     pub columns: Vec<Column>,
-    pub rows: Vec<Box<[Cell]>>,
+    /// Every cell, row after row (`columns.len()` per row). One allocation
+    /// for the whole result instead of one per row keeps a million-row
+    /// result compact and the heap unfragmented.
+    cells: Vec<Cell>,
+    len: usize,
     pub complete: bool,
     pub truncated: bool,
     /// Sorted view: `order[i]` is the row shown at position `i`.
@@ -93,7 +194,9 @@ impl ResultSet {
     /// A complete result set from ready-made rows (tests, fixtures).
     pub fn for_test(columns: Vec<Column>, rows: Vec<Vec<Cell>>) -> Self {
         let mut rs = Self::new(columns);
-        rs.rows = rows.into_iter().map(Vec::into_boxed_slice).collect();
+        for row in rows {
+            rs.push_row(row);
+        }
         rs.complete = true;
         rs
     }
@@ -101,7 +204,8 @@ impl ResultSet {
     fn new(columns: Vec<Column>) -> Self {
         Self {
             columns,
-            rows: Vec::new(),
+            cells: Vec::new(),
+            len: 0,
             complete: false,
             truncated: false,
             order: None,
@@ -110,11 +214,36 @@ impl ResultSet {
     }
 
     pub fn len(&self) -> usize {
-        self.rows.len()
+        self.len
     }
 
     pub fn is_empty(&self) -> bool {
-        self.rows.is_empty()
+        self.len == 0
+    }
+
+    /// Append a row; it is padded with NULLs or cut to the column count.
+    fn push_row(&mut self, row: impl IntoIterator<Item = Cell>) {
+        let width = self.columns.len();
+        let start = self.cells.len();
+        self.cells.extend(row.into_iter().take(width));
+        self.cells.resize(start + width, Cell::Null);
+        self.len += 1;
+    }
+
+    /// The row stored at `idx`, ignoring the sort (see [`Self::row`]).
+    pub fn raw_row(&self, idx: usize) -> &[Cell] {
+        let width = self.columns.len();
+        &self.cells[idx * width..(idx + 1) * width]
+    }
+
+    /// All rows in the order they arrived.
+    pub fn raw_rows(&self) -> impl ExactSizeIterator<Item = &[Cell]> {
+        (0..self.len).map(|i| self.raw_row(i))
+    }
+
+    /// Every cell, row after row (`columns.len()` per row).
+    pub fn cells(&self) -> &[Cell] {
+        &self.cells
     }
 
     /// Index into `rows` of the row displayed at `pos`.
@@ -124,8 +253,7 @@ impl ResultSet {
 
     /// The row displayed at `pos`, honouring the sort.
     pub fn row(&self, pos: usize) -> &[Cell] {
-        let idx = self.order.as_ref().map_or(pos, |o| o[pos] as usize);
-        &self.rows[idx]
+        self.raw_row(self.row_index(pos))
     }
 
     /// Cycle ascending → descending → unsorted for column `col`.
@@ -136,9 +264,11 @@ impl ResultSet {
             _ => Some((col, true)),
         };
         self.order = self.sort.map(|(c, asc)| {
-            let mut order: Vec<u32> = (0..self.rows.len() as u32).collect();
+            let keys: Vec<SortKey<'_>> = self.raw_rows().map(|r| r[c].sort_key()).collect();
+            let mut order: Vec<u32> = (0..self.len as u32).collect();
+            // Stable, so equal values keep their original order.
             order.sort_by(|&a, &b| {
-                let o = self.rows[a as usize][c].cmp(&self.rows[b as usize][c]);
+                let o = keys[a as usize].cmp(&keys[b as usize]);
                 if asc { o } else { o.reverse() }
             });
             order
@@ -286,11 +416,10 @@ impl Run {
             }
             QueryEvent::Rows { index, rows } => {
                 if let Some(rs) = self.results.get_mut(index as usize) {
-                    rs.rows.reserve(rows.len());
-                    rs.rows.extend(
-                        rows.into_iter()
-                            .map(|r| r.into_iter().map(Cell::from_json).collect::<Box<[Cell]>>()),
-                    );
+                    rs.cells.reserve(rows.len() * rs.columns.len());
+                    for r in rows {
+                        rs.push_row(r.into_iter().map(Cell::from_json));
+                    }
                 }
             }
             QueryEvent::ResultEnd {
@@ -475,6 +604,36 @@ mod tests {
             Cell::Text("10.5".into()).cmp(&Cell::Text("9.1".into())),
             Ordering::Greater
         );
+    }
+
+    #[test]
+    fn cells_stay_small() {
+        assert_eq!(std::mem::size_of::<Cell>(), 24);
+    }
+
+    #[test]
+    fn short_text_is_inline_and_long_text_on_the_heap() {
+        let date = "2026-01-31 12:00:00.123"; // 23 bytes: one over the limit
+        for s in ["", "paid", "1234.56", "héllo ✓ 世界", &date[..22], date] {
+            let c = CellStr::from(s);
+            assert_eq!(c.as_str(), s);
+            assert_eq!(CellStr::from(s.to_string()).as_str(), s);
+            assert_eq!(
+                matches!(c, CellStr::Inline { .. }),
+                s.len() <= CellStr::INLINE,
+                "{s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn big_integers_sort_exactly() {
+        // Beyond 2^53 these are equal as f64.
+        let (a, b) = (
+            Cell::Int(9_007_199_254_740_993),
+            Cell::Int(9_007_199_254_740_992),
+        );
+        assert_eq!(a.cmp(&b), Ordering::Greater);
     }
 
     #[test]

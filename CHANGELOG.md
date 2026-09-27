@@ -7,6 +7,22 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
 
 ## Unreleased
 
+### sqail
+
+- Large results use about half the memory: a result's cells are kept in one
+  buffer, and short text (dates, decimals, codes) is stored inside the cell.
+  A million rows × 10 columns now takes ~250 MB instead of ~470 MB.
+- Sorting a large result by a decimal column is 10× faster (0.1 s instead
+  of 1 s for a million rows); numbers stored as text are parsed once per
+  sort instead of on every comparison.
+
+### Development
+
+- The SQL Server test database has `sales.big_orders`, 1,000,000 rows for
+  testing large results. `scripts/db.sh up` adds it to existing dev
+  databases too. `crates/sqail-ui/tests/big_results.rs` measures streaming,
+  memory, scrolling and sorting on it.
+
 ## 1.1.0 — 2026-09-27
 
 ### Renamed to sqail

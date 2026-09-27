@@ -112,7 +112,7 @@ fn exercise(s: &Svc, conn: Uuid, engine: Engine, schema: Option<&str>, table: &s
     assert_eq!(n, 3);
 
     let after = s.run(conn, &select);
-    let rows: Vec<Vec<Cell>> = after.results[0].rows.iter().map(|r| r.to_vec()).collect();
+    let rows: Vec<Vec<Cell>> = after.results[0].raw_rows().map(|r| r.to_vec()).collect();
     assert_eq!(rows.len(), 3, "{engine:?}: {rows:?}");
     assert_eq!(rows[0][0], Cell::Int(1));
     assert_eq!(rows[0][1], Cell::Null);
@@ -145,7 +145,7 @@ fn exercise(s: &Svc, conn: Uuid, engine: Engine, schema: Option<&str>, table: &s
     assert!(format!("{err:#}").contains("matched no row"), "{err:#}");
     let again = s.run(conn, &select);
     assert_eq!(
-        again.results[0].rows[0][2].display(again.results[0].columns[2].logical),
+        again.results[0].raw_row(0)[2].display(again.results[0].columns[2].logical),
         "12.34",
         "rolled back"
     );

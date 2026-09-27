@@ -44,6 +44,31 @@ real frames are cheaper than these.
 | Highlighting that script | tokenize 2.6 ms, build highlight 6.1 ms, glyph layout 5.0 ms |
 | Idle CPU | ~0.1% (1 tick in 10 s) |
 
+### A million SQL Server rows
+
+`SELECT * FROM sales.big_orders` (1,000,000 rows × 10 columns: int, date,
+text, decimal, bit and a mostly-NULL text column; seeded by
+`scripts/db.sh up`), measured on 2026-09-27 with
+`crates/sqail-ui/tests/big_results.rs`:
+
+```bash
+SQAIL_IT=1 cargo test --release -p sqail-ui --test big_results -- --ignored --nocapture
+```
+
+| Scenario | Result |
+|---|---|
+| First rows in the grid | 17–20 ms |
+| All 1,000,000 rows in the grid | 1.2–1.8 s |
+| Frame time while they stream in | avg 0.8–1.0 ms, worst 4–10 ms |
+| Scrolling | avg 1.3 ms, worst 1.8 ms |
+| Memory for the result | ~250 MB (~256 bytes/row, 24 bytes per cell) |
+| Sort by `id` (int) / `total` (decimal) / `note` (text) | 11 ms / 95 ms / 31 ms |
+
+Before 1.2 each row was a separate allocation and short text a separate
+allocation per cell: the same result took ~470 MB. Decimals, which travel
+as text, were parsed on every comparison while sorting, so sorting by `total`
+took 1.05 s and froze the window.
+
 ## Plan targets
 
 * First row in under 50 ms locally: **met** on all engines. The Postgres case

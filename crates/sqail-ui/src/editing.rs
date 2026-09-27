@@ -176,7 +176,7 @@ impl EditState {
 
     pub fn set(&mut self, row: usize, col: usize, value: Value, rs: &ResultSet) {
         // Setting a cell back to its original value drops the change.
-        let original = &rs.rows[row][col];
+        let original = &rs.raw_row(row)[col];
         let same = match (&value, original) {
             (None, Cell::Null) => true,
             (Some(v), c) if !c.is_null() => *v == c.display(rs.columns[col].logical),
@@ -226,7 +226,9 @@ impl EditState {
                 *n += 1;
                 let col = self.col(c);
                 params.push(Param::Text(
-                    rs.rows[row][c].display(rs.columns[c].logical).into_owned(),
+                    rs.raw_row(row)[c]
+                        .display(rs.columns[c].logical)
+                        .into_owned(),
                 ));
                 format!(
                     "{} = {}",

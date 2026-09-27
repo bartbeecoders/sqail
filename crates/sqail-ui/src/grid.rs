@@ -449,7 +449,7 @@ enum CellAction {
 }
 
 /// What a grid position shows while editing: an original row (by index into
-/// `rs.rows`) or a new row (by index into `inserted`).
+/// `rs.raw_row`) or a new row (by index into `inserted`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RowRef {
     Existing(usize),
@@ -477,7 +477,7 @@ fn cell_text(
             (e.changes[&r][&c].clone(), true)
         }
         (RowRef::Existing(r), _) => {
-            let cell = &rs.rows[r][c];
+            let cell = &rs.raw_row(r)[c];
             (
                 (!cell.is_null()).then(|| cell.display(logical).into_owned()),
                 false,
@@ -514,7 +514,7 @@ fn grid_ui(
         .enumerate()
         .map(|(c, col)| {
             let mut chars = col.name.chars().count() + 2;
-            for r in rs.rows.iter().take(50) {
+            for r in rs.raw_rows().take(50) {
                 chars = chars.max(r[c].display(col.logical).chars().count().min(48));
             }
             (chars as f32 * char_w + 20.0).clamp(56.0, 420.0)

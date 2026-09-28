@@ -15,3 +15,6 @@ I want to clean up this sqail project.
 - Update the documentation
 - Update the sqail-portal to refect the new version
 - help me update the github deployement
+
+
+Add the ability to connect to a azure sql database 

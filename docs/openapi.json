@@ -828,6 +828,87 @@
               "method"
             ],
             "type": "object"
+          },
+          {
+            "description": "Microsoft Entra ID user and password (Azure SQL); the password goes in\n[`ConnectionInput::password`]. Accounts that require MFA cannot use it.",
+            "properties": {
+              "client_id": {
+                "description": "Public client app that signs in; Microsoft's SqlClient app when omitted.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "method": {
+                "enum": [
+                  "entra_password"
+                ],
+                "type": "string"
+              },
+              "tenant": {
+                "description": "Tenant ID or domain; `organizations` when omitted.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "user": {
+                "description": "`user@contoso.com`.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "user",
+              "method"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Microsoft Entra ID service principal (app registration); the client\nsecret goes in [`ConnectionInput::password`].",
+            "properties": {
+              "client_id": {
+                "description": "Application (client) ID.",
+                "type": "string"
+              },
+              "method": {
+                "enum": [
+                  "entra_service_principal"
+                ],
+                "type": "string"
+              },
+              "tenant": {
+                "description": "Tenant ID or domain.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "tenant",
+              "client_id",
+              "method"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The managed identity of the Azure host sqail-service runs on.",
+            "properties": {
+              "client_id": {
+                "description": "Client ID of a user-assigned identity; the system-assigned one when omitted.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "method": {
+                "enum": [
+                  "entra_managed_identity"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "method"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -1906,6 +1987,63 @@
             }
           }
         },
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/v1/connections/databases": {
+      "post": {
+        "operationId": "databases_unsaved",
+        "parameters": [
+          {
+            "description": "When the body has no `password`, use the one stored with this profile\n(the connection form while editing).",
+            "in": "query",
+            "name": "secret_from",
+            "required": false,
+            "schema": {
+              "format": "uuid",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectionInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/NamedItem"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "summary": "The databases the login in a (possibly unsaved) profile can access, for\npicking one in the connection form. Admin only: it connects to arbitrary\nhosts. PostgreSQL connects to the profile's database, or `postgres` when\nit is empty.",
         "tags": [
           "connections"
         ]

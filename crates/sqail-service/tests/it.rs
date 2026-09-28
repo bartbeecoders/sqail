@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use sqail_proto::{
-    ColumnInfo, Connection, CreatedToken, Ddl, ForeignKeyInfo, QueryEvent, RoutineInfo,
+    ColumnInfo, Connection, CreatedToken, Ddl, ForeignKeyInfo, NamedItem, QueryEvent, RoutineInfo,
     SessionInfo, TableInfo, TestResult,
 };
 use sqail_service::{Config, Server};
@@ -321,6 +321,30 @@ async fn sqlite_outside_allowed_dirs_is_rejected() {
 }
 
 #[tokio::test]
+async fn unsaved_profiles_list_their_databases_for_admins_only() {
+    let h = harness().await;
+    let body = json!({"name": "x", "params": {"engine": "sqlite",
+        "path": h.dir.path().join("list.db"), "create": true}});
+    let res = h.post("/v1/connections/databases", &body, &h.admin).await;
+    assert_eq!(res.status(), 200);
+    let dbs: Vec<NamedItem> = res.json().await.unwrap();
+    assert_eq!(
+        dbs.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+        ["main"]
+    );
+
+    let query = h.token("query").await;
+    let res = h.post("/v1/connections/databases", &body, &query).await;
+    assert_eq!(res.status(), 403);
+
+    // Nothing listens on port 1: a connection error, not a server error.
+    let body = json!({"name": "x", "params": {"engine": "postgres", "host": "127.0.0.1",
+        "port": 1, "database": "", "user": "u"}, "password": "p"});
+    let res = h.post("/v1/connections/databases", &body, &h.admin).await;
+    assert_eq!(res.status(), 502);
+}
+
+#[tokio::test]
 async fn openapi_document_is_served() {
     let h = harness().await;
     let doc: Value = h
@@ -591,6 +615,37 @@ async fn check_engine(d: Dialect) {
         .await
         .unwrap();
     assert!(test.ok, "{}: {:?}", d.engine, test.error);
+
+    // the connection form's database list: unsaved settings without a
+    // database, with the password given or taken from the saved profile
+    if d.engine != "sqlite" {
+        let mut params = d.profile.clone();
+        // An empty database, as the connection form sends it.
+        params["database"] = json!("");
+        for (body, qs) in [
+            (
+                json!({"name": "x", "params": params, "password": password(d.engine)}),
+                String::new(),
+            ),
+            (
+                json!({"name": "x", "params": params}),
+                format!("?secret_from={c}"),
+            ),
+        ] {
+            let res = h
+                .post(&format!("/v1/connections/databases{qs}"), &body, &h.admin)
+                .await;
+            let status = res.status();
+            let text = res.text().await.unwrap();
+            assert!(status.is_success(), "{}: {status} {text}", d.engine);
+            let dbs: Vec<NamedItem> = serde_json::from_str(&text).unwrap();
+            assert!(
+                dbs.iter().any(|n| n.name == "sqail_test"),
+                "{}: {dbs:?}",
+                d.engine
+            );
+        }
+    }
 
     // the seeded data is identical on every engine
     let ev = h

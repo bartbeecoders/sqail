@@ -348,6 +348,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // ---------------------------------------------------------- connections --
 
 const ENGINES = [['mssql', 'SQL Server'], ['postgres', 'PostgreSQL'], ['sqlite', 'SQLite']];
+const MSSQL_AUTH = [
+  ['sql', 'SQL Server login'],
+  ['integrated', 'Windows (as the service account)'],
+  ['entra_password', 'Microsoft Entra password'],
+  ['entra_service_principal', 'Microsoft Entra service principal'],
+  ['entra_managed_identity', 'Microsoft Entra managed identity (service on Azure)'],
+];
 
 function target(c) {
   const p = c.params;
@@ -411,9 +418,11 @@ function editConnection(existing) {
     host: h('input', { value: p.host || '', placeholder: 'sqlserver01.corp.local' }),
     port: num(p.port || (p.engine === 'postgres' ? 5432 : 1433), 1),
     instance: h('input', { value: p.instance || '', placeholder: 'SQLEXPRESS' }),
-    database: h('input', { value: p.database || '' }),
-    auth: select([['sql', 'SQL Server login'], ['integrated', 'Windows (as the service account)']],
-      p.auth && p.auth.method === 'integrated' ? 'integrated' : 'sql'),
+    database: h('input', { value: p.database || '', list: 'conn-databases', autocomplete: 'off' }),
+    listDbs: h('button', { type: 'button', onclick: () => listDatabases() }, 'List'),
+    auth: select(MSSQL_AUTH, (p.auth && p.auth.method) || 'sql'),
+    tenant: h('input', { value: (p.auth && p.auth.tenant) || '', placeholder: 'contoso.onmicrosoft.com or tenant ID' }),
+    clientId: h('input', { value: (p.auth && p.auth.client_id) || '', autocomplete: 'off' }),
     user: h('input', { value: p.user || (p.auth && p.auth.user) || '', autocomplete: 'off' }),
     password: h('input', { type: 'password', autocomplete: 'new-password',
       placeholder: existing && existing.has_password ? '(unchanged)' : '' }),
@@ -429,12 +438,17 @@ function editConnection(existing) {
     folder: h('input', { value: (existing && existing.folder) || '' }),
   };
 
+  const dbList = h('datalist', { id: 'conn-databases' });
+  f.database.style.flex = '1';
   const groups = {
     network: field('Host', f.host, 'Also accepts HOST\\INSTANCE and HOST,PORT, as in SSMS.'),
     port: field('Port', f.port),
     instance: field('Instance', f.instance, 'Named instance; needs SQL Browser (UDP 1434).'),
-    database: field('Database', f.database),
+    database: field('Database', h('div', { class: 'row' }, f.database, f.listDbs, dbList),
+      'List shows the databases this login can access.'),
     auth: field('Authentication', f.auth),
+    tenant: field('Tenant', f.tenant, 'Directory (tenant) ID or domain.'),
+    clientId: field('Client ID', f.clientId),
     user: field('User', f.user),
     password: field('Password', f.password),
     clear: check('Remove the stored password', f.clearPassword),
@@ -453,13 +467,26 @@ function editConnection(existing) {
     const show = e === 'sqlite' ? ['path', 'create']
       : e === 'postgres' ? ['network', 'port', 'database', 'user', 'password', 'ssl']
       : ['network', 'port', 'instance', 'database', 'auth', 'user', 'password', 'encrypt', 'trust'];
-    if (existing && existing.has_password && e !== 'sqlite') show.push('clear');
-    if (e === 'mssql' && f.auth.value === 'integrated') {
-      show.splice(show.indexOf('user'), 1);
-      show.splice(show.indexOf('password'), 1);
+    if (e === 'mssql') {
+      const a = f.auth.value;
+      const extra = { entra_password: ['tenant'], entra_service_principal: ['tenant', 'clientId'],
+        entra_managed_identity: ['clientId'] }[a] || [];
+      show.splice(show.indexOf('auth') + 1, 0, ...extra);
+      if (!['sql', 'entra_password'].includes(a)) show.splice(show.indexOf('user'), 1);
+      if (!usesPassword()) show.splice(show.indexOf('password'), 1);
+      f.tenant.required = a === 'entra_service_principal';
+      f.clientId.required = a === 'entra_service_principal';
+      f.clientId.placeholder = a === 'entra_managed_identity' ? 'optional: a user-assigned identity' : 'application ID';
+      f.tenant.placeholder = a === 'entra_password' ? 'optional, e.g. contoso.com' : 'contoso.onmicrosoft.com or tenant ID';
+      groups.password.firstChild.textContent = a === 'entra_service_principal' ? 'Client secret' : 'Password';
     }
+    if (existing && existing.has_password && usesPassword()) show.push('clear');
     engineBox.replaceChildren(...show.map((k) => groups[k]));
     if (!existing) f.port.value = e === 'postgres' ? '5432' : '1433';
+  }
+  function usesPassword() {
+    const e = f.engine.value;
+    return e !== 'sqlite' && !(e === 'mssql' && ['integrated', 'entra_managed_identity'].includes(f.auth.value));
   }
   f.engine.addEventListener('change', layout);
   f.auth.addEventListener('change', layout);
@@ -467,6 +494,24 @@ function editConnection(existing) {
   if (existing) f.engine.disabled = true;
 
   const result = h('div');
+
+  function mssqlAuth() {
+    const method = f.auth.value;
+    const tenant = f.tenant.value.trim();
+    const clientId = f.clientId.value.trim();
+    const user = f.user.value.trim();
+    if (method === 'sql') return { method, user };
+    if (method === 'entra_password') {
+      // client_id is an API-only override here; keep one that is already stored.
+      const a = { method, user };
+      if (tenant) a.tenant = tenant;
+      if (p.auth && p.auth.method === method && p.auth.client_id) a.client_id = p.auth.client_id;
+      return a;
+    }
+    if (method === 'entra_service_principal') return { method, tenant, client_id: clientId };
+    if (method === 'entra_managed_identity') return clientId ? { method, client_id: clientId } : { method };
+    return { method };
+  }
 
   function input() {
     const e = f.engine.value;
@@ -478,8 +523,7 @@ function editConnection(existing) {
         database: f.database.value.trim(), user: f.user.value.trim(), ssl_mode: f.sslMode.value };
     } else {
       params = { engine: 'mssql', host: f.host.value.trim(), port: intOf(f.port, 'Port'),
-        auth: f.auth.value === 'integrated' ? { method: 'integrated' } : { method: 'sql', user: f.user.value.trim() },
-        encrypt: f.encrypt.value, trust_server_certificate: f.trust.checked };
+        auth: mssqlAuth(), encrypt: f.encrypt.value, trust_server_certificate: f.trust.checked };
       if (f.instance.value.trim()) params.instance = f.instance.value.trim();
       if (f.database.value.trim()) params.database = f.database.value.trim();
     }
@@ -487,8 +531,7 @@ function editConnection(existing) {
     for (const k of ['environment', 'color', 'folder']) {
       if (f[k].value.trim()) body[k] = f[k].value.trim();
     }
-    const usesPassword = e !== 'sqlite' && !(e === 'mssql' && f.auth.value === 'integrated');
-    if (!usesPassword) {
+    if (!usesPassword()) {
       if (existing && existing.has_password) body.password = '';
     } else if (f.password.value) {
       body.password = f.password.value;
@@ -516,6 +559,22 @@ function editConnection(existing) {
       h('b', {}, res.ok ? `Connected in ${res.latency_ms} ms` : 'Could not connect'),
       res.ok ? res.server_version : res.error,
       saved ? h('div', { class: 'hint' }, 'Tested the saved settings (the stored password is used). Save first to test changes.') : null));
+  }
+
+  async function listDatabases() {
+    let body;
+    try { body = input(); } catch (e) { toast(e.message, true); return; }
+    f.listDbs.disabled = true;
+    // Unchanged password on a saved profile: the service uses the stored one.
+    const from = existing && existing.has_password && body.password === undefined
+      ? `?secret_from=${existing.id}` : '';
+    const res = await attempt(() => api('POST', `/v1/connections/databases${from}`, body));
+    f.listDbs.disabled = false;
+    if (!res) return;
+    dbList.replaceChildren(...res.map((d) => h('option', { value: d.name })));
+    toast(res.length ? `${res.length} database${res.length === 1 ? '' : 's'}: pick one in the Database field`
+      : 'No databases found for this login');
+    f.database.focus();
   }
 
   async function save(close) {

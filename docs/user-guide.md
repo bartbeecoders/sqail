@@ -42,11 +42,15 @@ key (PEM) to the service entry in `settings.toml`; see
 connection…*) opens the connection form. Profiles are stored **on the service**,
 so everyone using that service with a suitable token sees the same list.
 Passwords are write-only: the service encrypts them and never sends them back.
+For PostgreSQL and SQL Server, fill in the server and login first, then click
+**⏷** next to *Database* to choose from the databases that login can access
+(you can still type a name). The admin page's *List* button does the same.
+Listing needs an admin token, as *Test* does for an unsaved connection.
 
 | Engine | Notes |
 |---|---|
 | PostgreSQL | *SSL mode* works like libpq's: `prefer` by default. Use `verify-full` when the server has a proper certificate. |
-| SQL Server | SQL login or Windows integrated auth (integrated only works when the service runs on Windows). `Encrypt = Required` is the default; tick *Trust server certificate* only for test servers. Named instances are found through SQL Browser; the host field also accepts `SERVER\INSTANCE` and `SERVER,PORT`. Step-by-step: [windows-setup.md](windows-setup.md). |
+| SQL Server | SQL login, Windows integrated auth (integrated only works when the service runs on Windows), or Microsoft Entra ID for Azure SQL (see [below](#azure-sql-database)). `Encrypt = Required` is the default; tick *Trust server certificate* only for test servers. Named instances are found through SQL Browser; the host field also accepts `SERVER\INSTANCE` and `SERVER,PORT`. Step-by-step: [windows-setup.md](windows-setup.md). |
 | SQLite | The path is a file on the **service's** machine and must be inside one of the service's `sqlite.allowed_dirs`. |
 
 Give production profiles a colour and an environment tag. Both show in the
@@ -60,6 +64,27 @@ engine:
   routes it to a readable secondary in an availability group but doesn't block
   writes on a plain server. For a hard guarantee, use a login that only has
   read permissions.
+
+### Azure SQL Database
+
+Choose **SQL Server**, enter the server name from the Azure portal
+(`myserver.database.windows.net`, port 1433) and the database, and keep
+*Encryption* on `Required`. sqail follows Azure's gateway redirect by itself.
+*Authentication* is one of:
+
+| Method | Fields | Use it for |
+|---|---|---|
+| SQL login | User, Password | A SQL login created in the database or on the server. |
+| Microsoft Entra password | User (`ann@contoso.com`), Password, Tenant (optional) | Your own Entra account. It doesn't work for accounts that require MFA; Microsoft is also retiring this sign-in flow. |
+| Microsoft Entra service principal | Tenant, Client ID, Client secret | An app registration. Best for a shared service. |
+| Microsoft Entra managed identity | Client ID (only for a user-assigned identity) | sqail-service running on Azure (VM, App Service, Container Apps, AKS with node identity). No secret is stored. |
+
+Entra sign-in happens on the **service** host, which needs HTTPS access to
+`login.microsoftonline.com` (or the Azure metadata endpoint for managed
+identity). The account, app or identity must exist as a user in the
+database, e.g. `CREATE USER [my-app] FROM EXTERNAL PROVIDER;` run by the
+server's Entra admin. The service caches tokens and fetches a new one before
+it expires.
 
 ## Writing and running SQL
 

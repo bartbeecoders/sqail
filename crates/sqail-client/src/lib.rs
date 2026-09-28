@@ -305,6 +305,20 @@ impl Client {
         self.post("/v1/connections/test", input).await
     }
 
+    /// Databases the login in `input` can access. With no password in
+    /// `input`, `secret_from` names the saved profile whose password to use.
+    pub async fn databases_unsaved(
+        &self,
+        input: &ConnectionInput,
+        secret_from: Option<Uuid>,
+    ) -> Result<Vec<NamedItem>> {
+        let path = match secret_from {
+            Some(id) => format!("/v1/connections/databases?secret_from={id}"),
+            None => "/v1/connections/databases".into(),
+        };
+        self.post(&path, input).await
+    }
+
     // ---------------------------------------------------------- queries --
 
     /// Start a query. Events arrive as the service produces them; the stream

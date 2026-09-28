@@ -4,6 +4,7 @@
 //! executes scripts, streaming [`QueryEvent`]s into an [`EventSink`]. [`Pool`]
 //! keeps idle conns per profile; sessions hold a conn of their own.
 
+pub mod entra;
 pub mod explain;
 pub mod introspect;
 pub mod mssql;

@@ -191,11 +191,58 @@ fn welcome(ctx: &egui::Context, app: &mut SqailApp) {
 
 // ------------------------------------------------------------- connection --
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MsAuthChoice {
+    Sql,
+    Integrated,
+    EntraPassword,
+    EntraServicePrincipal,
+    EntraManagedIdentity,
+}
+
+impl MsAuthChoice {
+    const ALL: [Self; 5] = [
+        Self::Sql,
+        Self::Integrated,
+        Self::EntraPassword,
+        Self::EntraServicePrincipal,
+        Self::EntraManagedIdentity,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Sql => "SQL login",
+            Self::Integrated => "Windows (integrated)",
+            Self::EntraPassword => "Microsoft Entra password",
+            Self::EntraServicePrincipal => "Microsoft Entra service principal",
+            Self::EntraManagedIdentity => "Microsoft Entra managed identity",
+        }
+    }
+
+    fn uses_user(self) -> bool {
+        matches!(self, Self::Sql | Self::EntraPassword)
+    }
+
+    fn uses_password(self) -> bool {
+        matches!(
+            self,
+            Self::Sql | Self::EntraPassword | Self::EntraServicePrincipal
+        )
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EngineChoice {
     Postgres,
     Mssql,
     Sqlite,
+}
+
+/// Databases offered next to the Database field.
+enum DbList {
+    Loading,
+    Ready(Vec<String>),
+    Failed(String),
 }
 
 pub struct ConnForm {
@@ -209,7 +256,11 @@ pub struct ConnForm {
     password: String,
     has_password: bool,
     pg_ssl: PgSslMode,
-    ms_integrated: bool,
+    ms_auth: MsAuthChoice,
+    ms_tenant: String,
+    ms_client_id: String,
+    /// Entra password client-app override; API-only, kept when editing.
+    ms_pw_client_id: Option<String>,
     ms_instance: String,
     ms_encrypt: MssqlEncrypt,
     ms_trust: bool,
@@ -220,6 +271,8 @@ pub struct ConnForm {
     environment: String,
     folder: String,
     test: Option<Result<TestResult, String>>,
+    /// The ⏷ list next to Database: the settings it was fetched for, and the result.
+    dbs: Option<(String, DbList)>,
     testing: bool,
     pub saving: bool,
     pub error: Option<String>,
@@ -238,7 +291,10 @@ impl ConnForm {
             password: String::new(),
             has_password: false,
             pg_ssl: PgSslMode::Prefer,
-            ms_integrated: false,
+            ms_auth: MsAuthChoice::Sql,
+            ms_tenant: String::new(),
+            ms_client_id: String::new(),
+            ms_pw_client_id: None,
             ms_instance: String::new(),
             ms_encrypt: MssqlEncrypt::Required,
             ms_trust: false,
@@ -249,6 +305,7 @@ impl ConnForm {
             environment: String::new(),
             folder: String::new(),
             test: None,
+            dbs: None,
             testing: false,
             saving: false,
             error: None,
@@ -283,7 +340,26 @@ impl ConnForm {
                 f.ms_trust = p.trust_server_certificate;
                 match &p.auth {
                     MssqlAuth::Sql { user } => f.user = user.clone(),
-                    MssqlAuth::Integrated => f.ms_integrated = true,
+                    MssqlAuth::Integrated => f.ms_auth = MsAuthChoice::Integrated,
+                    MssqlAuth::EntraPassword {
+                        user,
+                        tenant,
+                        client_id,
+                    } => {
+                        f.ms_auth = MsAuthChoice::EntraPassword;
+                        f.user = user.clone();
+                        f.ms_tenant = tenant.clone().unwrap_or_default();
+                        f.ms_pw_client_id = client_id.clone();
+                    }
+                    MssqlAuth::EntraServicePrincipal { tenant, client_id } => {
+                        f.ms_auth = MsAuthChoice::EntraServicePrincipal;
+                        f.ms_tenant = tenant.clone();
+                        f.ms_client_id = client_id.clone();
+                    }
+                    MssqlAuth::EntraManagedIdentity { client_id } => {
+                        f.ms_auth = MsAuthChoice::EntraManagedIdentity;
+                        f.ms_client_id = client_id.clone().unwrap_or_default();
+                    }
                 }
             }
             ConnectionParams::Sqlite(p) => {
@@ -298,6 +374,31 @@ impl ConnForm {
     pub fn on_tested(&mut self, r: Result<TestResult, String>) {
         self.testing = false;
         self.test = Some(r);
+    }
+
+    pub fn on_databases(&mut self, key: String, r: Result<Vec<String>, String>) {
+        // Ignore a list for settings that have changed since.
+        if self.dbs.as_ref().is_some_and(|(k, _)| *k == key) {
+            self.dbs = Some((
+                key,
+                match r {
+                    Ok(names) => DbList::Ready(names),
+                    Err(e) => DbList::Failed(e),
+                },
+            ));
+        }
+    }
+
+    /// What the database list depends on: everything but the database itself.
+    fn dbs_key(&self) -> Result<(String, ConnectionInput), String> {
+        let input = self.input()?;
+        let mut params = input.params.clone();
+        match &mut params {
+            ConnectionParams::Postgres(p) => p.database.clear(),
+            ConnectionParams::Mssql(p) => p.database = None,
+            ConnectionParams::Sqlite(_) => {}
+        }
+        Ok((format!("{params:?}|{:?}", input.password), input))
     }
 
     fn input(&self) -> Result<ConnectionInput, String> {
@@ -325,12 +426,23 @@ impl ConnForm {
                 port: port(1433)?,
                 instance: opt(&self.ms_instance),
                 database: opt(&self.database),
-                auth: if self.ms_integrated {
-                    MssqlAuth::Integrated
-                } else {
-                    MssqlAuth::Sql {
+                auth: match self.ms_auth {
+                    MsAuthChoice::Sql => MssqlAuth::Sql {
                         user: self.user.trim().into(),
-                    }
+                    },
+                    MsAuthChoice::Integrated => MssqlAuth::Integrated,
+                    MsAuthChoice::EntraPassword => MssqlAuth::EntraPassword {
+                        user: self.user.trim().into(),
+                        tenant: opt(&self.ms_tenant),
+                        client_id: self.ms_pw_client_id.clone(),
+                    },
+                    MsAuthChoice::EntraServicePrincipal => MssqlAuth::EntraServicePrincipal {
+                        tenant: self.ms_tenant.trim().into(),
+                        client_id: self.ms_client_id.trim().into(),
+                    },
+                    MsAuthChoice::EntraManagedIdentity => MssqlAuth::EntraManagedIdentity {
+                        client_id: opt(&self.ms_client_id),
+                    },
                 },
                 encrypt: self.ms_encrypt,
                 trust_server_certificate: self.ms_trust,
@@ -370,12 +482,69 @@ impl ConnForm {
     }
 }
 
+/// The ⏷ list next to Database. Returns whether to fetch the list.
+fn database_menu(ui: &mut egui::Ui, form: &mut ConnForm) -> bool {
+    ui.set_min_width(220.0);
+    let key = match form.dbs_key() {
+        Ok((key, _)) => key,
+        Err(e) => {
+            ui.colored_label(Color32::from_rgb(0xd6, 0x45, 0x45), e);
+            return false;
+        }
+    };
+    let Some((_, list)) = form.dbs.as_ref().filter(|(k, _)| *k == key) else {
+        // Never fetched, or the settings changed since.
+        ui.spinner();
+        return true;
+    };
+    let mut refresh = false;
+    match list {
+        DbList::Loading => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Loading databases…");
+            });
+        }
+        DbList::Failed(e) => {
+            ui.set_max_width(360.0);
+            ui.colored_label(Color32::from_rgb(0xd6, 0x45, 0x45), e.as_str());
+            refresh = ui.button("Try again").clicked();
+        }
+        DbList::Ready(names) if names.is_empty() => {
+            ui.label("No databases found for this login.");
+        }
+        DbList::Ready(names) => {
+            let mut picked = None;
+            egui::ScrollArea::vertical()
+                .max_height(300.0)
+                .show(ui, |ui| {
+                    for name in names {
+                        if ui
+                            .selectable_label(form.database == *name, name.as_str())
+                            .clicked()
+                        {
+                            picked = Some(name.clone());
+                        }
+                    }
+                });
+            if let Some(name) = picked {
+                form.database = name;
+                ui.close();
+            }
+            ui.separator();
+            refresh = ui.button("Refresh").clicked();
+        }
+    }
+    refresh
+}
+
 fn connection_form(ctx: &egui::Context, app: &mut SqailApp) {
     let Dialog::Connection(form) = &mut app.dialog else {
         return;
     };
     let mut close = false;
     let mut test = false;
+    let mut want_dbs = false;
     let mut save = false;
     let before = form.engine;
 
@@ -409,9 +578,10 @@ fn connection_form(ctx: &egui::Context, app: &mut SqailApp) {
 
                 match form.engine {
                     EngineChoice::Postgres | EngineChoice::Mssql => {
-                        ui.label("Host");
+                        let host = ui.label("Host");
                         ui.horizontal(|ui| {
-                            ui.add(egui::TextEdit::singleline(&mut form.host).desired_width(230.0));
+                            ui.add(egui::TextEdit::singleline(&mut form.host).desired_width(230.0))
+                                .labelled_by(host.id);
                             let l = ui.label("Port");
                             ui.add(egui::TextEdit::singleline(&mut form.port).desired_width(60.0))
                                 .labelled_by(l.id);
@@ -434,27 +604,93 @@ fn connection_form(ctx: &egui::Context, app: &mut SqailApp) {
                             ui.end_row();
                         }
                         let l = ui.label("Database");
-                        ui.add(egui::TextEdit::singleline(&mut form.database).desired_width(320.0))
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut form.database).desired_width(290.0),
+                            )
                             .labelled_by(l.id);
+                            ui.menu_button("⏷", |ui| {
+                                want_dbs = database_menu(ui, form);
+                            })
+                            .response
+                            .on_hover_text("Choose from the databases this login can access");
+                        });
                         ui.end_row();
                         if form.engine == EngineChoice::Mssql {
-                            ui.label("Authentication");
-                            ui.horizontal(|ui| {
-                                ui.radio_value(&mut form.ms_integrated, false, "SQL login");
-                                ui.radio_value(
-                                    &mut form.ms_integrated,
-                                    true,
-                                    "Windows (integrated)",
+                            let l = ui.label("Authentication");
+                            egui::ComboBox::from_id_salt("ms_auth")
+                                .selected_text(form.ms_auth.label())
+                                .width(320.0)
+                                .show_ui(ui, |ui| {
+                                    for a in MsAuthChoice::ALL {
+                                        ui.selectable_value(&mut form.ms_auth, a, a.label());
+                                    }
+                                })
+                                .response
+                                .labelled_by(l.id)
+                                .on_hover_text(
+                                    "Azure SQL: a SQL login, or Microsoft Entra ID. Entra sign-in \
+                                     happens on the service host; managed identity only works when \
+                                     sqail-service runs on Azure.",
                                 );
-                            });
+                            ui.end_row();
+                            let tenant = match form.ms_auth {
+                                MsAuthChoice::EntraServicePrincipal => Some("required"),
+                                MsAuthChoice::EntraPassword => Some("optional, e.g. contoso.com"),
+                                _ => None,
+                            };
+                            if let Some(hint) = tenant {
+                                let l = ui.label("Tenant");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut form.ms_tenant)
+                                        .hint_text(hint)
+                                        .desired_width(320.0),
+                                )
+                                .labelled_by(l.id)
+                                .on_hover_text("Directory (tenant) ID or domain");
+                                ui.end_row();
+                            }
+                            let client_id = match form.ms_auth {
+                                MsAuthChoice::EntraServicePrincipal => Some("application ID"),
+                                MsAuthChoice::EntraManagedIdentity => {
+                                    Some("optional: a user-assigned identity")
+                                }
+                                _ => None,
+                            };
+                            if let Some(hint) = client_id {
+                                let l = ui.label("Client ID");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut form.ms_client_id)
+                                        .hint_text(hint)
+                                        .desired_width(320.0),
+                                )
+                                .labelled_by(l.id);
+                                ui.end_row();
+                            }
+                        }
+                        let ms = (form.engine == EngineChoice::Mssql).then_some(form.ms_auth);
+                        if ms.is_none_or(MsAuthChoice::uses_user) {
+                            let l = ui.label("User");
+                            let hint = if ms == Some(MsAuthChoice::EntraPassword) {
+                                "user@contoso.com"
+                            } else {
+                                ""
+                            };
+                            ui.add(
+                                egui::TextEdit::singleline(&mut form.user)
+                                    .hint_text(hint)
+                                    .desired_width(320.0),
+                            )
+                            .labelled_by(l.id);
                             ui.end_row();
                         }
-                        if !(form.engine == EngineChoice::Mssql && form.ms_integrated) {
-                            let l = ui.label("User");
-                            ui.add(egui::TextEdit::singleline(&mut form.user).desired_width(320.0))
-                                .labelled_by(l.id);
-                            ui.end_row();
-                            let pw_label = ui.label("Password");
+                        if ms.is_none_or(MsAuthChoice::uses_password) {
+                            let pw_label =
+                                ui.label(if ms == Some(MsAuthChoice::EntraServicePrincipal) {
+                                    "Client secret"
+                                } else {
+                                    "Password"
+                                });
                             let hint = if form.has_password { "unchanged" } else { "" };
                             ui.add(
                                 egui::TextEdit::singleline(&mut form.password)
@@ -630,6 +866,27 @@ fn connection_form(ctx: &egui::Context, app: &mut SqailApp) {
     let Some(client) = app.service.client.clone() else {
         return;
     };
+    if want_dbs {
+        match form.dbs_key() {
+            Err(e) => form.dbs = Some((String::new(), DbList::Failed(e))),
+            Ok((key, input)) => {
+                form.dbs = Some((key.clone(), DbList::Loading));
+                // Editing without retyping the password: use the stored one.
+                let secret_from = form
+                    .editing
+                    .filter(|_| input.password.is_none() && form.has_password);
+                let client = client.clone();
+                app.worker.run(async move {
+                    let r = client.databases_unsaved(&input, secret_from).await;
+                    Msg::ConnDatabases(
+                        key,
+                        r.map(|v| v.into_iter().map(|d| d.name).collect())
+                            .map_err(|e| e.to_string()),
+                    )
+                });
+            }
+        }
+    }
     if test || save {
         match form.input() {
             Err(e) => form.error = Some(e),

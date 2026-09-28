@@ -18,6 +18,7 @@ use tiberius::{AuthMethod, ColumnData, ColumnType, Config, EncryptionLevel, From
 use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
+use super::entra::Entra;
 use super::split::{shape, split_go};
 use super::value::{bytes, float, int, text};
 use super::{
@@ -26,8 +27,11 @@ use super::{
 
 type Client = tiberius::Client<Compat<TcpStream>>;
 
+#[derive(Clone)]
 pub struct MssqlDriver {
     config: Config,
+    /// Microsoft Entra ID sign-in: a fresh or cached token per connection.
+    entra: Option<Arc<Entra>>,
 }
 
 impl MssqlDriver {
@@ -68,12 +72,20 @@ impl MssqlDriver {
                         .into(),
                 ));
             }
+            // The token is set when a connection opens; see `open`.
+            MssqlAuth::EntraPassword { .. }
+            | MssqlAuth::EntraServicePrincipal { .. }
+            | MssqlAuth::EntraManagedIdentity { .. } => {}
         }
-        Ok(Self { config })
+        let entra = Entra::from_auth(&p.auth, password)?.map(Arc::new);
+        Ok(Self { config, entra })
     }
 
     async fn open(&self) -> Result<Client> {
         let mut config = self.config.clone();
+        if let Some(entra) = &self.entra {
+            config.authentication(AuthMethod::aad_token(entra.token().await?));
+        }
         let mut redirected = false;
         // Follow at most one redirect (Azure SQL gateway routing).
         for _ in 0..2 {
@@ -186,9 +198,7 @@ impl Driver for MssqlDriver {
         Ok(Box::new(MssqlConn {
             client,
             cancel: Arc::new(MssqlCancel {
-                driver: MssqlDriver {
-                    config: self.config.clone(),
-                },
+                driver: self.clone(),
                 spid,
             }),
         }))

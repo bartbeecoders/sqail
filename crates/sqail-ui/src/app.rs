@@ -32,6 +32,7 @@ pub enum Msg {
     Probed(Result<(String, sqail_client::proto::Health), String>),
     Provisioned(Result<Provisioned, String>),
     ConnTested(Result<TestResult, String>),
+    ConnDatabases(String, Result<Vec<String>, String>),
     ConnSaved(Result<Connection, String>),
     ConnDeleted(Result<Uuid, String>),
     SessionOpened {
@@ -631,6 +632,11 @@ impl SqailApp {
             Msg::ConnTested(r) => {
                 if let Dialog::Connection(form) = &mut self.dialog {
                     form.on_tested(r);
+                }
+            }
+            Msg::ConnDatabases(key, r) => {
+                if let Dialog::Connection(form) = &mut self.dialog {
+                    form.on_databases(key, r);
                 }
             }
             Msg::ConnSaved(r) => match r {

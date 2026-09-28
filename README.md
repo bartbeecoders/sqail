@@ -302,7 +302,7 @@ The same form is used in sqail (**+ Add**) and on the admin page
 | **SQL Server** | Host | `sqlserver01`, a FQDN or an IP. `SERVER\INSTANCE` and `SERVER,PORT` work as in SSMS. |
 | | Port / Instance | `1433` for a default instance. For a named instance, the instance name (needs the SQL Server Browser service, UDP 1434). |
 | | Database | e.g. `Sales`; empty means the login's default database |
-| | Authentication | *SQL login* (user + password) or *Windows (integrated)*, as the account the service runs as |
+| | Authentication | *SQL login* (user + password), *Windows (integrated)*, as the account the service runs as, or *Microsoft Entra* for Azure SQL (see the [user guide](docs/user-guide.md#azure-sql-database)) |
 | | Encryption | *Required* (default). For test servers with a self-signed certificate, tick **Trust server certificate**. |
 | **PostgreSQL** | Host / Port | e.g. `pg01.corp.local`, `5432` |
 | | Database, User, Password | e.g. `sales`, `sqail_reader` |

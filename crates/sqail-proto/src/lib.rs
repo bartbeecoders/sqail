@@ -217,6 +217,42 @@ pub enum MssqlAuth {
     Sql { user: String },
     /// Windows integrated auth (only when the service runs on Windows).
     Integrated,
+    /// Microsoft Entra ID user and password (Azure SQL); the password goes in
+    /// [`ConnectionInput::password`]. Accounts that require MFA cannot use it.
+    EntraPassword {
+        /// `user@contoso.com`.
+        user: String,
+        /// Tenant ID or domain; `organizations` when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tenant: Option<String>,
+        /// Public client app that signs in; Microsoft's SqlClient app when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
+    },
+    /// Microsoft Entra ID service principal (app registration); the client
+    /// secret goes in [`ConnectionInput::password`].
+    EntraServicePrincipal {
+        /// Tenant ID or domain.
+        tenant: String,
+        /// Application (client) ID.
+        client_id: String,
+    },
+    /// The managed identity of the Azure host sqail-service runs on.
+    EntraManagedIdentity {
+        /// Client ID of a user-assigned identity; the system-assigned one when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
+    },
+}
+
+impl MssqlAuth {
+    /// Whether this method takes a secret in [`ConnectionInput::password`].
+    pub fn uses_password(&self) -> bool {
+        !matches!(
+            self,
+            MssqlAuth::Integrated | MssqlAuth::EntraManagedIdentity { .. }
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -600,6 +636,34 @@ mod tests {
     #[test]
     fn engine_serializes_lowercase() {
         assert_eq!(serde_json::to_string(&Engine::Mssql).unwrap(), "\"mssql\"");
+    }
+
+    #[test]
+    fn entra_auth_json() {
+        let sp: MssqlAuth = serde_json::from_str(
+            r#"{"method":"entra_service_principal","tenant":"contoso.com","client_id":"app"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            sp,
+            MssqlAuth::EntraServicePrincipal {
+                tenant: "contoso.com".into(),
+                client_id: "app".into()
+            }
+        );
+        assert!(sp.uses_password());
+        let mi: MssqlAuth = serde_json::from_str(r#"{"method":"entra_managed_identity"}"#).unwrap();
+        assert_eq!(mi, MssqlAuth::EntraManagedIdentity { client_id: None });
+        assert!(!mi.uses_password());
+        let pw = MssqlAuth::EntraPassword {
+            user: "ann@contoso.com".into(),
+            tenant: None,
+            client_id: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&pw).unwrap(),
+            r#"{"method":"entra_password","user":"ann@contoso.com"}"#
+        );
     }
 
     #[test]

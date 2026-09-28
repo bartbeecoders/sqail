@@ -52,11 +52,29 @@ api $URL/v1/connections -d '{
 | `engine` | Fields |
 |---|---|
 | `postgres` | `host`, `port` (5432), `database`, `user`, `ssl_mode` (`disable` · `prefer` · `require` · `verify-full`) |
-| `mssql` | `host`, `port` (1433), `instance`, `database`, `auth` (`{"method":"sql","user":"…"}` or `{"method":"integrated"}`), `encrypt` (`off` · `on` · `required`), `trust_server_certificate` |
+| `mssql` | `host`, `port` (1433), `instance`, `database`, `auth` (see below), `encrypt` (`off` · `on` · `required`), `trust_server_certificate` |
 | `sqlite` | `path` (inside `sqlite.allowed_dirs`), `create` |
+
+SQL Server `auth`:
+
+| `method` | Fields | `password` holds |
+|---|---|---|
+| `sql` | `user` | the login's password |
+| `integrated` | none (the service's Windows account) | nothing |
+| `entra_password` | `user`, optional `tenant` (default `organizations`), optional `client_id` (default: Microsoft's SqlClient app) | the Entra password |
+| `entra_service_principal` | `tenant`, `client_id` | the client secret |
+| `entra_managed_identity` | optional `client_id` (a user-assigned identity) | nothing |
 
 `password` is write-only. On `PUT`, leaving it out keeps the stored password,
 and `""` clears it. Responses report only `has_password`.
+
+Two admin-only routes take an unsaved profile (the same body as `POST
+/v1/connections`) for the connection form:
+`POST /v1/connections/test` connects and reports the server version, and
+`POST /v1/connections/databases` lists the databases the login can access
+(`[{"name": "…"}]`; `name` may be empty; PostgreSQL connects to `postgres` when `database` is
+empty). Add `?secret_from=<id>` to the latter to use the password stored with
+profile `<id>` when the body has none.
 
 ## Running SQL
 

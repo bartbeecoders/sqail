@@ -7,6 +7,28 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
 
 ## Unreleased
 
+### sqail
+
+- **Pick the database from a list.** In the connection form, ⏷ next to
+  *Database* lists the databases the PostgreSQL or SQL Server login can
+  access, using the settings typed so far. The admin page has the same list
+  (*List*). New admin-only route `POST /v1/connections/databases`.
+
+### sqail-service
+
+- **Azure SQL with Microsoft Entra ID.** SQL Server connections can sign in
+  with an Entra user and password, a service principal (tenant, client ID
+  and secret) or the managed identity of the Azure host the service runs on,
+  besides a SQL login. The service fetches and caches the access tokens.
+  Available in sqail's connection form, on the admin page and in the REST
+  API (`auth.method` `entra_password`, `entra_service_principal`,
+  `entra_managed_identity`).
+
+### Development
+
+- `scripts/dev.ps1` opens the service admin page already signed in. The token
+  is kept in `.sqail/service/dev-admin-token.txt` and reused on the next run.
+
 ## 1.1.1 — 2026-09-27
 
 ### sqail

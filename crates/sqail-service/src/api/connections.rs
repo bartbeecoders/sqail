@@ -1,15 +1,20 @@
 use std::time::{Duration, Instant};
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use sqail_proto::{Connection, ConnectionInput, ConnectionParams, Scope, TestResult};
+use serde::Deserialize;
+use sqail_proto::{
+    Connection, ConnectionInput, ConnectionParams, MssqlAuth, NamedItem, Scope, TestResult,
+};
+use utoipa::IntoParams;
 use uuid::Uuid;
 
 use super::{decrypt_password, load_connection};
 use crate::auth::Principal;
 use crate::engine::registry::{DriverSpec, build_driver};
 use crate::engine::sqlite::check_path;
+use crate::engine::{DbError, introspect};
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 use crate::store::{AuditEvent, ConnectionRecord};
@@ -51,6 +56,17 @@ fn validate(state: &AppState, input: &ConnectionInput) -> ApiResult<()> {
         ConnectionParams::Mssql(p) if p.host.is_empty() => {
             Err(ApiError::bad_request("host is required"))
         }
+        ConnectionParams::Mssql(p) => match &p.auth {
+            MssqlAuth::EntraPassword { user, .. } if user.trim().is_empty() => {
+                Err(ApiError::bad_request("user is required"))
+            }
+            MssqlAuth::EntraServicePrincipal { tenant, client_id }
+                if tenant.trim().is_empty() || client_id.trim().is_empty() =>
+            {
+                Err(ApiError::bad_request("tenant and client_id are required"))
+            }
+            _ => Ok(()),
+        },
         ConnectionParams::Sqlite(p) => {
             check_path(
                 std::path::Path::new(&p.path),
@@ -176,6 +192,58 @@ pub async fn test_unsaved(
         )
         .await,
     ))
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct DatabasesQuery {
+    /// When the body has no `password`, use the one stored with this profile
+    /// (the connection form while editing).
+    secret_from: Option<Uuid>,
+}
+
+/// The databases the login in a (possibly unsaved) profile can access, for
+/// picking one in the connection form. Admin only: it connects to arbitrary
+/// hosts. PostgreSQL connects to the profile's database, or `postgres` when
+/// it is empty.
+#[utoipa::path(post, path = "/v1/connections/databases", tag = "connections",
+    request_body = ConnectionInput, params(DatabasesQuery),
+    responses((status = 200, body = Vec<NamedItem>), (status = 502, body = sqail_proto::Problem)))]
+pub async fn databases_unsaved(
+    State(state): State<AppState>,
+    p: Principal,
+    Query(q): Query<DatabasesQuery>,
+    Json(mut input): Json<ConnectionInput>,
+) -> ApiResult<Json<Vec<NamedItem>>> {
+    p.require(Scope::Admin)?;
+    // The form may not have a name yet; nothing is stored.
+    if input.name.trim().is_empty() {
+        input.name = "unsaved".into();
+    }
+    if let ConnectionParams::Postgres(pg) = &mut input.params
+        && pg.database.trim().is_empty()
+    {
+        pg.database = "postgres".into();
+    }
+    validate(&state, &input)?;
+    let password = match (input.password.take(), q.secret_from) {
+        (Some(pw), _) => Some(pw),
+        (None, Some(id)) => decrypt_password(&state, &load_connection(&state, id)?)?,
+        (None, None) => None,
+    };
+    let res = async {
+        let driver = build_driver(&DriverSpec {
+            params: &input.params,
+            password: password.as_deref(),
+            read_only: input.read_only,
+            sqlite_dirs: &state.config.sqlite.allowed_dirs,
+        })?;
+        let mut conn = driver.connect().await?;
+        introspect::databases(conn.as_mut()).await
+    };
+    match tokio::time::timeout(Duration::from_secs(20), res).await {
+        Ok(r) => Ok(Json(r?)),
+        Err(_) => Err(DbError::Timeout.into()),
+    }
 }
 
 async fn run_test(

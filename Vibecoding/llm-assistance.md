@@ -1,0 +1,1 @@
+Add to ability to use claude code (through the cli) or Grok cli, to analyse the database and create queries through prompting.

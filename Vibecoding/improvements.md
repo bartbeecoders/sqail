@@ -18,3 +18,11 @@ I want to clean up this sqail project.
 
 
 Add the ability to connect to a azure sql database 
+
+Make the object browser pane collapsable.
+Make the AI assistant pane collapsable.
+There is no horizontal scrolling on the resilts table
+
+
+in the text editor, add text zooming. User the middle mouse button scroll to zoom in and out of the text
+

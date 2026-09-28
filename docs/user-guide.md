@@ -103,7 +103,9 @@ it expires.
 | Ctrl+O / Ctrl+S / Ctrl+Shift+S | Open / save / save as (`.sql` files) |
 | Ctrl+F | Find and replace |
 | Ctrl+= / Ctrl+- | Larger / smaller editor font |
-| Ctrl+Shift+A | Show / hide the [AI assistant](#ai-assistant) |
+| Ctrl+mouse wheel, or the wheel with the middle button held | Zoom the editor text |
+| Ctrl+Shift+B | Expand / collapse the [sidebar](#sidebar) |
+| Ctrl+Shift+A | Expand / collapse the [AI assistant](#ai-assistant) |
 
 The script splitter understands comments, string and identifier quoting,
 Postgres dollar quotes and SQL Server `GO` lines, so *Run statement* picks
@@ -134,6 +136,8 @@ transaction that is **always rolled back**, so it is safe for `UPDATE` and
   arriving, and the grid stays smooth with millions of rows. Each result set is
   capped at *Query → Row limit* (100 000 by default). When a result hits the
   cap, its tab reads like `Result 1 (100,000+)` in the warning colour.
+* A result wider than the pane scrolls sideways (scrollbar at the bottom, or
+  Shift+mouse wheel).
 * Click a header to sort. Click, or Shift+click, to select cells, and Ctrl+C
   copies them as TSV (pastes straight into a spreadsheet). Double-click a cell
   to see its full value (long text, JSON, binary as hex).
@@ -149,9 +153,16 @@ transaction that is **always rolled back**, so it is safe for `UPDATE` and
 
 ## Sidebar
 
+**«** at the top right collapses the sidebar to a thin strip at the left
+edge; click the strip, or press **Ctrl+Shift+B**, to bring it back.
+Dragging its edge all the way in or out does the same. The AI assistant
+panel on the right collapses the same way (**»**, Ctrl+Shift+A), and both
+remember their state.
+
 * **Connections:** a tree of schemas, tables, views, columns, indexes, foreign
   keys and routines, loaded lazily. Right-click a table for *SELECT top 100*,
-  *Import CSV…*, *Script CREATE* or *Copy name*. Drag a table, view or routine
+  *Design table…*, *Import CSV…*, *Script CREATE*, *Drop table…* or *Copy
+  name*; right-click *Tables* or a connection for *New table…*. Drag a table, view or routine
   into the editor: inside a statement it inserts the qualified name; on a
   blank line (or below the text) a table or view becomes a formatted
   `SELECT` of all its columns. A procedure becomes `EXEC name` on SQL
@@ -165,6 +176,53 @@ transaction that is **always rolled back**, so it is safe for `UPDATE` and
 
 Open tabs, including unsaved text, are restored when you start sqail again.
 
+## Table designer
+
+*Design table…* (right-click a table) opens the table in a window; *New
+table…* (right-click *Tables* or a connection, the *Connections* menu or the
+command palette) starts an empty one with an `id` key. Several designers can
+be open at once. Pages:
+
+* **Columns:** name, type (type it, or pick a common one from ⏷), whether it
+  allows NULL, and the default as an SQL expression (`0`, `'none'`,
+  `now()`). Tick *Key* to put a column in the primary key. Rows you added
+  are marked *new*, edited ones *changed*; removed columns are listed under
+  *Dropped* and can be restored until you apply. Column order can be changed
+  only for a new table.
+* **Indexes:** name, *Unique*, and the key columns in order (click the
+  column list to add, remove or reorder). An index that backs a `UNIQUE`
+  constraint is marked *constraint* and stays one.
+* **Primary key:** the key columns in order and, on PostgreSQL and SQL
+  Server, the constraint name. Key columns are always NOT NULL.
+* **Security:** who holds which privilege on the table (`SELECT`, `INSERT`,
+  `UPDATE`, `DELETE`, …). Tick and untick to grant and revoke; *+ Add
+  grantee* adds a role or user (⏷ lists the ones the database has). Not
+  available for SQLite, which has no permissions.
+* **SQL:** the statements your edits add up to; *Open in editor* copies them
+  to a new tab.
+
+**Apply…** shows the statements again and runs them in one transaction: if
+one fails, nothing changes and the error is shown. Afterwards the designer
+reloads the table from the database. *Revert* throws the edits away, ⟳
+reloads, and *Drop table…* asks before it drops the table (on PostgreSQL
+optionally with `CASCADE`). A read-only connection can be browsed but not
+changed.
+
+Good to know:
+
+* Renames are real renames (`RENAME COLUMN`, `sp_rename`), so data stays.
+* Changing an index drops and re-creates it as a plain index: PostgreSQL
+  index methods, `INCLUDE` columns and `WHERE` clauses are not kept.
+* SQL Server: changing a column's type or NULL-ness re-creates the indexes
+  and key on it, and a default is dropped and re-added by its generated
+  name.
+* SQLite can change only a few things in place (renames, adding and dropping
+  columns, indexes). Anything else (a type, NULL-ness, a default, the
+  primary key) rebuilds the table: the rows are copied into a new table
+  that replaces the old one. Triggers on the table are dropped, and `CHECK`
+  constraints, `AUTOINCREMENT` and foreign-key actions are not carried
+  over; the review says so before you apply.
+
 ## AI assistant
 
 The assistant answers questions about your data and writes queries, using
@@ -176,7 +234,7 @@ schema and the data of the connection you're working on instead of guessing.
 or the Grok CLI (`grok`) and sign in once in a terminal. sqail finds them on
 `PATH`. Nothing else is needed; sqail does not hold an API key.
 
-**Use:** press **Ctrl+Shift+A** (or *View → Show / hide the AI assistant*),
+**Use:** press **Ctrl+Shift+A** (or *View → Expand / collapse the AI assistant*),
 pick Claude Code or Grok, and ask, for example *"Which customers ordered the
 most last quarter?"* or *"Why is the query in my editor slow?"*. The answer
 streams in. Each query it proposes gets **Insert** (at the cursor in the

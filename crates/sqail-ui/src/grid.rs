@@ -99,16 +99,16 @@ pub fn results_ui(ui: &mut egui::Ui, run: &mut Run, editable: Result<(), String>
                     }
                 });
             }
-            if run.running {
+            let text = if run.running {
                 if ui.button("■ Stop").clicked() {
                     out.cancel = true;
                 }
-                ui.label(format!(
+                ui.spinner();
+                RichText::new(format!(
                     "Running… {} · {} rows",
                     fmt_duration(run.elapsed()),
                     fmt_count(run.total_rows())
-                ));
-                ui.spinner();
+                ))
             } else {
                 let status = if run.cancelled {
                     "Cancelled"
@@ -117,14 +117,16 @@ pub fn results_ui(ui: &mut egui::Ui, run: &mut Run, editable: Result<(), String>
                 } else {
                     "Done"
                 };
-                ui.label(
-                    RichText::new(format!(
-                        "{status} · {} rows · {}",
-                        fmt_count(run.total_rows()),
-                        fmt_duration(run.elapsed())
-                    ))
-                    .weak(),
-                );
+                RichText::new(format!(
+                    "{status} · {} rows · {}",
+                    fmt_count(run.total_rows()),
+                    fmt_duration(run.elapsed())
+                ))
+                .weak()
+            };
+            // In a narrow pane the status gives way to the result tabs.
+            if ui.available_width() > 60.0 {
+                ui.add(egui::Label::new(text).truncate());
             }
         });
     });
@@ -176,7 +178,8 @@ fn edit_toolbar(
     out: &mut GridOutput,
 ) {
     let editing = run.edit.as_ref().is_some_and(|(ri, _)| *ri == i);
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
         if !editing {
             let resp = ui.add_enabled(editable.is_ok(), egui::Button::new("✎ Edit data"));
             let resp = match &editable {
@@ -558,154 +561,160 @@ fn grid_ui(
     let new_fill = Color32::from_rgba_unmultiplied(0x3c, 0xb3, 0x71, 40);
     let deleted_fill = Color32::from_rgba_unmultiplied(0xd6, 0x45, 0x45, 45);
 
-    let mut table = TableBuilder::new(ui)
-        .id_salt(salt)
-        .striped(true)
-        .resizable(true)
-        .sense(Sense::click())
+    // egui_extras tables only scroll vertically; wide results scroll sideways here.
+    egui::ScrollArea::horizontal()
+        .id_salt(("grid-h", salt))
         .auto_shrink([false, false])
-        .cell_layout(Layout::left_to_right(Align::Center))
-        .column(Column::exact(num_w));
-    for w in &widths {
-        table = table.column(
-            Column::initial(*w)
-                .at_least(40.0)
-                .clip(true)
-                .resizable(true),
-        );
-    }
-    table
-        .header(row_h, |mut header| {
-            header.col(|ui| {
-                ui.label(RichText::new("#").weak());
-            });
-            for (c, col) in rs.columns.iter().enumerate() {
-                header.col(|ui| {
-                    let arrow = match rs.sort {
-                        Some((sc, true)) if sc == c => " ▲",
-                        Some((sc, false)) if sc == c => " ▼",
-                        _ => "",
-                    };
-                    let read_only = edit.as_ref().is_some_and(|e| !e.editable(c));
-                    let mut text = RichText::new(format!("{}{arrow}", col.name)).strong();
-                    if read_only {
-                        text = text.weak();
-                    }
-                    let resp = ui
-                        .add(egui::Label::new(text).sense(Sense::click()).truncate())
-                        .on_hover_text(format!(
-                            "{} · {}{}\nClick to sort",
-                            col.name,
-                            col.type_name,
-                            if read_only { " · read-only (not a table column)" } else { "" }
-                        ));
-                    if resp.clicked() {
-                        clicked_header = Some(c);
-                    }
-                });
+        .show(ui, |ui| {
+            let mut table = TableBuilder::new(ui)
+                .id_salt(salt)
+                .striped(true)
+                .resizable(true)
+                .sense(Sense::click())
+                .auto_shrink([false, false])
+                .cell_layout(Layout::left_to_right(Align::Center))
+                .column(Column::exact(num_w));
+            for w in &widths {
+                table = table.column(
+                    Column::initial(*w)
+                        .at_least(40.0)
+                        .clip(true)
+                        .resizable(true),
+                );
             }
-        })
-        .body(|body| {
-            body.rows(row_h, total_rows, |mut row| {
-                let pos = row.index();
-                let rref = row_ref(rs, pos);
-                let deleted = matches!((rref, edit.as_deref()), (RowRef::Existing(r), Some(e)) if e.deleted.contains(&r));
-                let is_new = matches!(rref, RowRef::New(_));
-                row.col(|ui| {
-                    let label = if is_new { "+".to_string() } else { (pos + 1).to_string() };
-                    ui.label(RichText::new(label).weak().monospace());
-                });
-                for c in 0..rs.columns.len() {
-                    let logical = rs.columns[c].logical;
-                    let selected = selection.as_ref().is_some_and(|s| s.contains(pos, c));
-                    let (value, changed) = cell_text(rs, edit.as_deref(), pos, c);
-                    let editing_here = edit
-                        .as_ref()
-                        .and_then(|e| e.editing.as_ref())
-                        .is_some_and(|(p, col, _)| *p == pos && *col == c);
-                    let (_, resp) = row.col(|ui| {
-                        let fill = if deleted {
-                            Some(deleted_fill)
-                        } else if selected {
-                            Some(sel_fill)
-                        } else if changed {
-                            Some(changed_fill)
-                        } else if is_new {
-                            Some(new_fill)
-                        } else {
-                            None
-                        };
-                        if let Some(f) = fill {
-                            ui.painter().rect_filled(ui.max_rect(), 0.0, f);
-                        }
-                        if editing_here && let Some(e) = edit.as_deref_mut() {
-                            let focus = std::mem::take(&mut e.focus_editor);
-                            let Some((_, _, buf)) = e.editing.as_mut() else { return };
-                            let r = ui.add(egui::TextEdit::singleline(buf).font(mono.clone()).desired_width(f32::INFINITY));
-                            if focus {
-                                r.request_focus();
+            table
+                .header(row_h, |mut header| {
+                    header.col(|ui| {
+                        ui.label(RichText::new("#").weak());
+                    });
+                    for (c, col) in rs.columns.iter().enumerate() {
+                        header.col(|ui| {
+                            let arrow = match rs.sort {
+                                Some((sc, true)) if sc == c => " ▲",
+                                Some((sc, false)) if sc == c => " ▼",
+                                _ => "",
+                            };
+                            let read_only = edit.as_ref().is_some_and(|e| !e.editable(c));
+                            let mut text = RichText::new(format!("{}{arrow}", col.name)).strong();
+                            if read_only {
+                                text = text.weak();
                             }
-                            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                                finished_edit = Some(None);
-                            } else if r.lost_focus() || (r.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
-                                finished_edit = Some(Some(buf.clone()));
+                            let resp = ui
+                                .add(egui::Label::new(text).sense(Sense::click()).truncate())
+                                .on_hover_text(format!(
+                                    "{} · {}{}\nClick to sort",
+                                    col.name,
+                                    col.type_name,
+                                    if read_only { " · read-only (not a table column)" } else { "" }
+                                ));
+                            if resp.clicked() {
+                                clicked_header = Some(c);
                             }
-                            return;
-                        }
-                        let text = match &value {
-                            None => RichText::new("NULL").italics().color(null_color),
-                            Some(v) if is_new && !changed => RichText::new(v).italics().color(null_color),
-                            Some(v) => {
-                                let t = RichText::new(preview(v)).monospace();
-                                if deleted { t.strikethrough() } else { t }
-                            }
-                        };
-                        if is_numeric(logical) && value.is_some() && !(is_new && !changed) {
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.add(egui::Label::new(text).truncate().selectable(false));
+                        });
+                    }
+                })
+                .body(|body| {
+                    body.rows(row_h, total_rows, |mut row| {
+                        let pos = row.index();
+                        let rref = row_ref(rs, pos);
+                        let deleted = matches!((rref, edit.as_deref()), (RowRef::Existing(r), Some(e)) if e.deleted.contains(&r));
+                        let is_new = matches!(rref, RowRef::New(_));
+                        row.col(|ui| {
+                            let label = if is_new { "+".to_string() } else { (pos + 1).to_string() };
+                            ui.label(RichText::new(label).weak().monospace());
+                        });
+                        for c in 0..rs.columns.len() {
+                            let logical = rs.columns[c].logical;
+                            let selected = selection.as_ref().is_some_and(|s| s.contains(pos, c));
+                            let (value, changed) = cell_text(rs, edit.as_deref(), pos, c);
+                            let editing_here = edit
+                                .as_ref()
+                                .and_then(|e| e.editing.as_ref())
+                                .is_some_and(|(p, col, _)| *p == pos && *col == c);
+                            let (_, resp) = row.col(|ui| {
+                                let fill = if deleted {
+                                    Some(deleted_fill)
+                                } else if selected {
+                                    Some(sel_fill)
+                                } else if changed {
+                                    Some(changed_fill)
+                                } else if is_new {
+                                    Some(new_fill)
+                                } else {
+                                    None
+                                };
+                                if let Some(f) = fill {
+                                    ui.painter().rect_filled(ui.max_rect(), 0.0, f);
+                                }
+                                if editing_here && let Some(e) = edit.as_deref_mut() {
+                                    let focus = std::mem::take(&mut e.focus_editor);
+                                    let Some((_, _, buf)) = e.editing.as_mut() else { return };
+                                    let r = ui.add(egui::TextEdit::singleline(buf).font(mono.clone()).desired_width(f32::INFINITY));
+                                    if focus {
+                                        r.request_focus();
+                                    }
+                                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                        finished_edit = Some(None);
+                                    } else if r.lost_focus() || (r.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
+                                        finished_edit = Some(Some(buf.clone()));
+                                    }
+                                    return;
+                                }
+                                let text = match &value {
+                                    None => RichText::new("NULL").italics().color(null_color),
+                                    Some(v) if is_new && !changed => RichText::new(v).italics().color(null_color),
+                                    Some(v) => {
+                                        let t = RichText::new(preview(v)).monospace();
+                                        if deleted { t.strikethrough() } else { t }
+                                    }
+                                };
+                                if is_numeric(logical) && value.is_some() && !(is_new && !changed) {
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        ui.add(egui::Label::new(text).truncate().selectable(false));
+                                    });
+                                } else {
+                                    ui.add(egui::Label::new(text).truncate().selectable(false));
+                                }
                             });
-                        } else {
-                            ui.add(egui::Label::new(text).truncate().selectable(false));
+                            if resp.clicked() {
+                                let shift = resp.ctx.input(|i| i.modifiers.shift);
+                                clicked_cell = Some((pos, c, shift));
+                            }
+                            if resp.double_clicked() {
+                                dbl_cell = Some((pos, c));
+                            }
+                            let editable = edit.as_ref().is_some_and(|e| e.editable(c)) && !deleted;
+                            let in_edit = edit.is_some();
+                            resp.context_menu(|ui| {
+                                let mut item = |ui: &mut egui::Ui, label: &str, a: CellAction| {
+                                    if ui.button(label).clicked() {
+                                        ctx_action = Some((a, pos, c));
+                                        ui.close();
+                                    }
+                                };
+                                item(ui, "Copy", CellAction::Copy);
+                                item(ui, "Copy with headers", CellAction::CopyHeaders);
+                                item(ui, "Copy row", CellAction::CopyRow);
+                                item(ui, "View value", CellAction::View);
+                                if in_edit {
+                                    ui.separator();
+                                    if editable {
+                                        item(ui, "Set NULL", CellAction::SetNull);
+                                    }
+                                    if is_new && editable {
+                                        item(ui, "Set DEFAULT", CellAction::SetDefault);
+                                    }
+                                    if deleted {
+                                        item(ui, "Restore row", CellAction::RestoreRow);
+                                    } else {
+                                        item(ui, "Delete row", CellAction::DeleteRow);
+                                    }
+                                }
+                            });
                         }
                     });
-                    if resp.clicked() {
-                        let shift = resp.ctx.input(|i| i.modifiers.shift);
-                        clicked_cell = Some((pos, c, shift));
-                    }
-                    if resp.double_clicked() {
-                        dbl_cell = Some((pos, c));
-                    }
-                    let editable = edit.as_ref().is_some_and(|e| e.editable(c)) && !deleted;
-                    let in_edit = edit.is_some();
-                    resp.context_menu(|ui| {
-                        let mut item = |ui: &mut egui::Ui, label: &str, a: CellAction| {
-                            if ui.button(label).clicked() {
-                                ctx_action = Some((a, pos, c));
-                                ui.close();
-                            }
-                        };
-                        item(ui, "Copy", CellAction::Copy);
-                        item(ui, "Copy with headers", CellAction::CopyHeaders);
-                        item(ui, "Copy row", CellAction::CopyRow);
-                        item(ui, "View value", CellAction::View);
-                        if in_edit {
-                            ui.separator();
-                            if editable {
-                                item(ui, "Set NULL", CellAction::SetNull);
-                            }
-                            if is_new && editable {
-                                item(ui, "Set DEFAULT", CellAction::SetDefault);
-                            }
-                            if deleted {
-                                item(ui, "Restore row", CellAction::RestoreRow);
-                            } else {
-                                item(ui, "Delete row", CellAction::DeleteRow);
-                            }
-                        }
-                    });
-                }
-            });
-        });
+                });
+    });
 
     if let Some(c) = clicked_header
         && rs.complete

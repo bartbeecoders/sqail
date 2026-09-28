@@ -479,6 +479,21 @@ impl Client {
         .await
     }
 
+    pub async fn privileges(
+        &self,
+        id: Uuid,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<TablePrivileges> {
+        self.get(&Self::schema_path(
+            id,
+            "schema/privileges",
+            schema,
+            Some(table),
+        ))
+        .await
+    }
+
     pub async fn routines(&self, id: Uuid, schema: Option<&str>) -> Result<Vec<RoutineInfo>> {
         self.get(&Self::schema_path(id, "schema/routines", schema, None))
             .await

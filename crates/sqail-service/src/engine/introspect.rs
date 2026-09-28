@@ -5,7 +5,7 @@
 use serde_json::Value;
 use sqail_proto::{
     ColumnInfo, Ddl, Engine, ForeignKeyInfo, IndexInfo, NamedItem, Param, RoutineInfo, RoutineKind,
-    TableInfo, TableKind,
+    TableGrant, TableInfo, TableKind, TablePrivileges,
 };
 
 use super::{Conn, DbError, Result, fetch_rows};
@@ -251,7 +251,10 @@ pub async fn indexes(
             "SELECT ic.relname::text,
                     (SELECT string_agg(pg_get_indexdef(i.indexrelid, k + 1, true), chr(31) ORDER BY k)
                      FROM generate_series(0, i.indnkeyatts - 1) k)::text,
-                    i.indisunique, i.indisprimary
+                    i.indisunique, i.indisprimary,
+                    EXISTS (SELECT 1 FROM pg_constraint con
+                            WHERE con.conindid = i.indexrelid AND con.conrelid = i.indrelid
+                              AND con.contype IN ('p', 'u', 'x'))
              FROM pg_index i
              JOIN pg_class ic ON ic.oid = i.indexrelid
              JOIN pg_class c ON c.oid = i.indrelid
@@ -263,7 +266,8 @@ pub async fn indexes(
         Engine::Mssql => (
             "SELECT i.name,
                     STRING_AGG(c.name, CHAR(31)) WITHIN GROUP (ORDER BY ic.key_ordinal),
-                    i.is_unique, i.is_primary_key
+                    i.is_unique, i.is_primary_key,
+                    CAST(i.is_primary_key | i.is_unique_constraint AS bit)
              FROM sys.indexes i
              JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
              JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
@@ -271,7 +275,7 @@ pub async fn indexes(
              JOIN sys.schemas s ON s.schema_id = o.schema_id
              WHERE s.name = COALESCE(@P1, SCHEMA_NAME()) AND o.name = @P2
                AND i.name IS NOT NULL AND ic.is_included_column = 0
-             GROUP BY i.name, i.is_unique, i.is_primary_key
+             GROUP BY i.name, i.is_unique, i.is_primary_key, i.is_unique_constraint
              ORDER BY i.name",
             vec![param(schema), param(Some(table))],
         ),
@@ -281,7 +285,7 @@ pub async fn indexes(
                 "SELECT il.name,
                         (SELECT group_concat(name, char(31))
                          FROM (SELECT name FROM pragma_index_info(il.name, ?2) ORDER BY seqno)),
-                        il.\"unique\", il.origin = 'pk'
+                        il.\"unique\", il.origin = 'pk', il.origin <> 'c'
                  FROM pragma_index_list(?1, ?2) il ORDER BY il.name",
                 vec![param(Some(table)), param(Some(schema.unwrap_or("main")))],
             )
@@ -296,6 +300,7 @@ pub async fn indexes(
                 columns: split_list(&r[1]),
                 unique: get_bool(&r[2]),
                 primary: get_bool(&r[3]),
+                constraint: get_bool(&r[4]),
             })
         })
         .collect())
@@ -428,6 +433,76 @@ pub async fn routines(conn: &mut dyn Conn, schema: Option<&str>) -> Result<Vec<R
             })
         })
         .collect())
+}
+
+// ----------------------------------------------------------- privileges --
+
+pub async fn privileges(
+    conn: &mut dyn Conn,
+    schema: Option<&str>,
+    table: &str,
+) -> Result<TablePrivileges> {
+    let (grants_sql, principals_sql, params) = match conn.engine() {
+        Engine::Sqlite => {
+            return Ok(TablePrivileges {
+                supported: false,
+                owner: None,
+                grants: Vec::new(),
+                principals: Vec::new(),
+            });
+        }
+        Engine::Postgres => (
+            "SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END::text,
+                    a.privilege_type::text, a.is_grantable, pg_get_userbyid(c.relowner)::text
+             FROM pg_class c
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             LEFT JOIN LATERAL aclexplode(c.relacl) a ON a.grantee <> c.relowner
+             WHERE n.nspname = COALESCE($1, current_schema()) AND c.relname = $2
+             ORDER BY 1, 2",
+            "SELECT rolname::text FROM pg_roles WHERE rolname NOT LIKE 'pg\\_%'
+             UNION ALL SELECT 'PUBLIC' ORDER BY 1",
+            vec![param(schema), param(Some(table))],
+        ),
+        Engine::Mssql => (
+            "SELECT pr.name, p.permission_name, CAST(IIF(p.state = 'W', 1, 0) AS bit), NULL
+             FROM sys.database_permissions p
+             JOIN sys.database_principals pr ON pr.principal_id = p.grantee_principal_id
+             WHERE p.class = 1 AND p.minor_id = 0 AND p.state IN ('G', 'W')
+               AND p.major_id = OBJECT_ID(QUOTENAME(COALESCE(@P1, SCHEMA_NAME())) + '.' + QUOTENAME(@P2))
+             ORDER BY pr.name, p.permission_name",
+            "SELECT name FROM sys.database_principals
+             WHERE type IN ('S', 'U', 'G', 'R', 'E', 'X') AND is_fixed_role = 0
+               AND name NOT IN ('sys', 'INFORMATION_SCHEMA', 'dbo')
+             ORDER BY name",
+            vec![param(schema), param(Some(table))],
+        ),
+    };
+    let raw = rows(conn, grants_sql, params).await?;
+    if raw.is_empty() && conn.engine() == Engine::Postgres {
+        return Err(DbError::Invalid(format!("table '{table}' not found")));
+    }
+    let owner = raw.first().and_then(|r| get_str(&r[3]));
+    let grants = raw
+        .iter()
+        .filter_map(|r| {
+            Some(TableGrant {
+                grantee: get_str(&r[0])?,
+                privilege: get_str(&r[1])?,
+                grantable: get_bool(&r[2]),
+            })
+        })
+        .collect();
+    let principals = names(conn, principals_sql, vec![])
+        .await?
+        .into_iter()
+        .map(|n| n.name)
+        .collect();
+    Ok(TablePrivileges {
+        supported: true,
+        owner,
+        grants,
+        principals,
+    })
 }
 
 // ------------------------------------------------------------------ ddl --

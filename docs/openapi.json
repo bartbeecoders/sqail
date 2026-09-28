@@ -689,6 +689,10 @@
             },
             "type": "array"
           },
+          "constraint": {
+            "description": "Backs a `PRIMARY KEY` or `UNIQUE` constraint, so it is dropped with\n`ALTER TABLE … DROP CONSTRAINT` rather than `DROP INDEX`.",
+            "type": "boolean"
+          },
           "name": {
             "type": "string"
           },
@@ -1581,6 +1585,29 @@
         ],
         "type": "object"
       },
+      "TableGrant": {
+        "description": "One privilege on a table held by a role or user.",
+        "properties": {
+          "grantable": {
+            "description": "Held `WITH GRANT OPTION`.",
+            "type": "boolean"
+          },
+          "grantee": {
+            "description": "Role, user or `PUBLIC` (Postgres) / `public` (SQL Server).",
+            "type": "string"
+          },
+          "privilege": {
+            "description": "`SELECT`, `INSERT`, `UPDATE`, `DELETE`, …",
+            "type": "string"
+          }
+        },
+        "required": [
+          "grantee",
+          "privilege",
+          "grantable"
+        ],
+        "type": "object"
+      },
       "TableInfo": {
         "properties": {
           "kind": {
@@ -1609,6 +1636,42 @@
           "materialized_view"
         ],
         "type": "string"
+      },
+      "TablePrivileges": {
+        "description": "`GET /v1/connections/{id}/schema/privileges` — who may do what on a table.",
+        "properties": {
+          "grants": {
+            "description": "Explicit grants, owner excluded.",
+            "items": {
+              "$ref": "#/components/schemas/TableGrant"
+            },
+            "type": "array"
+          },
+          "owner": {
+            "description": "The table's owner, who holds every privilege implicitly (Postgres).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "principals": {
+            "description": "Roles and users that could be granted privileges.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "supported": {
+            "description": "Whether the engine has table privileges at all (SQLite does not).",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "supported",
+          "grants",
+          "principals"
+        ],
+        "type": "object"
       },
       "TestResult": {
         "description": "Result of a connection test.",
@@ -2541,6 +2604,58 @@
             }
           }
         },
+        "tags": [
+          "schema"
+        ]
+      }
+    },
+    "/v1/connections/{id}/schema/privileges": {
+      "get": {
+        "operationId": "privileges",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Defaults to the connection's current schema.",
+            "in": "query",
+            "name": "schema",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Table, view or routine name.",
+            "in": "query",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TablePrivileges"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Grants on a table, and the roles and users that could receive them.",
         "tags": [
           "schema"
         ]

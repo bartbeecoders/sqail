@@ -16,6 +16,7 @@ pub enum View {
 
 pub fn ui(ui: &mut egui::Ui, app: &mut SqailApp) {
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
         for (v, label) in [
             (View::Connections, "Connections"),
             (View::History, "History"),
@@ -25,6 +26,19 @@ pub fn ui(ui: &mut egui::Ui, app: &mut SqailApp) {
                 app.sidebar = v;
             }
         }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let key = app
+                .keymap
+                .label(ui.ctx(), crate::commands::Command::ToggleSidebar);
+            if ui
+                .small_button("«")
+                .on_hover_text(format!("Collapse ({key})"))
+                .clicked()
+            {
+                app.settings.sidebar_open = false;
+                app.settings.save();
+            }
+        });
     });
     ui.separator();
     match app.sidebar {

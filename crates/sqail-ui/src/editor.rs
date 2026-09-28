@@ -324,6 +324,43 @@ fn auto_trigger(text: &str, cursor: usize) -> bool {
     cursor - p >= 2 && !next_is_word && !b[p].is_ascii_digit()
 }
 
+/// Font-size steps asked for with the mouse wheel over the editor this frame:
+/// Ctrl+wheel, or the wheel while the middle button is held. One notch is one
+/// step; trackpad scrolling adds up to a step every 50 points. Call before
+/// the editor is drawn, so a middle-button wheel zooms instead of scrolling.
+pub fn wheel_zoom(ui: &mut egui::Ui) -> f32 {
+    if !ui.rect_contains_pointer(ui.max_rect()) {
+        return 0.0;
+    }
+    let id = ui.id().with("wheel_zoom");
+    let middle = ui.input(|i| i.pointer.middle_down());
+    let mut acc = ui.data(|d| d.get_temp::<f32>(id).unwrap_or(0.0));
+    ui.input(|i| {
+        for e in &i.events {
+            if let egui::Event::MouseWheel {
+                unit,
+                delta,
+                modifiers,
+                ..
+            } = e
+                && (middle || modifiers.command)
+            {
+                acc += match unit {
+                    egui::MouseWheelUnit::Point => delta.y / 50.0,
+                    egui::MouseWheelUnit::Line => delta.y,
+                    egui::MouseWheelUnit::Page => delta.y * 3.0,
+                };
+            }
+        }
+    });
+    if middle {
+        ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+    }
+    let steps = acc.trunc();
+    ui.data_mut(|d| d.insert_temp(id, acc - steps));
+    steps
+}
+
 pub fn editor_ui(ui: &mut egui::Ui, tab: &mut Tab, env: &EditorEnv<'_>) {
     let (engine, dark, font_size) = (env.engine, env.dark, env.font_size);
     if tab.find.open {

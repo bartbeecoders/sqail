@@ -3,7 +3,9 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use serde::Deserialize;
-use sqail_proto::{ColumnInfo, Ddl, ForeignKeyInfo, IndexInfo, NamedItem, RoutineInfo, TableInfo};
+use sqail_proto::{
+    ColumnInfo, Ddl, ForeignKeyInfo, IndexInfo, NamedItem, RoutineInfo, TableInfo, TablePrivileges,
+};
 use utoipa::IntoParams;
 use uuid::Uuid;
 
@@ -134,6 +136,22 @@ pub async fn foreign_keys(
     {
         let mut c = conn(&s, &p, id).await?;
         let r = introspect::foreign_keys(c.conn(), q.schema.as_deref(), &q.name).await;
+        finish(&mut c, r)
+    }
+}
+
+/// Grants on a table, and the roles and users that could receive them.
+#[utoipa::path(get, path = "/v1/connections/{id}/schema/privileges", tag = "schema",
+    params(("id" = Uuid, Path), ObjectRef), responses((status = 200, body = TablePrivileges)))]
+pub async fn privileges(
+    State(s): State<AppState>,
+    p: Principal,
+    Path(id): Path<Uuid>,
+    Query(q): Query<ObjectRef>,
+) -> ApiResult<Json<TablePrivileges>> {
+    {
+        let mut c = conn(&s, &p, id).await?;
+        let r = introspect::privileges(c.conn(), q.schema.as_deref(), &q.name).await;
         finish(&mut c, r)
     }
 }

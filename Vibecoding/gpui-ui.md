@@ -1,0 +1,1 @@
+Can you have a look if it makes sense to move the ui to use https://github.com/zed-industries/zed/tree/main/crates/gpui

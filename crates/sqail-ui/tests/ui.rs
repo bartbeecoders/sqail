@@ -222,6 +222,89 @@ fn workspace_history_and_snippets_survive_a_restart() {
 }
 
 #[test]
+fn narrow_window_keeps_the_editor_out_of_the_side_panels() {
+    let e = env();
+    let mut h = app([900.0, 800.0]);
+    h.state_mut().settings.assistant.open = true;
+    h.state_mut().tabs[0].text = "SELECT id, name, score FROM people".into();
+    h.run_steps(20);
+    run_with(&mut h, "narrow run", |h| {
+        h.key_press_modifiers(Modifiers::COMMAND, Key::Enter)
+    });
+    shot(&mut h, "14-narrow");
+    let assistant = h.get_by_label("Assistant").rect().left();
+    for label in ["▶ Run", "▶▶ Script", "Auto-commit", "Messages ("] {
+        let r = h.get_by_label_contains(label).rect();
+        assert!(
+            r.right() <= assistant,
+            "{label} {r:?} runs into the assistant at {assistant}"
+        );
+    }
+    // Export sits at the right edge of the results pane. The assistant heading
+    // is 8 px inside its panel, and the central column keeps an 8 px margin
+    // before that panel unless something widened it.
+    let export = h.get_by_label("Export").rect();
+    assert!(
+        export.right() <= assistant - 16.0,
+        "the central column grew past its panel: Export {export:?}, assistant at {assistant}"
+    );
+    let messages = h.get_by_label_contains("Messages (").rect();
+    // The run status is dropped when there's no room, never drawn over the tabs.
+    if let Some(status) = h.query_by_label_contains("rows ·") {
+        let status = status.rect();
+        assert!(
+            status.left() >= messages.right(),
+            "run status {status:?} is drawn over the result tabs {messages:?}"
+        );
+    }
+
+    // --- the mouse wheel zooms the editor text ----------------------------
+    let editor = egui::pos2(430.0, 300.0);
+    let size = h.state().settings.editor_font_size;
+    let wheel = |h: &mut Harness<'_, SqailApp>, lines: f32, modifiers: Modifiers| {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, lines),
+            modifiers,
+            phase: egui::TouchPhase::Move,
+        });
+        h.run_steps(3);
+    };
+    h.hover_at(editor);
+    wheel(&mut h, 1.0, Modifiers::COMMAND);
+    assert_eq!(
+        h.state().settings.editor_font_size,
+        size + 1.0,
+        "Ctrl+wheel up"
+    );
+    wheel(&mut h, -1.0, Modifiers::NONE);
+    assert_eq!(
+        h.state().settings.editor_font_size,
+        size + 1.0,
+        "a plain wheel scrolls"
+    );
+    let middle = |h: &mut Harness<'_, SqailApp>, pressed: bool| {
+        h.event(egui::Event::PointerButton {
+            pos: editor,
+            button: egui::PointerButton::Middle,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+        h.step();
+    };
+    middle(&mut h, true);
+    wheel(&mut h, -2.0, Modifiers::NONE);
+    middle(&mut h, false);
+    assert_eq!(
+        h.state().settings.editor_font_size,
+        size - 1.0,
+        "middle button + wheel down"
+    );
+    drop(h);
+    e.server.shutdown();
+}
+
+#[test]
 fn editor_runs_queries_end_to_end() {
     let e = env();
     let dir = &e.dir;
@@ -286,6 +369,37 @@ fn editor_runs_queries_end_to_end() {
     }
     h.get_by_label_contains("no such table");
     shot(&mut h, "02-error");
+
+    // --- side panels collapse to rails; wide results scroll sideways -------
+    h.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::B);
+    h.run_steps(20);
+    assert!(!h.state().settings.sidebar_open);
+    let cols: Vec<String> = (1..=30)
+        .map(|i| format!("'value {i}' AS column_{i}"))
+        .collect();
+    h.state_mut().tabs[0].text = format!("SELECT {}", cols.join(", "));
+    h.step();
+    run_with(&mut h, "wide run", |h| {
+        h.key_press_modifiers(Modifiers::COMMAND, Key::Enter)
+    });
+    let first = h.get_by_label("column_1").rect();
+    h.hover_at(first.center());
+    h.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(-3000.0, 0.0),
+        modifiers: Modifiers::NONE,
+        phase: egui::TouchPhase::Move,
+    });
+    h.run_steps(3);
+    let last = h.get_by_label("column_30").rect();
+    assert!(
+        last.right() <= 1280.0,
+        "the last column scrolled into view: {last:?}"
+    );
+    shot(&mut h, "02b-wide-results");
+    h.get_by_label("»").click();
+    h.run_steps(20);
+    assert!(h.state().settings.sidebar_open);
 
     // --- Esc cancels a long query -----------------------------------------
     h.state_mut().tabs[0].text =

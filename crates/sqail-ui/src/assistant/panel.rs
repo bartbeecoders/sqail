@@ -33,8 +33,8 @@ pub fn ui(ui: &mut egui::Ui, app: &mut SqailApp) {
                 .keymap
                 .label(ui.ctx(), crate::commands::Command::ToggleAssistant);
             if ui
-                .small_button("×")
-                .on_hover_text(format!("Close ({close})"))
+                .small_button("»")
+                .on_hover_text(format!("Collapse ({close})"))
                 .clicked()
             {
                 app.settings.assistant.open = false;

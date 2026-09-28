@@ -26,6 +26,7 @@ pub enum Dialog {
     },
     Import(Box<ImportForm>),
     ApplyEdits(Box<ApplyEdits>),
+    DropTable(Box<DropTable>),
     /// Closing a tab (`Some(index)`) or quitting (`None`) with open transactions.
     ConfirmCloseTransaction(Option<usize>),
 }
@@ -1373,6 +1374,118 @@ fn apply_edits(ctx: &egui::Context, app: &mut SqailApp) {
     }
 }
 
+// ------------------------------------------------------------- drop table --
+
+pub struct DropTable {
+    pub connection: Uuid,
+    pub engine: sqail_client::proto::Engine,
+    pub schema: String,
+    pub table: String,
+    /// Postgres: also drop views and foreign keys that depend on the table.
+    pub cascade: bool,
+    pub busy: bool,
+    pub error: Option<String>,
+}
+
+impl DropTable {
+    pub fn new(
+        connection: Uuid,
+        engine: sqail_client::proto::Engine,
+        schema: String,
+        table: String,
+    ) -> Self {
+        Self {
+            connection,
+            engine,
+            schema,
+            table,
+            cascade: false,
+            busy: false,
+            error: None,
+        }
+    }
+
+    fn sql(&self) -> String {
+        crate::designer::model::drop_table(self.engine, &self.schema, &self.table, self.cascade)
+    }
+}
+
+fn drop_table(ctx: &egui::Context, app: &mut SqailApp) {
+    let Dialog::DropTable(d) = &mut app.dialog else {
+        return;
+    };
+    let mut run = false;
+    let mut close = false;
+    let resp = Modal::new(Id::new("drop_table")).show(ctx, |ui| {
+        ui.set_width(480.0);
+        ui.heading(format!("Drop table {}?", d.table));
+        ui.label("The table and all its rows are deleted. This cannot be undone.");
+        if d.engine == sqail_client::proto::Engine::Postgres {
+            ui.checkbox(
+                &mut d.cascade,
+                "Also drop the views and foreign keys that depend on it (CASCADE)",
+            );
+        }
+        ui.add_space(4.0);
+        ui.label(RichText::new(format!("{};", d.sql())).monospace());
+        if let Some(e) = &d.error {
+            ui.colored_label(Color32::from_rgb(0xd6, 0x45, 0x45), e);
+        }
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    !d.busy,
+                    egui::Button::new(
+                        RichText::new("Drop")
+                            .strong()
+                            .color(Color32::from_rgb(0xd6, 0x45, 0x45)),
+                    ),
+                )
+                .clicked()
+            {
+                run = true;
+            }
+            if d.busy {
+                ui.spinner();
+            }
+            if ui
+                .add_enabled(!d.busy, egui::Button::new("Cancel"))
+                .clicked()
+            {
+                close = true;
+            }
+        });
+    });
+    if resp.should_close() && !d.busy {
+        close = true;
+    }
+    if run && let Some(client) = app.service.client.clone() {
+        d.busy = true;
+        d.error = None;
+        let plan = crate::designer::model::Plan {
+            body: vec![d.sql()],
+            ..Default::default()
+        };
+        let (conn, engine, schema, table) =
+            (d.connection, d.engine, d.schema.clone(), d.table.clone());
+        app.worker.run(async move {
+            let result = crate::designer::apply(&client, conn, engine, plan)
+                .await
+                .map_err(|e| format!("{e:#}"));
+            Msg::TableDropped {
+                conn,
+                schema,
+                table,
+                result,
+            }
+        });
+    }
+    if close {
+        app.dialog = Dialog::None;
+    }
+}
+
 fn confirm_close_transaction(ctx: &egui::Context, app: &mut SqailApp, target: Option<usize>) {
     let mut decision = None;
     let resp = Modal::new(Id::new("confirm_close_tx")).show(ctx, |ui| {
@@ -1440,6 +1553,7 @@ pub fn show(ctx: &egui::Context, app: &mut SqailApp) {
         Dialog::SaveSnippet { .. } => save_snippet(ctx, app),
         Dialog::Import(_) => import(ctx, app),
         Dialog::ApplyEdits(_) => apply_edits(ctx, app),
+        Dialog::DropTable(_) => drop_table(ctx, app),
         Dialog::ConfirmCloseTransaction(target) => confirm_close_transaction(ctx, app, target),
     }
 }

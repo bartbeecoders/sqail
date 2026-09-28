@@ -153,8 +153,12 @@ always rolled back.
 
 All schema routes are `GET`s under `/v1/connections/{id}/schema/`:
 `databases`, `schemas`, `tables?schema=`, `routines?schema=`, and
-`columns`, `indexes` and `foreign-keys`, each with `?schema=&name=` for a
-table (`schema` defaults to the connection's current schema). `GET
+`columns`, `indexes`, `foreign-keys` and `privileges`, each with
+`?schema=&name=` for a table (`schema` defaults to the connection's current
+schema). An index's `constraint` flag says it backs a `PRIMARY KEY` or
+`UNIQUE` constraint. `privileges` lists the table's grants (owner excluded),
+its owner (Postgres) and the roles and users that could be granted
+privileges; `supported` is `false` on SQLite. `GET
 /v1/connections/{id}/ddl?schema=&name=` returns a best-effort `CREATE`
 script for a table, view or routine. `read` tokens may browse every profile.
 

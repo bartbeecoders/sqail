@@ -22,6 +22,8 @@ pub struct Settings {
     pub format_uppercase: bool,
     pub format_indent: u8,
     pub assistant: crate::assistant::AssistantSettings,
+    /// The object browser on the left is expanded (not collapsed to a rail).
+    pub sidebar_open: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -63,6 +65,7 @@ impl Default for Settings {
             format_uppercase: true,
             format_indent: 2,
             assistant: Default::default(),
+            sidebar_open: true,
         }
     }
 }

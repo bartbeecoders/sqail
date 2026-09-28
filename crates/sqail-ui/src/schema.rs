@@ -70,6 +70,19 @@ impl SchemaTree {
         self.data.remove(&conn);
     }
 
+    /// Forget what is cached about one table (and its schema's table list).
+    pub fn invalidate_table(&mut self, conn: Uuid, schema: &str, table: &str) {
+        if let Some(m) = self.data.get_mut(&conn) {
+            m.retain(|k, _| match k {
+                SchemaKey::Tables(s) => s != schema,
+                SchemaKey::Columns(s, t)
+                | SchemaKey::Indexes(s, t)
+                | SchemaKey::ForeignKeys(s, t) => !(s == schema && t == table),
+                _ => true,
+            });
+        }
+    }
+
     pub fn clear(&mut self) {
         self.data.clear();
     }
@@ -191,6 +204,21 @@ enum Action {
         name: String,
     },
     Copy(String),
+    Design {
+        conn: Uuid,
+        schema: String,
+        table: String,
+    },
+    NewTable {
+        conn: Uuid,
+        schema: Option<String>,
+    },
+    DropTable {
+        conn: Uuid,
+        engine: sqail_client::proto::Engine,
+        schema: String,
+        table: String,
+    },
 }
 
 pub fn sidebar_ui(ui: &mut egui::Ui, app: &mut SqailApp) {
@@ -392,6 +420,13 @@ fn connection_node(
             actions.push(Action::Refresh(c.id));
             ui.close();
         }
+        if !c.read_only && ui.button("New table…").clicked() {
+            actions.push(Action::NewTable {
+                conn: c.id,
+                schema: None,
+            });
+            ui.close();
+        }
         ui.separator();
         if ui.button("Delete…").clicked() {
             actions.push(Action::Delete(c.id, c.name.clone()));
@@ -441,7 +476,7 @@ fn schema_children(
         if items.is_empty() && kind == TableKind::View {
             continue;
         }
-        CollapsingHeader::new(format!("{label} ({})", items.len()))
+        let header = CollapsingHeader::new(format!("{label} ({})", items.len()))
             .id_salt((label, conn, schema))
             .default_open(kind == TableKind::Table || !filter.is_empty())
             .show(ui, |ui| {
@@ -449,6 +484,17 @@ fn schema_children(
                     table_node(ui, t, client, conn, engine, schema, table, actions);
                 }
             });
+        if kind == TableKind::Table {
+            header.header_response.context_menu(|ui| {
+                if ui.button("New table…").clicked() {
+                    actions.push(Action::NewTable {
+                        conn,
+                        schema: Some(schema.into()),
+                    });
+                    ui.close();
+                }
+            });
+        }
     }
     if engine != sqail_client::proto::Engine::Sqlite {
         CollapsingHeader::new("Routines")
@@ -663,6 +709,14 @@ fn table_node(
             });
             ui.close();
         }
+        if table.kind == TableKind::Table && ui.button("Design table…").clicked() {
+            actions.push(Action::Design {
+                conn,
+                schema: schema.into(),
+                table: name.clone(),
+            });
+            ui.close();
+        }
         if table.kind == TableKind::Table && ui.button("Import CSV…").clicked() {
             actions.push(Action::Import {
                 conn,
@@ -678,6 +732,22 @@ fn table_node(
                 name: name.clone(),
             });
             ui.close();
+        }
+        if table.kind == TableKind::Table {
+            ui.separator();
+            if ui
+                .button(RichText::new("Drop table…").color(Color32::from_rgb(0xd6, 0x45, 0x45)))
+                .clicked()
+            {
+                actions.push(Action::DropTable {
+                    conn,
+                    engine,
+                    schema: schema.into(),
+                    table: name.clone(),
+                });
+                ui.close();
+            }
+            ui.separator();
         }
         if ui.button("Copy name").clicked() {
             let qualified = format!(
@@ -794,6 +864,22 @@ fn apply(app: &mut SqailApp, a: Action, ctx: &egui::Context) {
             });
         }
         Action::Copy(text) => ctx.copy_text(text),
+        Action::Design {
+            conn,
+            schema,
+            table,
+        } => crate::designer::open(app, conn, Some(schema), Some(table)),
+        Action::NewTable { conn, schema } => crate::designer::open(app, conn, schema, None),
+        Action::DropTable {
+            conn,
+            engine,
+            schema,
+            table,
+        } => {
+            app.dialog = Dialog::DropTable(Box::new(crate::dialogs::DropTable::new(
+                conn, engine, schema, table,
+            )));
+        }
         Action::Import {
             conn,
             schema,

@@ -22,6 +22,9 @@ use crate::settings::{ServiceProfile, Settings, ThemePref};
 use crate::theme;
 use crate::worker::Worker;
 
+/// Width of a collapsed side panel.
+const RAIL_WIDTH: f32 = 28.0;
+
 /// Everything background tasks report back.
 pub enum Msg {
     Connected {
@@ -95,6 +98,20 @@ pub enum Msg {
         run: u64,
         result: Result<sqail_client::proto::Plan, String>,
     },
+    DesignerLoaded {
+        id: u64,
+        result: Result<Box<crate::designer::Loaded>, String>,
+    },
+    DesignerApplied {
+        id: u64,
+        result: Result<(), String>,
+    },
+    TableDropped {
+        conn: Uuid,
+        schema: String,
+        table: String,
+        result: Result<(), String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +164,7 @@ pub struct SqailApp {
     pub allow_close: bool,
     pub palette: Option<crate::palette::Palette>,
     pub assistant: crate::assistant::Assistant,
+    pub designers: crate::designer::Designers,
 }
 
 impl SqailApp {
@@ -184,6 +202,7 @@ impl SqailApp {
             allow_close: false,
             palette: None,
             assistant: Default::default(),
+            designers: Default::default(),
             settings,
         };
         app.restore_workspace();
@@ -796,6 +815,27 @@ impl SqailApp {
                     }
                 }
             }
+            Msg::DesignerLoaded { id, result } => crate::designer::loaded(self, id, result),
+            Msg::DesignerApplied { id, result } => crate::designer::applied(self, id, result),
+            Msg::TableDropped {
+                conn,
+                schema,
+                table,
+                result,
+            } => match result {
+                Ok(()) => {
+                    self.dialog = Dialog::None;
+                    self.notify(format!("Dropped table {table}."), false);
+                    self.schema.invalidate_table(conn, &schema, &table);
+                    crate::designer::forget_table(self, conn, &schema, &table);
+                }
+                Err(e) => {
+                    if let Dialog::DropTable(d) = &mut self.dialog {
+                        d.busy = false;
+                        d.error = Some(e);
+                    }
+                }
+            },
             Msg::ImportColumns(r) => {
                 if let Dialog::Import(f) = &mut self.dialog {
                     f.set_columns(r);
@@ -1218,9 +1258,13 @@ impl SqailApp {
                 self.settings.save();
                 apply_theme(ctx, pref);
             }
-            Command::ShowConnections => self.sidebar = crate::sidebar::View::Connections,
-            Command::ShowHistory => self.sidebar = crate::sidebar::View::History,
-            Command::ShowSnippets => self.sidebar = crate::sidebar::View::Snippets,
+            Command::ShowConnections => self.show_sidebar(crate::sidebar::View::Connections),
+            Command::ShowHistory => self.show_sidebar(crate::sidebar::View::History),
+            Command::ShowSnippets => self.show_sidebar(crate::sidebar::View::Snippets),
+            Command::ToggleSidebar => {
+                self.settings.sidebar_open = !self.settings.sidebar_open;
+                self.settings.save();
+            }
             Command::ToggleAssistant => {
                 self.settings.assistant.open = !self.settings.assistant.open;
                 self.settings.save();
@@ -1228,6 +1272,10 @@ impl SqailApp {
                     ctx.memory_mut(|m| m.request_focus(crate::assistant::panel::input_id()));
                 }
             }
+            Command::NewTable => match self.tabs.get(self.active).and_then(|t| t.connection) {
+                Some(conn) => crate::designer::open(self, conn, None, None),
+                None => self.notify("Choose a connection for this tab first.", true),
+            },
             Command::NewConnection => {
                 self.dialog = Dialog::Connection(Box::new(ConnForm::new_default()))
             }
@@ -1236,6 +1284,14 @@ impl SqailApp {
                 self.schema.clear();
             }
             Command::ConnectService => self.dialog = Dialog::Welcome(WelcomeForm::default()),
+        }
+    }
+
+    fn show_sidebar(&mut self, view: crate::sidebar::View) {
+        self.sidebar = view;
+        if !self.settings.sidebar_open {
+            self.settings.sidebar_open = true;
+            self.settings.save();
         }
     }
 
@@ -1300,6 +1356,32 @@ impl SqailApp {
             let ctx = ui.ctx().clone();
             self.execute(&ctx, cmd);
             ui.close();
+        }
+    }
+
+    /// A collapsed side panel: click anywhere on it to expand it again.
+    fn rail(&mut self, ui: &mut egui::Ui, cmd: Command, arrow: &str, name: &str) {
+        let rect = ui.max_rect();
+        let whole = ui
+            .interact(rect, ui.id().with("rail"), egui::Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(format!(
+                "Expand the {name} ({})",
+                self.keymap.label(ui.ctx(), cmd)
+            ));
+        if whole.hovered() {
+            ui.painter().rect_filled(
+                rect.expand(2.0),
+                0.0,
+                ui.visuals().widgets.hovered.weak_bg_fill,
+            );
+        }
+        ui.vertical_centered(|ui| {
+            ui.add(egui::Label::new(RichText::new(arrow).strong()).selectable(false))
+        });
+        if whole.clicked() {
+            let ctx = ui.ctx().clone();
+            self.execute(&ctx, cmd);
         }
     }
 
@@ -1403,6 +1485,7 @@ impl SqailApp {
             });
             ui.menu_button("Connections", |ui| {
                 self.menu_item(ui, Command::NewConnection);
+                self.menu_item(ui, Command::NewTable);
                 self.menu_item(ui, Command::RefreshConnections);
             });
             ui.menu_button("Service", |ui| {
@@ -1453,6 +1536,7 @@ impl SqailApp {
                     Command::ShowConnections,
                     Command::ShowHistory,
                     Command::ShowSnippets,
+                    Command::ToggleSidebar,
                     Command::ToggleAssistant,
                     Command::FontBigger,
                     Command::FontSmaller,
@@ -1630,7 +1714,10 @@ impl SqailApp {
             return;
         };
         let mut action = None;
-        ui.horizontal(|ui| {
+        // Wraps rather than widening the central panel when the window is narrow.
+        ui.horizontal_wrapped(|ui| {
+            // Whole widgets move to the next line; their text never wraps.
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
             let current = tab
                 .connection
                 .and_then(|c| connections.iter().find(|x| x.id == c));
@@ -1660,30 +1747,30 @@ impl SqailApp {
                 tab.session = None; // sessions are per connection
             }
             let running = tab.run.as_ref().is_some_and(|r| r.running);
-            ui.add_enabled_ui(!running && tab.connection.is_some(), |ui| {
-                if ui
-                    .button("▶ Run")
-                    .on_hover_text("Run statement at cursor or selection (Ctrl+Enter)")
-                    .clicked()
-                {
-                    action = Some(EditorAction::RunCurrent);
-                }
-                if ui
-                    .button("▶▶ Script")
-                    .on_hover_text("Run the whole script (F5)")
-                    .clicked()
-                {
-                    action = Some(EditorAction::RunAll);
-                }
-            });
+            // Enabled one by one (not in a child `Ui`) so they wrap with the row.
+            let can_run = !running && tab.connection.is_some();
+            if ui
+                .add_enabled(can_run, egui::Button::new("▶ Run"))
+                .on_hover_text("Run statement at cursor or selection (Ctrl+Enter)")
+                .clicked()
+            {
+                action = Some(EditorAction::RunCurrent);
+            }
+            if ui
+                .add_enabled(can_run, egui::Button::new("▶▶ Script"))
+                .on_hover_text("Run the whole script (F5)")
+                .clicked()
+            {
+                action = Some(EditorAction::RunAll);
+            }
             if running && ui.button("■ Stop").on_hover_text("Cancel (Esc)").clicked() {
                 action = Some(EditorAction::Cancel);
             }
-            ui.separator();
+            ui.add_space(8.0);
             ui.checkbox(&mut tab.autocommit, "Auto-commit")
                 .on_hover_text("Off: the first run opens a transaction that stays open until you commit or roll back");
             if tab.in_transaction {
-                ui.separator();
+                ui.add_space(8.0);
                 ui.label(
                     RichText::new("Transaction open")
                         .color(Color32::from_rgb(0xe6, 0xa2, 0x3c))
@@ -1746,9 +1833,11 @@ impl SqailApp {
         if grid_out.review_edits {
             self.review_edits(idx);
         }
+        let mut zoom = 0.0;
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
+                zoom = crate::editor::wheel_zoom(ui);
                 if let Some(color) = conn_color {
                     let r = ui.available_rect_before_wrap();
                     ui.painter().rect_filled(
@@ -1786,6 +1875,9 @@ impl SqailApp {
                     }
                 }
             });
+        if zoom != 0.0 {
+            self.set_font_size(self.settings.editor_font_size + zoom);
+        }
     }
 
     fn value_viewer(&mut self, ctx: &egui::Context) {
@@ -1866,21 +1958,70 @@ impl eframe::App for SqailApp {
 
         egui::Panel::top("menu").show(ui, |ui| self.menu_bar(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
-        egui::Panel::left("sidebar")
-            .resizable(true)
-            .default_size(280.0)
-            .size_range(180.0..=520.0)
-            .show(ui, |ui| crate::sidebar::ui(ui, self));
-        if self.settings.assistant.open {
+        // Both side panels collapse to a thin rail: click it, drag it open, or
+        // use the command; dragging an open panel narrower collapses it.
+        let rail_frame =
+            egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::symmetric(2, 6));
+        // In a narrow window the side panels give way so the editor keeps room.
+        let width = ui.available_width();
+        let was_open = self.settings.sidebar_open;
+        let mut open = was_open;
+        egui::Panel::show_switched(
+            ui,
+            &mut open,
+            egui::Panel::left("sidebar-rail")
+                .resizable(true)
+                .exact_size(RAIL_WIDTH)
+                .frame(rail_frame),
+            egui::Panel::left("sidebar")
+                .resizable(true)
+                .default_size(280.0)
+                .size_range(180.0..=(width * 0.3).clamp(180.0, 520.0)),
+            |ui, expanded| {
+                if expanded {
+                    crate::sidebar::ui(ui, self);
+                } else {
+                    self.rail(ui, Command::ToggleSidebar, "»", "object browser");
+                }
+            },
+        );
+        // Only a drag on the edge changes `open`; buttons inside the panel
+        // change the setting directly.
+        if open != was_open {
+            self.settings.sidebar_open = open;
+            self.settings.save();
+        }
+        // Whatever the sidebar left, minus room for the editor.
+        let assistant_max = (ui.available_width() - 360.0).clamp(300.0, 900.0);
+        let was_open = self.settings.assistant.open;
+        let mut open = was_open;
+        egui::Panel::show_switched(
+            ui,
+            &mut open,
+            egui::Panel::right("assistant-rail")
+                .resizable(true)
+                .exact_size(RAIL_WIDTH)
+                .frame(rail_frame),
             egui::Panel::right("assistant")
                 .resizable(true)
                 .default_size(420.0)
-                .size_range(300.0..=900.0)
-                .show(ui, |ui| crate::assistant::panel::ui(ui, self));
+                .size_range(300.0..=assistant_max),
+            |ui, expanded| {
+                if expanded {
+                    crate::assistant::panel::ui(ui, self);
+                } else {
+                    self.rail(ui, Command::ToggleAssistant, "«", "AI assistant");
+                }
+            },
+        );
+        if open != was_open {
+            self.settings.assistant.open = open;
+            self.settings.save();
         }
         egui::CentralPanel::default().show(ui, |ui| self.central(ui));
 
         self.value_viewer(&ctx);
+        crate::designer::show(&ctx, self);
         crate::palette::show(&ctx, self);
         self.autosave_workspace(false);
         crate::dialogs::show(&ctx, self);

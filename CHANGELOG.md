@@ -9,6 +9,23 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
 
 ### sqail
 
+- **Table designer.** Right-click a table for *Design table…*, or *Tables*
+  or a connection for *New table…*: edit columns (name, type, NULL, default),
+  the primary key, indexes and grants in a window, review the generated
+  DDL and apply it in one transaction. *Drop table…* is in the same menus.
+  Works on PostgreSQL, SQL Server and SQLite (where changes SQLite cannot
+  make in place rebuild the table).
+- **Zoom the editor with the mouse wheel.** Ctrl+wheel over the editor, or
+  the wheel while holding the middle button, makes the text larger or
+  smaller (same setting as Ctrl+= / Ctrl+-).
+- **Collapsible side panels.** The sidebar (Ctrl+Shift+B) and the AI
+  assistant (Ctrl+Shift+A) collapse to a thin strip instead of disappearing;
+  click the strip to expand. Their state is remembered.
+- **Wide results scroll sideways.** The result grid now has a horizontal
+  scrollbar when its columns don't fit.
+- **Narrow windows.** The editor no longer spills over the AI assistant when
+  the window is narrow: the toolbar wraps onto a second row and the side
+  panels give up width so the editor keeps room.
 - **Pick the database from a list.** In the connection form, ⏷ next to
   *Database* lists the databases the PostgreSQL or SQL Server login can
   access, using the settings typed so far. The admin page has the same list
@@ -16,6 +33,10 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
 
 ### sqail-service
 
+- **Table privileges.** New route `GET
+  /v1/connections/{id}/schema/privileges?schema=&name=` lists who holds which
+  privilege on a table and which roles and users exist. Indexes from
+  `schema/indexes` have a new `constraint` flag.
 - **Azure SQL with Microsoft Entra ID.** SQL Server connections can sign in
   with an Entra user and password, a service principal (tenant, client ID
   and secret) or the managed identity of the Azure host the service runs on,

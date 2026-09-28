@@ -571,6 +571,10 @@ pub struct IndexInfo {
     pub columns: Vec<String>,
     pub unique: bool,
     pub primary: bool,
+    /// Backs a `PRIMARY KEY` or `UNIQUE` constraint, so it is dropped with
+    /// `ALTER TABLE … DROP CONSTRAINT` rather than `DROP INDEX`.
+    #[serde(default)]
+    pub constraint: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -597,6 +601,32 @@ pub struct RoutineInfo {
     pub schema: Option<String>,
     pub name: String,
     pub kind: RoutineKind,
+}
+
+/// One privilege on a table held by a role or user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct TableGrant {
+    /// Role, user or `PUBLIC` (Postgres) / `public` (SQL Server).
+    pub grantee: String,
+    /// `SELECT`, `INSERT`, `UPDATE`, `DELETE`, …
+    pub privilege: String,
+    /// Held `WITH GRANT OPTION`.
+    pub grantable: bool,
+}
+
+/// `GET /v1/connections/{id}/schema/privileges` — who may do what on a table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct TablePrivileges {
+    /// Whether the engine has table privileges at all (SQLite does not).
+    pub supported: bool,
+    /// The table's owner, who holds every privilege implicitly (Postgres).
+    pub owner: Option<String>,
+    /// Explicit grants, owner excluded.
+    pub grants: Vec<TableGrant>,
+    /// Roles and users that could be granted privileges.
+    pub principals: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -34,14 +34,16 @@ pub enum Command {
     ShowConnections,
     ShowHistory,
     ShowSnippets,
+    ToggleSidebar,
     ToggleAssistant,
     NewConnection,
+    NewTable,
     RefreshConnections,
     ConnectService,
 }
 
 impl Command {
-    pub const ALL: [Command; 30] = [
+    pub const ALL: [Command; 32] = [
         Command::RunCurrent,
         Command::RunScript,
         Command::Cancel,
@@ -68,8 +70,10 @@ impl Command {
         Command::ShowConnections,
         Command::ShowHistory,
         Command::ShowSnippets,
+        Command::ToggleSidebar,
         Command::ToggleAssistant,
         Command::NewConnection,
+        Command::NewTable,
         Command::RefreshConnections,
         Command::ConnectService,
     ];
@@ -103,8 +107,10 @@ impl Command {
             Command::ShowConnections => "view.connections",
             Command::ShowHistory => "view.history",
             Command::ShowSnippets => "view.snippets",
+            Command::ToggleSidebar => "view.sidebar",
             Command::ToggleAssistant => "view.assistant",
             Command::NewConnection => "connection.new",
+            Command::NewTable => "table.new",
             Command::RefreshConnections => "connection.refresh",
             Command::ConnectService => "service.connect",
         }
@@ -138,8 +144,10 @@ impl Command {
             Command::ShowConnections => "Show connections",
             Command::ShowHistory => "Show query history",
             Command::ShowSnippets => "Show snippets",
-            Command::ToggleAssistant => "Show / hide the AI assistant",
+            Command::ToggleSidebar => "Expand / collapse the object browser",
+            Command::ToggleAssistant => "Expand / collapse the AI assistant",
             Command::NewConnection => "New connection…",
+            Command::NewTable => "New table…",
             Command::RefreshConnections => "Refresh connections",
             Command::ConnectService => "Connect to a service…",
         }
@@ -164,6 +172,7 @@ impl Command {
             Command::QuickOpen => &["Ctrl+P"],
             Command::FontBigger => &["Ctrl+Equals", "Ctrl+Plus"],
             Command::FontSmaller => &["Ctrl+Minus"],
+            Command::ToggleSidebar => &["Ctrl+Shift+B"],
             Command::ToggleAssistant => &["Ctrl+Shift+A"],
             _ => &[],
         }

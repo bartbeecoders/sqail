@@ -55,6 +55,7 @@ impl Svc {
                 name: "c".into(),
                 params,
                 password: password.map(String::from),
+                ssl_client_key: None,
                 read_only: false,
                 color: None,
                 environment: None,
@@ -182,6 +183,8 @@ fn edits_apply_on_postgres_and_mssql() {
             database: "sqail_test".into(),
             user: "sqail".into(),
             ssl_mode: PgSslMode::Disable,
+            ssl_root_cert: None,
+            ssl_client_cert: None,
         }),
         Some("sqail_dev_pw"),
     );

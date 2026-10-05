@@ -19,7 +19,8 @@ use uuid::Uuid;
 use crate::crypto::sha256_hex;
 
 /// Ordered schema migrations; `PRAGMA user_version` records how many ran.
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
     CREATE TABLE tokens (
         id           TEXT PRIMARY KEY,
         name         TEXT NOT NULL,
@@ -51,7 +52,10 @@ const MIGRATIONS: &[&str] = &[r#"
         duration_ms INTEGER,
         success     INTEGER NOT NULL
     );
-"#];
+"#,
+    // PostgreSQL client private keys, encrypted the same way as `secret`.
+    "ALTER TABLE connections ADD COLUMN ssl_key TEXT;",
+];
 
 pub struct Store {
     db: Mutex<Db>,
@@ -61,7 +65,10 @@ pub struct Store {
 #[derive(Debug, Clone)]
 pub struct StoredConnection {
     pub info: Connection,
+    /// Encrypted password, when the profile has one.
     pub secret: Option<String>,
+    /// Encrypted PostgreSQL client private key, when the profile has one.
+    pub ssl_key: Option<String>,
 }
 
 /// Fields written on insert/update (secret already encrypted).
@@ -69,6 +76,8 @@ pub struct ConnectionRecord<'a> {
     pub name: &'a str,
     pub params: &'a ConnectionParams,
     pub secret: Option<&'a str>,
+    /// Already encrypted.
+    pub ssl_key: Option<&'a str>,
     pub read_only: bool,
     pub color: Option<&'a str>,
     pub environment: Option<&'a str>,
@@ -238,8 +247,8 @@ impl Store {
         let id = Uuid::new_v4();
         let now = ts(Utc::now());
         self.db().execute(
-            "INSERT INTO connections (id, name, params, secret, read_only, color, environment, folder, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+            "INSERT INTO connections (id, name, params, secret, read_only, color, environment, folder, created_at, updated_at, ssl_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10)",
             params![
                 id.to_string(),
                 rec.name,
@@ -249,7 +258,8 @@ impl Store {
                 rec.color,
                 rec.environment,
                 rec.folder,
-                now
+                now,
+                rec.ssl_key
             ],
         )?;
         Ok(id)
@@ -258,7 +268,7 @@ impl Store {
     pub fn connection_update(&self, id: Uuid, rec: &ConnectionRecord<'_>) -> Result<bool> {
         Ok(self.db().execute(
             "UPDATE connections SET name = ?2, params = ?3, secret = ?4, read_only = ?5, color = ?6,
-                    environment = ?7, folder = ?8, updated_at = ?9
+                    environment = ?7, folder = ?8, updated_at = ?9, ssl_key = ?10
              WHERE id = ?1",
             params![
                 id.to_string(),
@@ -269,7 +279,8 @@ impl Store {
                 rec.color,
                 rec.environment,
                 rec.folder,
-                ts(Utc::now())
+                ts(Utc::now()),
+                rec.ssl_key
             ],
         )? == 1)
     }
@@ -332,8 +343,7 @@ impl Store {
 }
 
 const TOKEN_COLS: &str = "id, name, scope, created_at, last_used_at, revoked";
-const CONN_COLS: &str =
-    "id, name, params, secret, read_only, color, environment, folder, created_at, updated_at";
+const CONN_COLS: &str = "id, name, params, secret, read_only, color, environment, folder, created_at, updated_at, ssl_key";
 
 fn token_from_row(r: &Row<'_>) -> rusqlite::Result<TokenInfo> {
     Ok(TokenInfo {
@@ -359,6 +369,7 @@ fn stored_from_row(r: &Row<'_>) -> rusqlite::Result<StoredConnection> {
     let params: ConnectionParams =
         serde_json::from_str(&r.get::<_, String>(2)?).map_err(|e| conv_err(2, e.to_string()))?;
     let secret: Option<String> = r.get(3)?;
+    let ssl_key: Option<String> = r.get(10)?;
     Ok(StoredConnection {
         info: Connection {
             id: parse_uuid(r, 0)?,
@@ -366,6 +377,7 @@ fn stored_from_row(r: &Row<'_>) -> rusqlite::Result<StoredConnection> {
             engine: params.engine(),
             params,
             has_password: secret.is_some(),
+            has_ssl_client_key: ssl_key.is_some(),
             read_only: r.get(4)?,
             color: r.get(5)?,
             environment: r.get(6)?,
@@ -374,6 +386,7 @@ fn stored_from_row(r: &Row<'_>) -> rusqlite::Result<StoredConnection> {
             updated_at: parse_ts(r, 9)?,
         },
         secret,
+        ssl_key,
     })
 }
 
@@ -451,6 +464,7 @@ mod tests {
             name: "local",
             params: &params,
             secret: Some("v1:abc"),
+            ssl_key: None,
             read_only: false,
             color: None,
             environment: Some("dev"),
@@ -460,15 +474,50 @@ mod tests {
         let got = s.connection_get(id).unwrap().unwrap();
         assert_eq!(got.info.name, "local");
         assert!(got.info.has_password);
+        assert!(!got.info.has_ssl_client_key);
         rec.name = "renamed";
         rec.secret = None;
+        rec.ssl_key = Some("v1:key");
         assert!(s.connection_update(id, &rec).unwrap());
         let got = s.connection_get(id).unwrap().unwrap();
         assert_eq!(got.info.name, "renamed");
         assert!(!got.info.has_password);
+        assert!(got.info.has_ssl_client_key);
+        assert_eq!(got.ssl_key.as_deref(), Some("v1:key"));
         assert_eq!(s.connection_list().unwrap().len(), 1);
         assert!(s.connection_delete(id).unwrap());
         assert!(s.connection_get(id).unwrap().is_none());
+    }
+
+    #[test]
+    fn migration_adds_the_ssl_key_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("service.db");
+        {
+            let db = rusqlite::Connection::open(&path).unwrap();
+            db.execute_batch(MIGRATIONS[0]).unwrap();
+            db.pragma_update(None, "user_version", 1).unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        let params = ConnectionParams::Sqlite(SqliteParams {
+            path: "/tmp/x.db".into(),
+            create: false,
+        });
+        let id = s
+            .connection_insert(&ConnectionRecord {
+                name: "local",
+                params: &params,
+                secret: None,
+                ssl_key: Some("v1:key"),
+                read_only: false,
+                color: None,
+                environment: None,
+                folder: None,
+            })
+            .unwrap();
+        let got = s.connection_get(id).unwrap().unwrap();
+        assert!(got.info.has_ssl_client_key);
+        assert_eq!(got.ssl_key.as_deref(), Some("v1:key"));
     }
 
     #[test]

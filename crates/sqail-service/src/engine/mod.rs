@@ -12,7 +12,7 @@ pub mod pg;
 pub mod registry;
 pub mod split;
 pub mod sqlite;
-mod tls_client;
+pub(crate) mod tls_client;
 mod value;
 
 use std::sync::{Arc, Mutex};

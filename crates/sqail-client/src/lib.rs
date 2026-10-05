@@ -301,12 +301,22 @@ impl Client {
         .await
     }
 
-    pub async fn test_unsaved(&self, input: &ConnectionInput) -> Result<TestResult> {
-        self.post("/v1/connections/test", input).await
+    /// Try `input` before saving it. With no password or client key in
+    /// `input`, `secret_from` names the saved profile whose secret to use.
+    pub async fn test_unsaved(
+        &self,
+        input: &ConnectionInput,
+        secret_from: Option<Uuid>,
+    ) -> Result<TestResult> {
+        let path = match secret_from {
+            Some(id) => format!("/v1/connections/test?secret_from={id}"),
+            None => "/v1/connections/test".into(),
+        };
+        self.post(&path, input).await
     }
 
-    /// Databases the login in `input` can access. With no password in
-    /// `input`, `secret_from` names the saved profile whose password to use.
+    /// Databases the login in `input` can access. With no password or client
+    /// key in `input`, `secret_from` names the saved profile whose secret to use.
     pub async fn databases_unsaved(
         &self,
         input: &ConnectionInput,

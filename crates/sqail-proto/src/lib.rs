@@ -167,6 +167,15 @@ pub struct PostgresParams {
     pub user: String,
     #[serde(default)]
     pub ssl_mode: PgSslMode,
+    /// PEM CA certificate, or a bundle, that signed the server certificate.
+    /// Used only when `ssl_mode` is `verify-ca` or `verify-full`, in place of
+    /// the operating system's trust store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssl_root_cert: Option<String>,
+    /// PEM client certificate (leaf first) for mutual TLS. The matching
+    /// private key is [`ConnectionInput::ssl_client_key`], which is write-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssl_client_cert: Option<String>,
 }
 
 fn default_pg_port() -> u16 {
@@ -184,6 +193,8 @@ pub enum PgSslMode {
     Prefer,
     /// TLS required; certificate not verified.
     Require,
+    /// TLS required; certificate chain verified, host name not checked.
+    VerifyCa,
     /// TLS required; certificate chain and host name verified.
     VerifyFull,
 }
@@ -288,6 +299,11 @@ pub struct ConnectionInput {
     /// Write-only. On update: `None` keeps the stored password, `""` clears it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
+    /// Write-only PEM private key for [`PostgresParams::ssl_client_cert`].
+    /// On update: `None` keeps the stored key, `""` clears it. Unencrypted
+    /// PKCS#8, PKCS#1 or SEC1. PostgreSQL only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssl_client_key: Option<String>,
     #[serde(default)]
     pub read_only: bool,
     /// UI accent colour, e.g. `#c0392b` for production.
@@ -309,6 +325,9 @@ pub struct Connection {
     pub engine: Engine,
     pub params: ConnectionParams,
     pub has_password: bool,
+    /// A PostgreSQL client private key is stored. The key itself is never returned.
+    #[serde(default)]
+    pub has_ssl_client_key: bool,
     pub read_only: bool,
     pub color: Option<String>,
     pub environment: Option<String>,
@@ -716,6 +735,33 @@ mod tests {
                 Param::Text("x".into())
             ]
         );
+    }
+
+    #[test]
+    fn postgres_certs_are_optional_and_verify_ca_is_kebab_case() {
+        let p: PostgresParams =
+            serde_json::from_str(r#"{"host":"db","database":"app","user":"app"}"#).unwrap();
+        assert_eq!(p.ssl_mode, PgSslMode::Prefer);
+        assert!(p.ssl_root_cert.is_none());
+        assert!(p.ssl_client_cert.is_none());
+        assert_eq!(
+            serde_json::from_str::<PgSslMode>(r#""verify-ca""#).unwrap(),
+            PgSslMode::VerifyCa
+        );
+        let back = PostgresParams {
+            host: "db".into(),
+            port: 5432,
+            database: "app".into(),
+            user: "app".into(),
+            ssl_mode: PgSslMode::VerifyFull,
+            ssl_root_cert: Some(
+                "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n".into(),
+            ),
+            ssl_client_cert: None,
+        };
+        let json = serde_json::to_string(&back).unwrap();
+        assert!(json.contains("ssl_root_cert"));
+        assert!(!json.contains("ssl_client_cert"));
     }
 
     #[test]

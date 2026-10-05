@@ -239,6 +239,14 @@ enum EngineChoice {
     Sqlite,
 }
 
+/// Which PostgreSQL certificate the file dialog is choosing.
+#[derive(Clone, Copy)]
+pub enum PgCertKind {
+    Root,
+    Client,
+    Key,
+}
+
 /// Databases offered next to the Database field.
 enum DbList {
     Loading,
@@ -257,6 +265,17 @@ pub struct ConnForm {
     password: String,
     has_password: bool,
     pg_ssl: PgSslMode,
+    pg_root_cert: String,
+    pg_root_name: String,
+    pg_client_cert: String,
+    pg_client_cert_name: String,
+    pg_client_key: String,
+    pg_client_key_name: String,
+    has_ssl_client_key: bool,
+    /// The user cleared a stored client key and has not chosen a new one.
+    pg_key_cleared: bool,
+    /// A certificate file dialog to open on the next frame.
+    pick: Option<PgCertKind>,
     ms_auth: MsAuthChoice,
     ms_tenant: String,
     ms_client_id: String,
@@ -292,6 +311,15 @@ impl ConnForm {
             password: String::new(),
             has_password: false,
             pg_ssl: PgSslMode::Prefer,
+            pg_root_cert: String::new(),
+            pg_root_name: String::new(),
+            pg_client_cert: String::new(),
+            pg_client_cert_name: String::new(),
+            pg_client_key: String::new(),
+            pg_client_key_name: String::new(),
+            has_ssl_client_key: false,
+            pg_key_cleared: false,
+            pick: None,
             ms_auth: MsAuthChoice::Sql,
             ms_tenant: String::new(),
             ms_client_id: String::new(),
@@ -330,6 +358,9 @@ impl ConnForm {
                 f.database = p.database.clone();
                 f.user = p.user.clone();
                 f.pg_ssl = p.ssl_mode;
+                f.pg_root_cert = p.ssl_root_cert.clone().unwrap_or_default();
+                f.pg_client_cert = p.ssl_client_cert.clone().unwrap_or_default();
+                f.has_ssl_client_key = c.has_ssl_client_key;
             }
             ConnectionParams::Mssql(p) => {
                 f.engine = EngineChoice::Mssql;
@@ -399,7 +430,10 @@ impl ConnForm {
             ConnectionParams::Mssql(p) => p.database = None,
             ConnectionParams::Sqlite(_) => {}
         }
-        Ok((format!("{params:?}|{:?}", input.password), input))
+        Ok((
+            format!("{params:?}|{:?}|{:?}", input.password, input.ssl_client_key),
+            input,
+        ))
     }
 
     fn input(&self) -> Result<ConnectionInput, String> {
@@ -414,6 +448,11 @@ impl ConnForm {
             }
         };
         let opt = |s: &str| (!s.trim().is_empty()).then(|| s.trim().to_string());
+        if self.engine == EngineChoice::Postgres {
+            check_pem("CA certificate", &self.pg_root_cert, true)?;
+            check_pem("client certificate", &self.pg_client_cert, true)?;
+            check_pem("client key", &self.pg_client_key, false)?;
+        }
         let params = match self.engine {
             EngineChoice::Postgres => ConnectionParams::Postgres(PostgresParams {
                 host: self.host.trim().into(),
@@ -421,6 +460,8 @@ impl ConnForm {
                 database: self.database.trim().into(),
                 user: self.user.trim().into(),
                 ssl_mode: self.pg_ssl,
+                ssl_root_cert: opt(&self.pg_root_cert),
+                ssl_client_cert: opt(&self.pg_client_cert),
             }),
             EngineChoice::Mssql => ConnectionParams::Mssql(MssqlParams {
                 host: self.host.trim().into(),
@@ -475,12 +516,166 @@ impl ConnForm {
             } else {
                 Some(self.password.clone())
             },
+            ssl_client_key: self.ssl_client_key()?,
             read_only: self.read_only,
             color: self.color.clone(),
             environment: opt(&self.environment),
             folder: opt(&self.folder),
         })
     }
+
+    /// `None` keeps a stored key. `Some("")` clears it.
+    fn ssl_client_key(&self) -> Result<Option<String>, String> {
+        if self.engine != EngineChoice::Postgres {
+            return Ok(None);
+        }
+        if !self.pg_client_key.is_empty() {
+            return Ok(Some(self.pg_client_key.clone()));
+        }
+        if self.pg_client_cert.trim().is_empty() {
+            return Ok(self.has_ssl_client_key.then(String::new));
+        }
+        if self.editing.is_some() && self.has_ssl_client_key && !self.pg_key_cleared {
+            return Ok(None);
+        }
+        Err("Choose the private key for the client certificate".into())
+    }
+
+    pub fn set_cert(&mut self, kind: PgCertKind, name: String, pem: String) {
+        let pem = pem.trim().to_string();
+        let label = match kind {
+            PgCertKind::Root => "CA certificate",
+            PgCertKind::Client => "client certificate",
+            PgCertKind::Key => "client key",
+        };
+        if let Err(e) = check_pem(label, &pem, !matches!(kind, PgCertKind::Key)) {
+            self.error = Some(e);
+            return;
+        }
+        match kind {
+            PgCertKind::Root => {
+                self.pg_root_cert = pem;
+                self.pg_root_name = name;
+            }
+            PgCertKind::Client => {
+                self.pg_client_cert = pem;
+                self.pg_client_cert_name = name;
+            }
+            PgCertKind::Key => {
+                self.pg_client_key = pem;
+                self.pg_client_key_name = name;
+                self.pg_key_cleared = false;
+            }
+        }
+        self.test = None;
+        self.error = None;
+    }
+}
+
+fn ssl_label(mode: PgSslMode) -> &'static str {
+    match mode {
+        PgSslMode::Disable => "disable",
+        PgSslMode::Prefer => "prefer",
+        PgSslMode::Require => "require",
+        PgSslMode::VerifyCa => "verify-ca",
+        PgSslMode::VerifyFull => "verify-full",
+    }
+}
+
+fn check_pem(label: &str, pem: &str, certificate: bool) -> Result<(), String> {
+    let pem = pem.trim();
+    if pem.is_empty() {
+        return Ok(());
+    }
+    if pem.len() > 64 * 1024 {
+        return Err(format!("{label} is larger than 64 KiB"));
+    }
+    if !certificate && pem.contains("ENCRYPTED") {
+        return Err(format!(
+            "{label} is encrypted; sqail needs an unencrypted PEM private key"
+        ));
+    }
+    let marker = if certificate {
+        "BEGIN CERTIFICATE"
+    } else {
+        "PRIVATE KEY"
+    };
+    if !pem.contains(marker) {
+        return Err(format!(
+            "{label} is not a PEM {}",
+            if certificate {
+                "certificate"
+            } else {
+                "private key"
+            }
+        ));
+    }
+    Ok(())
+}
+
+fn cert_row(ui: &mut egui::Ui, form: &mut ConnForm, kind: PgCertKind) {
+    let (label, pem_set, name, stored, hover, choose, clear) = match kind {
+        PgCertKind::Root => (
+            "CA certificate",
+            !form.pg_root_cert.trim().is_empty(),
+            form.pg_root_name.clone(),
+            false,
+            "PEM of the CA that signed the server. Used with verify-ca and verify-full, instead of the system trust store.",
+            "Choose CA",
+            "Clear CA",
+        ),
+        PgCertKind::Client => (
+            "Client certificate",
+            !form.pg_client_cert.trim().is_empty(),
+            form.pg_client_cert_name.clone(),
+            false,
+            "PEM, leaf first. For servers that require a client certificate.",
+            "Choose certificate",
+            "Clear certificate",
+        ),
+        PgCertKind::Key => (
+            "Client key",
+            !form.pg_client_key.is_empty(),
+            form.pg_client_key_name.clone(),
+            form.has_ssl_client_key && !form.pg_key_cleared,
+            "Unencrypted PEM private key (PKCS#8, PKCS#1 or SEC1) matching the client certificate.",
+            "Choose key",
+            "Clear key",
+        ),
+    };
+    let status = if !name.is_empty() {
+        name
+    } else if pem_set || stored {
+        "stored".into()
+    } else {
+        "not set".into()
+    };
+    let l = ui.label(label);
+    ui.horizontal(|ui| {
+        ui.label(status).labelled_by(l.id).on_hover_text(hover);
+        if ui.button(choose).clicked() {
+            form.pick = Some(kind);
+        }
+        if (pem_set || stored) && ui.button(clear).clicked() {
+            match kind {
+                PgCertKind::Root => {
+                    form.pg_root_cert.clear();
+                    form.pg_root_name.clear();
+                }
+                PgCertKind::Client => {
+                    form.pg_client_cert.clear();
+                    form.pg_client_cert_name.clear();
+                }
+                PgCertKind::Key => {
+                    form.pg_client_key.clear();
+                    form.pg_client_key_name.clear();
+                    form.pg_key_cleared = true;
+                }
+            }
+            form.test = None;
+        }
+    });
+    ui.end_row();
 }
 
 /// The ⏷ list next to Database. Returns whether to fetch the list.
@@ -550,47 +745,66 @@ fn connection_form(ctx: &egui::Context, app: &mut SqailApp) {
     let before = form.engine;
 
     let resp = Modal::new(Id::new("conn_form")).show(ctx, |ui| {
-        ui.set_width(520.0);
+        ui.set_width(560.0);
         ui.heading(if form.editing.is_some() {
             "Edit connection"
         } else {
             "New connection"
         });
         ui.add_space(4.0);
-        egui::Grid::new("conn_grid")
-            .num_columns(2)
-            .spacing([10.0, 6.0])
+        // The certificate rows make this taller than a short window. Keep
+        // Test and Save on screen.
+        egui::ScrollArea::vertical()
+            .max_height((ui.ctx().content_rect().height() - 180.0).max(240.0))
             .show(ui, |ui| {
-                ui.label("Engine");
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut form.engine, EngineChoice::Postgres, "PostgreSQL");
-                    ui.selectable_value(&mut form.engine, EngineChoice::Mssql, "SQL Server");
-                    ui.selectable_value(&mut form.engine, EngineChoice::Sqlite, "SQLite");
-                });
-                ui.end_row();
-                let l = ui.label("Name");
-                ui.add(
-                    egui::TextEdit::singleline(&mut form.name)
-                        .hint_text("defaults to host/database")
-                        .desired_width(320.0),
-                )
-                .labelled_by(l.id);
-                ui.end_row();
-
-                match form.engine {
-                    EngineChoice::Postgres | EngineChoice::Mssql => {
-                        let host = ui.label("Host");
+                egui::Grid::new("conn_grid")
+                    .num_columns(2)
+                    .spacing([10.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Engine");
                         ui.horizontal(|ui| {
-                            ui.add(egui::TextEdit::singleline(&mut form.host).desired_width(230.0))
-                                .labelled_by(host.id);
-                            let l = ui.label("Port");
-                            ui.add(egui::TextEdit::singleline(&mut form.port).desired_width(60.0))
-                                .labelled_by(l.id);
+                            ui.selectable_value(
+                                &mut form.engine,
+                                EngineChoice::Postgres,
+                                "PostgreSQL",
+                            );
+                            ui.selectable_value(
+                                &mut form.engine,
+                                EngineChoice::Mssql,
+                                "SQL Server",
+                            );
+                            ui.selectable_value(&mut form.engine, EngineChoice::Sqlite, "SQLite");
                         });
                         ui.end_row();
-                        if form.engine == EngineChoice::Mssql {
-                            let l = ui.label("Instance");
-                            ui.add(
+                        let l = ui.label("Name");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut form.name)
+                                .hint_text("defaults to host/database")
+                                .desired_width(320.0),
+                        )
+                        .labelled_by(l.id);
+                        ui.end_row();
+
+                        match form.engine {
+                            EngineChoice::Postgres | EngineChoice::Mssql => {
+                                let host = ui.label("Host");
+                                ui.horizontal(|ui| {
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut form.host)
+                                            .desired_width(230.0),
+                                    )
+                                    .labelled_by(host.id);
+                                    let l = ui.label("Port");
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut form.port)
+                                            .desired_width(60.0),
+                                    )
+                                    .labelled_by(l.id);
+                                });
+                                ui.end_row();
+                                if form.engine == EngineChoice::Mssql {
+                                    let l = ui.label("Instance");
+                                    ui.add(
                                 egui::TextEdit::singleline(&mut form.ms_instance)
                                     .hint_text("optional, e.g. SQLEXPRESS")
                                     .desired_width(320.0),
@@ -602,24 +816,27 @@ fn connection_form(ctx: &egui::Context, app: &mut SqailApp) {
                                  connect directly. The host field also accepts SERVER\\INSTANCE \
                                  and SERVER,PORT.",
                             );
-                            ui.end_row();
-                        }
-                        let l = ui.label("Database");
-                        ui.horizontal(|ui| {
-                            ui.add(
-                                egui::TextEdit::singleline(&mut form.database).desired_width(290.0),
-                            )
-                            .labelled_by(l.id);
-                            ui.menu_button("⏷", |ui| {
-                                want_dbs = database_menu(ui, form);
-                            })
-                            .response
-                            .on_hover_text("Choose from the databases this login can access");
-                        });
-                        ui.end_row();
-                        if form.engine == EngineChoice::Mssql {
-                            let l = ui.label("Authentication");
-                            egui::ComboBox::from_id_salt("ms_auth")
+                                    ui.end_row();
+                                }
+                                let l = ui.label("Database");
+                                ui.horizontal(|ui| {
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut form.database)
+                                            .desired_width(290.0),
+                                    )
+                                    .labelled_by(l.id);
+                                    ui.menu_button("⏷", |ui| {
+                                        want_dbs = database_menu(ui, form);
+                                    })
+                                    .response
+                                    .on_hover_text(
+                                        "Choose from the databases this login can access",
+                                    );
+                                });
+                                ui.end_row();
+                                if form.engine == EngineChoice::Mssql {
+                                    let l = ui.label("Authentication");
+                                    egui::ComboBox::from_id_salt("ms_auth")
                                 .selected_text(form.ms_auth.label())
                                 .width(320.0)
                                 .show_ui(ui, |ui| {
@@ -634,164 +851,183 @@ fn connection_form(ctx: &egui::Context, app: &mut SqailApp) {
                                      happens on the service host; managed identity only works when \
                                      sqail-service runs on Azure.",
                                 );
-                            ui.end_row();
-                            let tenant = match form.ms_auth {
-                                MsAuthChoice::EntraServicePrincipal => Some("required"),
-                                MsAuthChoice::EntraPassword => Some("optional, e.g. contoso.com"),
-                                _ => None,
-                            };
-                            if let Some(hint) = tenant {
-                                let l = ui.label("Tenant");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut form.ms_tenant)
-                                        .hint_text(hint)
-                                        .desired_width(320.0),
-                                )
-                                .labelled_by(l.id)
-                                .on_hover_text("Directory (tenant) ID or domain");
-                                ui.end_row();
-                            }
-                            let client_id = match form.ms_auth {
-                                MsAuthChoice::EntraServicePrincipal => Some("application ID"),
-                                MsAuthChoice::EntraManagedIdentity => {
-                                    Some("optional: a user-assigned identity")
+                                    ui.end_row();
+                                    let tenant = match form.ms_auth {
+                                        MsAuthChoice::EntraServicePrincipal => Some("required"),
+                                        MsAuthChoice::EntraPassword => {
+                                            Some("optional, e.g. contoso.com")
+                                        }
+                                        _ => None,
+                                    };
+                                    if let Some(hint) = tenant {
+                                        let l = ui.label("Tenant");
+                                        ui.add(
+                                            egui::TextEdit::singleline(&mut form.ms_tenant)
+                                                .hint_text(hint)
+                                                .desired_width(320.0),
+                                        )
+                                        .labelled_by(l.id)
+                                        .on_hover_text("Directory (tenant) ID or domain");
+                                        ui.end_row();
+                                    }
+                                    let client_id = match form.ms_auth {
+                                        MsAuthChoice::EntraServicePrincipal => {
+                                            Some("application ID")
+                                        }
+                                        MsAuthChoice::EntraManagedIdentity => {
+                                            Some("optional: a user-assigned identity")
+                                        }
+                                        _ => None,
+                                    };
+                                    if let Some(hint) = client_id {
+                                        let l = ui.label("Client ID");
+                                        ui.add(
+                                            egui::TextEdit::singleline(&mut form.ms_client_id)
+                                                .hint_text(hint)
+                                                .desired_width(320.0),
+                                        )
+                                        .labelled_by(l.id);
+                                        ui.end_row();
+                                    }
                                 }
-                                _ => None,
-                            };
-                            if let Some(hint) = client_id {
-                                let l = ui.label("Client ID");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut form.ms_client_id)
-                                        .hint_text(hint)
-                                        .desired_width(320.0),
-                                )
-                                .labelled_by(l.id);
-                                ui.end_row();
-                            }
-                        }
-                        let ms = (form.engine == EngineChoice::Mssql).then_some(form.ms_auth);
-                        if ms.is_none_or(MsAuthChoice::uses_user) {
-                            let l = ui.label("User");
-                            let hint = if ms == Some(MsAuthChoice::EntraPassword) {
-                                "user@contoso.com"
-                            } else {
-                                ""
-                            };
-                            ui.add(
-                                egui::TextEdit::singleline(&mut form.user)
-                                    .hint_text(hint)
-                                    .desired_width(320.0),
-                            )
-                            .labelled_by(l.id);
-                            ui.end_row();
-                        }
-                        if ms.is_none_or(MsAuthChoice::uses_password) {
-                            let pw_label =
-                                ui.label(if ms == Some(MsAuthChoice::EntraServicePrincipal) {
-                                    "Client secret"
-                                } else {
-                                    "Password"
-                                });
-                            let hint = if form.has_password { "unchanged" } else { "" };
-                            ui.add(
-                                egui::TextEdit::singleline(&mut form.password)
-                                    .password(true)
-                                    .hint_text(hint)
-                                    .desired_width(320.0),
-                            )
-                            .labelled_by(pw_label.id);
-                            ui.end_row();
-                        }
-                        if form.engine == EngineChoice::Postgres {
-                            ui.label("TLS");
-                            egui::ComboBox::from_id_salt("pg_ssl")
-                                .selected_text(format!("{:?}", form.pg_ssl))
+                                let ms =
+                                    (form.engine == EngineChoice::Mssql).then_some(form.ms_auth);
+                                if ms.is_none_or(MsAuthChoice::uses_user) {
+                                    let l = ui.label("User");
+                                    let hint = if ms == Some(MsAuthChoice::EntraPassword) {
+                                        "user@contoso.com"
+                                    } else {
+                                        ""
+                                    };
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut form.user)
+                                            .hint_text(hint)
+                                            .desired_width(320.0),
+                                    )
+                                    .labelled_by(l.id);
+                                    ui.end_row();
+                                }
+                                if ms.is_none_or(MsAuthChoice::uses_password) {
+                                    let pw_label = ui.label(
+                                        if ms == Some(MsAuthChoice::EntraServicePrincipal) {
+                                            "Client secret"
+                                        } else {
+                                            "Password"
+                                        },
+                                    );
+                                    let hint = if form.has_password { "unchanged" } else { "" };
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut form.password)
+                                            .password(true)
+                                            .hint_text(hint)
+                                            .desired_width(320.0),
+                                    )
+                                    .labelled_by(pw_label.id);
+                                    ui.end_row();
+                                }
+                                if form.engine == EngineChoice::Postgres {
+                                    ui.label("SSL mode");
+                                    egui::ComboBox::from_id_salt("pg_ssl")
+                                .selected_text(ssl_label(form.pg_ssl))
                                 .show_ui(ui, |ui| {
                                     for m in [
                                         PgSslMode::Disable,
                                         PgSslMode::Prefer,
                                         PgSslMode::Require,
+                                        PgSslMode::VerifyCa,
                                         PgSslMode::VerifyFull,
                                     ] {
-                                        ui.selectable_value(&mut form.pg_ssl, m, format!("{m:?}"));
+                                        ui.selectable_value(&mut form.pg_ssl, m, ssl_label(m));
                                     }
-                                });
-                            ui.end_row();
-                        } else {
-                            ui.label("Encryption");
-                            ui.horizontal(|ui| {
-                                egui::ComboBox::from_id_salt("ms_enc")
-                                    .selected_text(format!("{:?}", form.ms_encrypt))
-                                    .show_ui(ui, |ui| {
-                                        for m in [
-                                            MssqlEncrypt::Required,
-                                            MssqlEncrypt::On,
-                                            MssqlEncrypt::Off,
-                                        ] {
-                                            ui.selectable_value(
-                                                &mut form.ms_encrypt,
-                                                m,
-                                                format!("{m:?}"),
-                                            );
-                                        }
+                                })
+                                .response
+                                .on_hover_text(
+                                    "prefer tries TLS without checking the certificate. require \
+                                     demands TLS. verify-ca checks the CA. verify-full also checks \
+                                     the host name.",
+                                );
+                                    ui.end_row();
+                                    cert_row(ui, form, PgCertKind::Root);
+                                    cert_row(ui, form, PgCertKind::Client);
+                                    cert_row(ui, form, PgCertKind::Key);
+                                } else {
+                                    ui.label("Encryption");
+                                    ui.horizontal(|ui| {
+                                        egui::ComboBox::from_id_salt("ms_enc")
+                                            .selected_text(format!("{:?}", form.ms_encrypt))
+                                            .show_ui(ui, |ui| {
+                                                for m in [
+                                                    MssqlEncrypt::Required,
+                                                    MssqlEncrypt::On,
+                                                    MssqlEncrypt::Off,
+                                                ] {
+                                                    ui.selectable_value(
+                                                        &mut form.ms_encrypt,
+                                                        m,
+                                                        format!("{m:?}"),
+                                                    );
+                                                }
+                                            });
+                                        ui.checkbox(&mut form.ms_trust, "Trust server certificate");
                                     });
-                                ui.checkbox(&mut form.ms_trust, "Trust server certificate");
-                            });
-                            ui.end_row();
+                                    ui.end_row();
+                                }
+                            }
+                            EngineChoice::Sqlite => {
+                                let l = ui.label("Database file");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut form.sqlite_path)
+                                        .hint_text("absolute path on the service host")
+                                        .desired_width(320.0),
+                                )
+                                .labelled_by(l.id);
+                                ui.end_row();
+                                ui.label("");
+                                ui.checkbox(
+                                    &mut form.sqlite_create,
+                                    "Create the file if it does not exist",
+                                );
+                                ui.end_row();
+                            }
                         }
-                    }
-                    EngineChoice::Sqlite => {
-                        let l = ui.label("Database file");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut form.sqlite_path)
-                                .hint_text("absolute path on the service host")
-                                .desired_width(320.0),
-                        )
-                        .labelled_by(l.id);
+
+                        ui.label("Environment");
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut form.environment)
+                                    .hint_text("dev, test, prod…")
+                                    .desired_width(120.0),
+                            );
+                            let l = ui.label("Folder");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut form.folder).desired_width(120.0),
+                            )
+                            .labelled_by(l.id);
+                        });
+                        ui.end_row();
+                        ui.label("Colour");
+                        ui.horizontal(|ui| {
+                            if ui.selectable_label(form.color.is_none(), "none").clicked() {
+                                form.color = None;
+                            }
+                            for (name, hex) in theme::CONNECTION_COLORS {
+                                let c = theme::parse_hex(hex).unwrap_or(Color32::GRAY);
+                                let selected = form.color.as_deref() == Some(*hex);
+                                let text = RichText::new("●").color(c).size(18.0);
+                                if ui
+                                    .add(egui::Button::new(text).frame(selected))
+                                    .on_hover_text(*name)
+                                    .clicked()
+                                {
+                                    form.color = Some(hex.to_string());
+                                }
+                            }
+                        });
                         ui.end_row();
                         ui.label("");
-                        ui.checkbox(
-                            &mut form.sqlite_create,
-                            "Create the file if it does not exist",
-                        );
+                        ui.checkbox(&mut form.read_only, "Read-only");
                         ui.end_row();
-                    }
-                }
-
-                ui.label("Environment");
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut form.environment)
-                            .hint_text("dev, test, prod…")
-                            .desired_width(120.0),
-                    );
-                    let l = ui.label("Folder");
-                    ui.add(egui::TextEdit::singleline(&mut form.folder).desired_width(120.0))
-                        .labelled_by(l.id);
-                });
-                ui.end_row();
-                ui.label("Colour");
-                ui.horizontal(|ui| {
-                    if ui.selectable_label(form.color.is_none(), "none").clicked() {
-                        form.color = None;
-                    }
-                    for (name, hex) in theme::CONNECTION_COLORS {
-                        let c = theme::parse_hex(hex).unwrap_or(Color32::GRAY);
-                        let selected = form.color.as_deref() == Some(*hex);
-                        let text = RichText::new("●").color(c).size(18.0);
-                        if ui
-                            .add(egui::Button::new(text).frame(selected))
-                            .on_hover_text(*name)
-                            .clicked()
-                        {
-                            form.color = Some(hex.to_string());
-                        }
-                    }
-                });
-                ui.end_row();
-                ui.label("");
-                ui.checkbox(&mut form.read_only, "Read-only");
-                ui.end_row();
+                    });
             });
 
         ui.add_space(6.0);
@@ -895,15 +1131,13 @@ fn connection_form(ctx: &egui::Context, app: &mut SqailApp) {
                 form.testing = true;
                 form.test = None;
                 form.error = None;
-                // Editing without retyping the password: test the stored profile.
-                let saved_id = form
-                    .editing
-                    .filter(|_| form.password.is_empty() && form.has_password);
+                // Omitted password or client key: the service still has them.
+                let secret_from = form.editing.filter(|_| {
+                    (input.password.is_none() && form.has_password)
+                        || (input.ssl_client_key.is_none() && form.has_ssl_client_key)
+                });
                 app.worker.run(async move {
-                    let r = match saved_id {
-                        Some(id) => client.test_connection(id).await,
-                        None => client.test_unsaved(&input).await,
-                    };
+                    let r = client.test_unsaved(&input, secret_from).await;
                     Msg::ConnTested(r.map_err(|e| e.to_string()))
                 });
             }
@@ -921,9 +1155,37 @@ fn connection_form(ctx: &egui::Context, app: &mut SqailApp) {
             }
         }
     }
+    let kind = form.pick.take();
     if close {
         app.dialog = Dialog::None;
+        return;
     }
+    let Some(kind) = kind else {
+        return;
+    };
+    app.worker.run(async move {
+        let picked = rfd::AsyncFileDialog::new()
+            .add_filter("PEM", &["pem", "crt", "cer", "key"])
+            .add_filter("All files", &["*"])
+            .pick_file()
+            .await;
+        let result = match picked {
+            None => None,
+            Some(file) => {
+                let name = file.file_name();
+                let path = file.path().to_path_buf();
+                Some(match std::fs::metadata(&path).map(|m| m.len()) {
+                    Ok(len) if len > 64 * 1024 => {
+                        Err("that file is larger than 64 KiB".to_string())
+                    }
+                    _ => std::fs::read_to_string(&path)
+                        .map(|pem| (name, pem))
+                        .map_err(|e| e.to_string()),
+                })
+            }
+        };
+        Msg::ConnCertPicked { kind, result }
+    });
 }
 
 // ---------------------------------------------------------- confirmations --

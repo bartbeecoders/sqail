@@ -51,6 +51,7 @@ fn fixture() -> Fixture {
             name: name.into(),
             params,
             password: Some(pw.into()),
+            ssl_client_key: None,
             read_only: false,
             color: None,
             environment: None,
@@ -67,6 +68,8 @@ fn fixture() -> Fixture {
             database: "sqail_test".into(),
             user: "sqail".into(),
             ssl_mode: PgSslMode::Disable,
+            ssl_root_cert: None,
+            ssl_client_cert: None,
         }),
         "sqail_dev_pw",
     );

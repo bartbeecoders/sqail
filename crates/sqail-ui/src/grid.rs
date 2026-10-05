@@ -5,7 +5,10 @@ use egui_extras::{Column, TableBuilder};
 use sqail_client::proto::LogicalType;
 
 use crate::editing::EditState;
-use crate::results::{Pane, ResultSet, Run, Selection, Severity, fmt_duration, selection_tsv};
+use crate::results::{
+    COPY_ROW_LIMIT, GridHit, Pane, ResultSet, Run, Selection, Severity, fmt_duration,
+    selection_tsv_capped,
+};
 
 #[derive(Default)]
 pub struct GridOutput {
@@ -19,6 +22,8 @@ pub struct GridOutput {
     pub start_edit: bool,
     /// Open the review dialog for pending edits.
     pub review_edits: bool,
+    /// Shown when a copy was cut short.
+    pub copy_note: Option<String>,
 }
 
 /// Longest text we lay out in a cell; the viewer shows the rest.
@@ -444,6 +449,8 @@ enum CellAction {
     Copy,
     CopyHeaders,
     CopyRow,
+    CopyColumn,
+    CopyTable,
     View,
     SetNull,
     SetDefault,
@@ -526,21 +533,40 @@ fn grid_ui(
     let total_rows = rs.len() + edit.as_ref().map_or(0, |e| e.inserted.len());
     let num_w = (total_rows.max(1).to_string().len() as f32) * char_w + 16.0;
 
-    // Keyboard copy when the grid has the last click (not while typing in a cell).
-    let grid_id = ui.id().with(("grid", salt));
-    let grid_active = ui
-        .ctx()
-        .memory(|m| m.data.get_temp::<bool>(grid_id).unwrap_or(false));
+    // Keyboard copy when the grid has focus (not while typing in a cell).
+    // Clicking a cell, row, column or the corner requests this focus, so
+    // Ctrl+C is not taken by the SQL editor.
+    let grid_focus = ui.id().with(("grid-focus", salt));
+    // A real widget, so egui keeps the focus (it drops an id no widget
+    // registered) and AccessKit has a node for it. It ignores clicks and
+    // sits behind the cells, which are added afterwards.
+    ui.interact(ui.max_rect(), grid_focus, Sense::focusable_noninteractive())
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "Result grid"));
+    let grid_active = ui.memory(|m| m.has_focus(grid_focus));
     let typing = edit.as_ref().is_some_and(|e| e.editing.is_some());
-    if grid_active
-        && !typing
-        && let Some(sel) = selection.as_ref()
-        && ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)))
-    {
-        ui.ctx().copy_text(selection_tsv(rs, sel, false));
+    if grid_active && !typing {
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::A)) {
+            *selection = Some(Selection::click(
+                None,
+                GridHit::Table,
+                false,
+                total_rows,
+                rs.columns.len(),
+            ));
+        }
+        if let Some(sel) = selection.as_ref()
+            && ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)))
+        {
+            // Ctrl+Shift+C arrives as a copy event with Shift still held.
+            let headers = ui.input(|i| i.modifiers.shift);
+            copy_selection(ui, rs, sel, headers, out);
+        }
     }
 
-    let mut clicked_header = None;
+    let mut clicked_sort = None;
+    let mut clicked_col: Option<(usize, bool)> = None;
+    let mut clicked_row: Option<(usize, bool)> = None;
+    let mut select_all = false;
     let mut clicked_cell: Option<(usize, usize, bool)> = None;
     let mut dbl_cell = None;
     // F2 edits the selected cell, like a spreadsheet.
@@ -585,31 +611,81 @@ fn grid_ui(
             table
                 .header(row_h, |mut header| {
                     header.col(|ui| {
-                        ui.label(RichText::new("#").weak());
+                        if selection.as_ref().is_some_and(|s| {
+                            covers_rows(s, total_rows) && covers_cols(s, rs.columns.len())
+                        }) {
+                            ui.painter().rect_filled(ui.max_rect(), 0.0, sel_fill);
+                        }
+                        let resp = ui
+                            .add_sized(
+                                ui.available_size(),
+                                egui::Label::new(RichText::new("#").weak())
+                                    .sense(Sense::CLICK)
+                                    .selectable(false),
+                            )
+                            .on_hover_text("Select the whole table (Ctrl+A)");
+                        if resp.clicked() {
+                            select_all = true;
+                        }
                     });
                     for (c, col) in rs.columns.iter().enumerate() {
                         header.col(|ui| {
-                            let arrow = match rs.sort {
-                                Some((sc, true)) if sc == c => " ▲",
-                                Some((sc, false)) if sc == c => " ▼",
-                                _ => "",
-                            };
-                            let read_only = edit.as_ref().is_some_and(|e| !e.editable(c));
-                            let mut text = RichText::new(format!("{}{arrow}", col.name)).strong();
-                            if read_only {
-                                text = text.weak();
+                            if selection
+                                .as_ref()
+                                .is_some_and(|s| covers_rows(s, total_rows) && s.cols().contains(&c))
+                            {
+                                ui.painter().rect_filled(ui.max_rect(), 0.0, sel_fill);
                             }
-                            let resp = ui
-                                .add(egui::Label::new(text).sense(Sense::click()).truncate())
-                                .on_hover_text(format!(
-                                    "{} · {}{}\nClick to sort",
-                                    col.name,
-                                    col.type_name,
-                                    if read_only { " · read-only (not a table column)" } else { "" }
-                                ));
-                            if resp.clicked() {
-                                clicked_header = Some(c);
-                            }
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                let (glyph, hot) = match rs.sort {
+                                    Some((sc, true)) if sc == c => ("▲", true),
+                                    Some((sc, false)) if sc == c => ("▼", true),
+                                    _ => ("▲▼", false),
+                                };
+                                let mut arrow = RichText::new(glyph);
+                                if !hot {
+                                    arrow = arrow.weak();
+                                }
+                                let sort = ui
+                                    .add_enabled(
+                                        rs.complete,
+                                        egui::Button::new(arrow).frame(false),
+                                    )
+                                    .on_hover_text(if rs.complete {
+                                        "Sort"
+                                    } else {
+                                        "Sort once the result has finished loading"
+                                    });
+                                if sort.clicked() {
+                                    clicked_sort = Some(c);
+                                }
+                                let read_only = edit.as_ref().is_some_and(|e| !e.editable(c));
+                                let mut name = RichText::new(col.name.as_str()).strong();
+                                if read_only {
+                                    name = name.weak();
+                                }
+                                let resp = ui
+                                    .add_sized(
+                                        ui.available_size(),
+                                        egui::Label::new(name)
+                                            .sense(Sense::CLICK)
+                                            .truncate()
+                                            .selectable(false),
+                                    )
+                                    .on_hover_text(format!(
+                                        "{} · {}{}\nClick to select this column. Shift+click extends. The arrow sorts.",
+                                        col.name,
+                                        col.type_name,
+                                        if read_only {
+                                            " · read-only (not a table column)"
+                                        } else {
+                                            ""
+                                        }
+                                    ));
+                                if resp.clicked() {
+                                    clicked_col = Some((c, ui.input(|i| i.modifiers.shift)));
+                                }
+                            });
                         });
                     }
                 })
@@ -619,10 +695,38 @@ fn grid_ui(
                         let rref = row_ref(rs, pos);
                         let deleted = matches!((rref, edit.as_deref()), (RowRef::Existing(r), Some(e)) if e.deleted.contains(&r));
                         let is_new = matches!(rref, RowRef::New(_));
-                        row.col(|ui| {
-                            let label = if is_new { "+".to_string() } else { (pos + 1).to_string() };
-                            ui.label(RichText::new(label).weak().monospace());
+                        let mut row_shift = None;
+                        let (_, row_num) = row.col(|ui| {
+                            if selection.as_ref().is_some_and(|s| {
+                                covers_cols(s, rs.columns.len()) && s.rows().contains(&pos)
+                            }) {
+                                ui.painter().rect_filled(ui.max_rect(), 0.0, sel_fill);
+                            }
+                            let label = if is_new {
+                                "+".to_string()
+                            } else {
+                                (pos + 1).to_string()
+                            };
+                            // The number fills the gutter and takes the click. A plain
+                            // label is selectable, so it would swallow the click instead.
+                            let resp = ui
+                                .add_sized(
+                                    ui.available_size(),
+                                    egui::Label::new(RichText::new(label).weak().monospace())
+                                        .sense(Sense::CLICK)
+                                        .selectable(false),
+                                )
+                                .on_hover_text("Select this row. Shift+click extends.");
+                            if resp.clicked() {
+                                row_shift = Some(resp.ctx.input(|i| i.modifiers.shift));
+                            }
                         });
+                        if row_num.clicked() {
+                            row_shift = Some(row_num.ctx.input(|i| i.modifiers.shift));
+                        }
+                        if let Some(shift) = row_shift {
+                            clicked_row = Some((pos, shift));
+                        }
                         for c in 0..rs.columns.len() {
                             let logical = rs.columns[c].logical;
                             let selected = selection.as_ref().is_some_and(|s| s.contains(pos, c));
@@ -695,6 +799,8 @@ fn grid_ui(
                                 item(ui, "Copy", CellAction::Copy);
                                 item(ui, "Copy with headers", CellAction::CopyHeaders);
                                 item(ui, "Copy row", CellAction::CopyRow);
+                                item(ui, "Copy column", CellAction::CopyColumn);
+                                item(ui, "Copy table", CellAction::CopyTable);
                                 item(ui, "View value", CellAction::View);
                                 if in_edit {
                                     ui.separator();
@@ -716,24 +822,34 @@ fn grid_ui(
                 });
     });
 
-    if let Some(c) = clicked_header
+    if let Some(c) = clicked_sort
         && rs.complete
     {
         rs.toggle_sort(c);
         *selection = None;
     }
-    if let Some((r, c, shift)) = clicked_cell {
-        *selection = Some(match (selection.as_ref(), shift) {
-            (Some(s), true) => Selection {
-                anchor: s.anchor,
-                focus: (r, c),
-            },
-            _ => Selection {
-                anchor: (r, c),
-                focus: (r, c),
-            },
-        });
-        ui.ctx().memory_mut(|m| m.data.insert_temp(grid_id, true));
+    let n_cols = rs.columns.len();
+    let hit = if select_all {
+        Some((GridHit::Table, false))
+    } else if let Some((r, shift)) = clicked_row {
+        Some((GridHit::Row(r), shift))
+    } else if let Some((c, shift)) = clicked_col {
+        Some((GridHit::Column(c), shift))
+    } else {
+        clicked_cell.map(|(r, c, shift)| (GridHit::Cell(r, c), shift))
+    };
+    if let Some((hit, shift)) = hit {
+        *selection = Some(Selection::click(
+            selection.take(),
+            hit,
+            shift,
+            total_rows,
+            n_cols,
+        ));
+        // A double-click starts the cell editor, which takes focus next frame.
+        if dbl_cell.is_none() {
+            ui.memory_mut(|m| m.request_focus(grid_focus));
+        }
     }
     let view = |rs: &ResultSet, edit: Option<&EditState>, r: usize, c: usize| {
         let col = &rs.columns[c];
@@ -781,15 +897,51 @@ fn grid_ui(
             },
         };
         *selection = Some(sel);
+        ui.memory_mut(|m| m.request_focus(grid_focus));
         match action {
-            CellAction::Copy => ui.ctx().copy_text(selection_tsv(rs, &sel, false)),
-            CellAction::CopyHeaders => ui.ctx().copy_text(selection_tsv(rs, &sel, true)),
+            CellAction::Copy => copy_selection(ui, rs, &sel, false, out),
+            CellAction::CopyHeaders => copy_selection(ui, rs, &sel, true, out),
             CellAction::CopyRow => {
-                let row_sel = Selection {
-                    anchor: (sel.rows().start().to_owned(), 0),
-                    focus: (*sel.rows().end(), rs.columns.len() - 1),
-                };
-                ui.ctx().copy_text(selection_tsv(rs, &row_sel, false));
+                let row_sel = Selection::click(
+                    None,
+                    GridHit::Row(*sel.rows().start()),
+                    false,
+                    total_rows,
+                    rs.columns.len(),
+                );
+                let row_sel = Selection::click(
+                    Some(row_sel),
+                    GridHit::Row(*sel.rows().end()),
+                    true,
+                    total_rows,
+                    rs.columns.len(),
+                );
+                copy_selection(ui, rs, &row_sel, false, out);
+                *selection = Some(row_sel);
+            }
+            CellAction::CopyColumn => {
+                let col_sel = Selection::click(
+                    None,
+                    GridHit::Column(*sel.cols().start()),
+                    false,
+                    total_rows,
+                    rs.columns.len(),
+                );
+                let col_sel = Selection::click(
+                    Some(col_sel),
+                    GridHit::Column(*sel.cols().end()),
+                    true,
+                    total_rows,
+                    rs.columns.len(),
+                );
+                copy_selection(ui, rs, &col_sel, false, out);
+                *selection = Some(col_sel);
+            }
+            CellAction::CopyTable => {
+                let all =
+                    Selection::click(None, GridHit::Table, false, total_rows, rs.columns.len());
+                copy_selection(ui, rs, &all, true, out);
+                *selection = Some(all);
             }
             CellAction::View => out.view = Some(view(rs, edit.as_deref(), r, c)),
             _ => {
@@ -799,9 +951,39 @@ fn grid_ui(
             }
         }
     }
-    if ui.input(|i| i.pointer.any_click()) && clicked_cell.is_none() && ctx_action.is_none() {
+    let picked = hit.is_some() || ctx_action.is_some();
+    if ui.input(|i| i.pointer.any_click()) && !picked {
         // A click elsewhere hands keyboard copy back to the editor.
-        ui.ctx().memory_mut(|m| m.data.insert_temp(grid_id, false));
+        ui.memory_mut(|m| {
+            if m.has_focus(grid_focus) {
+                m.surrender_focus(grid_focus);
+            }
+        });
+    }
+}
+
+fn covers_rows(sel: &Selection, n_rows: usize) -> bool {
+    n_rows == 0 || (*sel.rows().start() == 0 && *sel.rows().end() + 1 >= n_rows)
+}
+
+fn covers_cols(sel: &Selection, n_cols: usize) -> bool {
+    n_cols > 0 && *sel.cols().start() == 0 && *sel.cols().end() + 1 >= n_cols
+}
+
+fn copy_selection(
+    ui: &egui::Ui,
+    rs: &ResultSet,
+    sel: &Selection,
+    headers: bool,
+    out: &mut GridOutput,
+) {
+    let (text, truncated) = selection_tsv_capped(rs, sel, headers, COPY_ROW_LIMIT);
+    ui.ctx().copy_text(text);
+    if truncated {
+        out.copy_note = Some(format!(
+            "Copied the first {} rows. Export the result for the rest.",
+            fmt_count(COPY_ROW_LIMIT)
+        ));
     }
 }
 
@@ -905,5 +1087,127 @@ mod tests {
             run,
         );
         h.get_by_label("Result 1 (2+)");
+    }
+
+    fn clipboard_text(h: &egui_kittest::Harness<'_, Run>) -> Vec<String> {
+        h.output()
+            .platform_output
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                egui::OutputCommand::CopyText(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Row numbers, column names and the corner select; Ctrl+C copies TSV.
+    #[test]
+    fn rows_columns_and_the_table_copy_to_the_clipboard() {
+        use egui::Modifiers;
+        use egui_kittest::kittest::Queryable;
+        use sqail_client::proto::{Column, LogicalType, QueryEvent};
+
+        let mut run = Run::new(1, "q".into());
+        run.apply(QueryEvent::ResultStart {
+            index: 0,
+            columns: vec![
+                Column {
+                    name: "alpha".into(),
+                    type_name: "text".into(),
+                    logical: LogicalType::Text,
+                },
+                Column {
+                    name: "beta".into(),
+                    type_name: "text".into(),
+                    logical: LogicalType::Text,
+                },
+            ],
+        });
+        // Cell text must not be "1" or "2": those are the row-number labels.
+        run.apply(QueryEvent::Rows {
+            index: 0,
+            rows: vec![vec!["x".into(), "y".into()], vec!["p".into(), "q".into()]],
+        });
+        run.apply(QueryEvent::ResultEnd {
+            index: 0,
+            row_count: 2,
+            truncated: false,
+        });
+        run.apply(QueryEvent::Done {
+            elapsed_ms: 1,
+            cancelled: false,
+            in_transaction: None,
+        });
+
+        let mut h = egui_kittest::Harness::builder()
+            .with_size([900.0, 500.0])
+            .build_ui_state(
+                |ui, run: &mut Run| {
+                    results_ui(ui, run, Err("test".into()));
+                },
+                run,
+            );
+
+        h.get_by_label("1").click();
+        h.step();
+        let sel = h.state().selection.expect("row selected");
+        assert_eq!(sel.rows(), 0..=0);
+        assert_eq!(sel.cols(), 0..=1);
+        assert!(h.state().results[0].sort.is_none());
+
+        h.get_by_label("2").click_modifiers(Modifiers::SHIFT);
+        h.step();
+        let sel = h.state().selection.expect("rows selected");
+        assert_eq!(sel.rows(), 0..=1);
+        assert_eq!(sel.cols(), 0..=1);
+
+        h.get_by_label("alpha").click();
+        h.step();
+        let sel = h.state().selection.expect("column selected");
+        assert_eq!(sel.rows(), 0..=1);
+        assert_eq!(sel.cols(), 0..=0);
+        assert!(h.state().results[0].sort.is_none());
+
+        h.get_by_label("#").click();
+        h.step();
+        let sel = h.state().selection.expect("table selected");
+        assert_eq!(sel.rows(), 0..=1);
+        assert_eq!(sel.cols(), 0..=1);
+
+        // egui_kittest does not turn Ctrl+C into Event::Copy; the app does.
+        h.event(egui::Event::Copy);
+        h.step();
+        assert_eq!(clipboard_text(&h), vec!["x\ty\np\tq\n".to_string()]);
+        // Focus has to survive the copy, or a second Ctrl+C copies nothing.
+        h.event(egui::Event::Copy);
+        h.step();
+        assert_eq!(clipboard_text(&h), vec!["x\ty\np\tq\n".to_string()]);
+
+        h.event(egui::Event::ModifiersChanged(Modifiers::SHIFT));
+        h.step();
+        h.event(egui::Event::Copy);
+        h.step();
+        assert_eq!(
+            clipboard_text(&h),
+            vec!["alpha\tbeta\nx\ty\np\tq\n".to_string()]
+        );
+        h.event(egui::Event::ModifiersChanged(Modifiers::default()));
+        h.step();
+
+        // The arrow sorts and leaves the selection clear. The name does not.
+        h.get_all_by_label("▲▼").next().expect("sort").click();
+        h.step();
+        assert_eq!(h.state().results[0].sort, Some((0, true)));
+        assert!(h.state().selection.is_none());
+
+        // A row click gives the grid keyboard focus, so Ctrl+A selects the table.
+        h.get_by_label("1").click();
+        h.step();
+        h.key_press_modifiers(Modifiers::COMMAND, egui::Key::A);
+        h.step();
+        let sel = h.state().selection.expect("ctrl+a");
+        assert_eq!(sel.rows(), 0..=1);
+        assert_eq!(sel.cols(), 0..=1);
     }
 }

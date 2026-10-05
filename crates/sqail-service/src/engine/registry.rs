@@ -17,13 +17,20 @@ use super::{Driver, Pool, Result};
 pub struct DriverSpec<'a> {
     pub params: &'a ConnectionParams,
     pub password: Option<&'a str>,
+    /// PEM private key for a PostgreSQL client certificate.
+    pub ssl_client_key: Option<&'a str>,
     pub read_only: bool,
     pub sqlite_dirs: &'a [PathBuf],
 }
 
 pub fn build_driver(spec: &DriverSpec<'_>) -> Result<Arc<dyn Driver>> {
     Ok(match spec.params {
-        ConnectionParams::Postgres(p) => Arc::new(PgDriver::new(p, spec.password, spec.read_only)),
+        ConnectionParams::Postgres(p) => Arc::new(PgDriver::new(
+            p,
+            spec.password,
+            spec.ssl_client_key,
+            spec.read_only,
+        )?),
         ConnectionParams::Mssql(p) => Arc::new(MssqlDriver::new(p, spec.password, spec.read_only)?),
         ConnectionParams::Sqlite(p) => {
             Arc::new(SqliteDriver::new(p, spec.read_only, spec.sqlite_dirs)?)

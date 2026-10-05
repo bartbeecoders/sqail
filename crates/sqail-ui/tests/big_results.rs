@@ -79,6 +79,7 @@ fn mssql_million_rows() {
             trust_server_certificate: true,
         }),
         password: Some("Sqail2_dev!Passw0rd".into()),
+        ssl_client_key: None,
         read_only: false,
         color: None,
         environment: None,

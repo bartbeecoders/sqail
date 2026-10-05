@@ -53,6 +53,7 @@ impl Svc {
                 name: name.into(),
                 params,
                 password: password.map(String::from),
+                ssl_client_key: None,
                 read_only: false,
                 color: None,
                 environment: None,
@@ -217,6 +218,8 @@ fn csv_round_trip_on_every_engine() {
             database: "sqail_test".into(),
             user: "sqail".into(),
             ssl_mode: PgSslMode::Disable,
+            ssl_root_cert: None,
+            ssl_client_cert: None,
         }),
         Some("sqail_dev_pw"),
     );
@@ -287,6 +290,8 @@ fn million_row_export_streams_with_flat_memory() {
             database: "sqail_test".into(),
             user: "sqail".into(),
             ssl_mode: PgSslMode::Disable,
+            ssl_root_cert: None,
+            ssl_client_cert: None,
         }),
         Some("sqail_dev_pw"),
     );

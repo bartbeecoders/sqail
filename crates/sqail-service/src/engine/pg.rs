@@ -31,7 +31,12 @@ pub struct PgDriver {
 }
 
 impl PgDriver {
-    pub fn new(p: &PostgresParams, password: Option<&str>, read_only: bool) -> Self {
+    pub fn new(
+        p: &PostgresParams,
+        password: Option<&str>,
+        ssl_client_key: Option<&str>,
+        read_only: bool,
+    ) -> Result<Self> {
         let mut config = tokio_postgres::Config::new();
         config
             .host(&p.host)
@@ -43,22 +48,25 @@ impl PgDriver {
             .ssl_mode(match p.ssl_mode {
                 PgSslMode::Disable => tokio_postgres::config::SslMode::Disable,
                 PgSslMode::Prefer => tokio_postgres::config::SslMode::Prefer,
-                PgSslMode::Require | PgSslMode::VerifyFull => {
+                PgSslMode::Require | PgSslMode::VerifyCa | PgSslMode::VerifyFull => {
                     tokio_postgres::config::SslMode::Require
                 }
             });
         if let Some(pw) = password {
             config.password(pw);
         }
-        let tls = match p.ssl_mode {
-            PgSslMode::VerifyFull => tls_client::verifying(),
-            _ => tls_client::unverified(),
-        };
-        Self {
+        let tls = tls_client::for_postgres(tls_client::PgTls {
+            mode: p.ssl_mode,
+            root_pem: p.ssl_root_cert.as_deref(),
+            client_cert_pem: p.ssl_client_cert.as_deref(),
+            client_key_pem: ssl_client_key,
+        })
+        .map_err(DbError::Invalid)?;
+        Ok(Self {
             config,
             tls: MakeRustlsConnect::new((*tls).clone()),
             read_only,
-        }
+        })
     }
 }
 

@@ -406,6 +406,10 @@
           "has_password": {
             "type": "boolean"
           },
+          "has_ssl_client_key": {
+            "description": "A PostgreSQL client private key is stored. The key itself is never returned.",
+            "type": "boolean"
+          },
           "id": {
             "format": "uuid",
             "type": "string"
@@ -474,6 +478,13 @@
           },
           "read_only": {
             "type": "boolean"
+          },
+          "ssl_client_key": {
+            "description": "Write-only PEM private key for [`PostgresParams::ssl_client_cert`].\nOn update: `None` keeps the stored key, `\"\"` clears it. Unencrypted\nPKCS#8, PKCS#1 or SEC1. PostgreSQL only.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -1002,6 +1013,7 @@
           "disable",
           "prefer",
           "require",
+          "verify-ca",
           "verify-full"
         ],
         "type": "string"
@@ -1124,8 +1136,22 @@
             "minimum": 0,
             "type": "integer"
           },
+          "ssl_client_cert": {
+            "description": "PEM client certificate (leaf first) for mutual TLS. The matching\nprivate key is [`ConnectionInput::ssl_client_key`], which is write-only.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "ssl_mode": {
             "$ref": "#/components/schemas/PgSslMode"
+          },
+          "ssl_root_cert": {
+            "description": "PEM CA certificate, or a bundle, that signed the server certificate.\nUsed only when `ssl_mode` is `verify-ca` or `verify-full`, in place of\nthe operating system's trust store.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "user": {
             "type": "string"
@@ -2060,7 +2086,7 @@
         "operationId": "databases_unsaved",
         "parameters": [
           {
-            "description": "When the body has no `password`, use the one stored with this profile\n(the connection form while editing).",
+            "description": "When the body omits `password` or `ssl_client_key`, use the secret\nstored with this profile (the connection form while editing).",
             "in": "query",
             "name": "secret_from",
             "required": false,
@@ -2115,6 +2141,21 @@
     "/v1/connections/test": {
       "post": {
         "operationId": "test_unsaved",
+        "parameters": [
+          {
+            "description": "When the body omits `password` or `ssl_client_key`, use the secret\nstored with this profile (the connection form while editing).",
+            "in": "query",
+            "name": "secret_from",
+            "required": false,
+            "schema": {
+              "format": "uuid",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -2131,6 +2172,15 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/TestResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
                 }
               }
             }

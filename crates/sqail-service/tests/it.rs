@@ -307,6 +307,234 @@ async fn passwords_are_write_only() {
     assert_eq!(conn.params.engine(), sqail_proto::Engine::Postgres);
 }
 
+const KEY_SENTINEL: &str = "SQAIL-KEY-SENTINEL-DO-NOT-LEAK";
+
+/// A line of the key that cannot also appear in the certificate.
+fn key_marker(pem: &str) -> &str {
+    pem.lines()
+        .filter(|l| !l.starts_with('-') && l.len() > 40)
+        .max_by_key(|l| l.len())
+        .unwrap()
+}
+
+fn client_material() -> (String, String, String) {
+    use rcgen::{
+        BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+    };
+    let ca_key = KeyPair::generate().unwrap();
+    let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+    let issuer = Issuer::from_params(&ca_params, &ca_key);
+    let client_key = KeyPair::generate().unwrap();
+    let mut client_params = CertificateParams::new(vec!["sqail-client".into()]).unwrap();
+    client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    let client_cert = client_params.signed_by(&client_key, &issuer).unwrap();
+    (ca_cert.pem(), client_cert.pem(), client_key.serialize_pem())
+}
+
+fn pg_profile(
+    name: &str,
+    mode: &str,
+    root: Option<&str>,
+    cert: Option<&str>,
+    key: Option<&str>,
+) -> Value {
+    let mut params = json!({
+        "engine": "postgres",
+        "host": "db.invalid",
+        "database": "x",
+        "user": "u",
+        "ssl_mode": mode,
+    });
+    if let Some(root) = root {
+        params["ssl_root_cert"] = json!(root);
+    }
+    if let Some(cert) = cert {
+        params["ssl_client_cert"] = json!(cert);
+    }
+    let mut body = json!({"name": name, "params": params, "password": "hunter2-ssl"});
+    if let Some(key) = key {
+        body["ssl_client_key"] = json!(key);
+    }
+    body
+}
+
+async fn assert_rejected(h: &Harness, body: &Value, detail: &str, secret: &str) {
+    let res = h.post("/v1/connections", body, &h.admin).await;
+    let status = res.status();
+    let text = res.text().await.unwrap();
+    assert_eq!(status, 400, "{text}");
+    assert!(text.contains(detail), "{text}");
+    assert!(!text.contains(secret), "{text}");
+    assert!(
+        text.len() < 4_000,
+        "error response is {} bytes; it may echo a certificate",
+        text.len()
+    );
+}
+
+#[tokio::test]
+async fn pg_ssl_certs_are_stored_and_the_key_is_write_only() {
+    let (ca, cert, key) = client_material();
+    let marker = key_marker(&key).to_string();
+    let h = harness().await;
+
+    let ca_id = h
+        .create_connection(pg_profile("ca", "verify-ca", Some(&ca), None, None))
+        .await;
+    let ca_body = h
+        .get(&format!("/v1/connections/{ca_id}"))
+        .await
+        .text()
+        .await
+        .unwrap();
+    assert!(ca_body.contains("verify-ca"), "{ca_body}");
+    assert!(ca_body.contains("BEGIN CERTIFICATE"), "{ca_body}");
+    assert!(!ca_body.contains("\"ssl_client_key\""));
+    let ca_conn: Connection = serde_json::from_str(&ca_body).unwrap();
+    assert!(!ca_conn.has_ssl_client_key);
+
+    let id = h
+        .create_connection(pg_profile("pg", "require", None, Some(&cert), Some(&key)))
+        .await;
+    let got = h
+        .get(&format!("/v1/connections/{id}"))
+        .await
+        .text()
+        .await
+        .unwrap();
+    assert!(!got.contains(&marker), "{got}");
+    assert!(!got.contains("hunter2-ssl"), "{got}");
+    assert!(!got.contains("\"ssl_client_key\""));
+    assert!(got.contains("ssl_client_cert"));
+    let conn: Connection = serde_json::from_str(&got).unwrap();
+    assert!(conn.has_ssl_client_key);
+    assert!(conn.has_password);
+
+    // Omitting the key on update keeps the stored one.
+    let res = h
+        .http
+        .put(h.url(&format!("/v1/connections/{id}")))
+        .bearer_auth(&h.admin)
+        .json(&pg_profile("pg", "require", None, Some(&cert), None))
+        .send()
+        .await
+        .unwrap();
+    let status = res.status();
+    let text = res.text().await.unwrap();
+    assert_eq!(status, 200, "{text}");
+    assert!(!text.contains(&marker), "{text}");
+    let conn: Connection = serde_json::from_str(&text).unwrap();
+    assert!(conn.has_ssl_client_key);
+
+    let other = rcgen::KeyPair::generate().unwrap().serialize_pem();
+    let other_marker = key_marker(&other).to_string();
+    let res = h
+        .http
+        .put(h.url(&format!("/v1/connections/{id}")))
+        .bearer_auth(&h.admin)
+        .json(&pg_profile(
+            "pg",
+            "require",
+            None,
+            Some(&cert),
+            Some(&other),
+        ))
+        .send()
+        .await
+        .unwrap();
+    let status = res.status();
+    let text = res.text().await.unwrap();
+    assert_eq!(status, 400, "{text}");
+    assert!(!text.contains(&other_marker), "{text}");
+    let still: Connection = h.get_json(&format!("/v1/connections/{id}")).await;
+    assert!(still.has_ssl_client_key);
+
+    let encrypted = format!(
+        "-----BEGIN ENCRYPTED PRIVATE KEY-----\n{KEY_SENTINEL}\n-----END ENCRYPTED PRIVATE KEY-----\n"
+    );
+    assert_rejected(
+        &h,
+        &pg_profile("bad-enc", "require", None, Some(&cert), Some(&encrypted)),
+        "encrypted",
+        KEY_SENTINEL,
+    )
+    .await;
+    assert_rejected(
+        &h,
+        &pg_profile("bad-disable", "disable", None, Some(&cert), Some(&key)),
+        "disable",
+        &marker,
+    )
+    .await;
+    assert_rejected(
+        &h,
+        &pg_profile("bad-root", "require", Some(&ca), None, None),
+        "verify-ca",
+        "BEGIN CERTIFICATE",
+    )
+    .await;
+    assert_rejected(
+        &h,
+        &pg_profile("bad-key", "require", None, None, Some(KEY_SENTINEL)),
+        "a client key needs a client certificate",
+        KEY_SENTINEL,
+    )
+    .await;
+    let mut huge = pg_profile("bad-size", "require", None, None, None);
+    huge["params"]["ssl_client_cert"] = json!("A".repeat(64 * 1024 + 1));
+    assert_rejected(&h, &huge, "larger than 64 KiB", "AAAA").await;
+    assert_rejected(
+        &h,
+        &json!({
+            "name": "lite",
+            "params": {"engine": "sqlite", "path": h.dir.path().join("a.db"), "create": true},
+            "ssl_client_key": KEY_SENTINEL,
+        }),
+        "only for PostgreSQL",
+        KEY_SENTINEL,
+    )
+    .await;
+
+    // The stored key is used when the body omits it, and it is not echoed.
+    let probe = pg_profile("pg", "require", None, Some(&cert), None);
+    let res = h
+        .post(
+            &format!("/v1/connections/test?secret_from={id}"),
+            &probe,
+            &h.admin,
+        )
+        .await;
+    let status = res.status();
+    let text = res.text().await.unwrap();
+    assert_eq!(status, 200, "{text}");
+    assert!(!text.contains(&marker), "{text}");
+    assert!(!text.contains("hunter2-ssl"), "{text}");
+    let result: TestResult = serde_json::from_str(&text).unwrap();
+    assert!(!result.ok, "{text}");
+    let res = h.post("/v1/connections/test", &probe, &h.admin).await;
+    let status = res.status();
+    let text = res.text().await.unwrap();
+    assert_eq!(status, 400, "{text}");
+    assert!(text.contains("private key"), "{text}");
+
+    let res = h
+        .http
+        .put(h.url(&format!("/v1/connections/{id}")))
+        .bearer_auth(&h.admin)
+        .json(&pg_profile("pg", "require", None, None, None))
+        .send()
+        .await
+        .unwrap();
+    let status = res.status();
+    let text = res.text().await.unwrap();
+    assert_eq!(status, 200, "{text}");
+    let conn: Connection = serde_json::from_str(&text).unwrap();
+    assert!(!conn.has_ssl_client_key);
+    assert!(!text.contains("ssl_client_cert"));
+}
+
 #[tokio::test]
 async fn sqlite_outside_allowed_dirs_is_rejected() {
     let h = harness().await;

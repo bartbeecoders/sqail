@@ -337,8 +337,10 @@ Windows), for example `"query.run" = "Ctrl+R"`.
 * **Transactions:** each tab has its own server session, so `BEGIN …
   COMMIT` works across runs. Switch off **Auto-commit** to get an implicit
   transaction, and finish it with **Commit** or **Rollback**.
-* **Results:** click a header to sort; click or Shift+click to select cells,
-  and Ctrl+C copies them as TSV. Double-click a cell to see its full value.
+* **Results:** click a row number, a column name or the # corner to select
+  (Shift+click extends; Ctrl+A selects the table). Ctrl+C copies TSV and
+  Ctrl+Shift+C adds the column names. The ▲▼ on a header sorts. Double-click
+  a cell to see its full value.
 * **Export** to CSV, JSON, Excel or SQL, or re-run the query straight to a
   file.
 * **✎ Edit data** edits a single-table result in place and applies the

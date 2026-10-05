@@ -9,6 +9,15 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
 
 ### sqail
 
+- **Copy from the result grid.** Click a row number to select that row, a
+  column name to select that column, or the # corner to select the whole
+  table (Ctrl+A does the same). Shift+click extends the selection. Ctrl+C
+  copies it as TSV; Ctrl+Shift+C includes the column names. The right-click
+  menu copies the row, the column or the table. Sorting is the ▲▼ button on
+  the column header.
+- **PostgreSQL client certificates.** The connection form takes a CA
+  certificate, a client certificate and its private key, and the SSL mode
+  `verify-ca`. The key is stored on the service and is not shown again.
 - **Table designer.** Right-click a table for *Design table…*, or *Tables*
   or a connection for *New table…*: edit columns (name, type, NULL, default),
   the primary key, indexes and grants in a window, review the generated
@@ -33,6 +42,12 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
 
 ### sqail-service
 
+- **PostgreSQL TLS material.** Profiles accept a CA certificate
+  (`ssl_root_cert`) and a client certificate (`ssl_client_cert`). The client
+  private key (`ssl_client_key`) is write-only and stored encrypted, like a
+  password. `ssl_mode` adds `verify-ca`. `POST /v1/connections/test` takes
+  `?secret_from=<id>`, as the database list does, so an unsaved edit can use
+  the stored password and key.
 - **Table privileges.** New route `GET
   /v1/connections/{id}/schema/privileges?schema=&name=` lists who holds which
   privilege on a table and which roles and users exist. Indexes from

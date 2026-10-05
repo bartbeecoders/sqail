@@ -51,7 +51,7 @@ api $URL/v1/connections -d '{
 
 | `engine` | Fields |
 |---|---|
-| `postgres` | `host`, `port` (5432), `database`, `user`, `ssl_mode` (`disable` · `prefer` · `require` · `verify-full`) |
+| `postgres` | `host`, `port` (5432), `database`, `user`, `ssl_mode` (`disable` · `prefer` · `require` · `verify-ca` · `verify-full`), `ssl_root_cert`, `ssl_client_cert` |
 | `mssql` | `host`, `port` (1433), `instance`, `database`, `auth` (see below), `encrypt` (`off` · `on` · `required`), `trust_server_certificate` |
 | `sqlite` | `path` (inside `sqlite.allowed_dirs`), `create` |
 
@@ -68,13 +68,23 @@ SQL Server `auth`:
 `password` is write-only. On `PUT`, leaving it out keeps the stored password,
 and `""` clears it. Responses report only `has_password`.
 
+`ssl_client_key` (PostgreSQL only) is write-only in the same way: leave it
+out to keep the stored key, and `""` clears it. Responses report only
+`has_ssl_client_key`. The key is an unencrypted PEM private key (PKCS#8,
+PKCS#1 or SEC1). `ssl_root_cert` and `ssl_client_cert` are PEM and come back
+with the profile. A CA certificate is used only with `ssl_mode` `verify-ca`
+or `verify-full`, and then it replaces the system trust store. A client
+certificate and its key are a pair. Certificates with `ssl_mode` `disable`
+are rejected.
+
 Two admin-only routes take an unsaved profile (the same body as `POST
 /v1/connections`) for the connection form:
 `POST /v1/connections/test` connects and reports the server version, and
 `POST /v1/connections/databases` lists the databases the login can access
 (`[{"name": "…"}]`; `name` may be empty; PostgreSQL connects to `postgres` when `database` is
-empty). Add `?secret_from=<id>` to the latter to use the password stored with
-profile `<id>` when the body has none.
+empty). Add `?secret_from=<id>` to either route to use the password and
+client key stored with profile `<id>` when the body omits them. A value in
+the body, including `""`, is used instead.
 
 ## Running SQL
 

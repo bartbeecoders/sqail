@@ -72,6 +72,7 @@ tiberius = { version = "0.13", default-features = false, features = ["winauth"] 
 windows-service = "0.8"
 
 [dev-dependencies]
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "aws_lc_rs"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
 tempfile = "3"
 

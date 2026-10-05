@@ -429,7 +429,16 @@ function editConnection(existing) {
     clearPassword: h('input', { type: 'checkbox' }),
     encrypt: select([['required', 'Required'], ['on', 'If the server supports it'], ['off', 'Login only']], p.encrypt || 'required'),
     trust: h('input', { type: 'checkbox', checked: p.trust_server_certificate }),
-    sslMode: select([['disable', 'disable'], ['prefer', 'prefer'], ['require', 'require'], ['verify-full', 'verify-full']], p.ssl_mode || 'prefer'),
+    sslMode: select([
+      ['disable', 'disable'], ['prefer', 'prefer'], ['require', 'require'],
+      ['verify-ca', 'verify-ca'], ['verify-full', 'verify-full'],
+    ], p.ssl_mode || 'prefer'),
+    sslRoot: h('input', { type: 'file', accept: '.pem,.crt,.cer' }),
+    sslCert: h('input', { type: 'file', accept: '.pem,.crt,.cer' }),
+    sslKey: h('input', { type: 'file', accept: '.pem,.key' }),
+    clearRoot: h('input', { type: 'checkbox' }),
+    clearCert: h('input', { type: 'checkbox' }),
+    clearKey: h('input', { type: 'checkbox' }),
     path: h('input', { value: p.path || '', placeholder: 'C:\\data\\app.db or /srv/data/app.db' }),
     create: h('input', { type: 'checkbox', checked: p.create }),
     readOnly: h('input', { type: 'checkbox', checked: existing && existing.read_only }),
@@ -454,7 +463,18 @@ function editConnection(existing) {
     clear: check('Remove the stored password', f.clearPassword),
     encrypt: field('Encryption', f.encrypt),
     trust: check('Trust the server certificate without checking it (test servers only)', f.trust),
-    ssl: field('SSL mode', f.sslMode),
+    ssl: field('SSL mode', f.sslMode,
+      'prefer tries TLS. require demands it. verify-ca checks the CA. verify-full also checks the host name.'),
+    sslRoot: field('CA certificate', f.sslRoot, p.ssl_root_cert
+      ? 'A CA certificate is stored. Choose a file to replace it. Used with verify-ca and verify-full, instead of the system trust store.'
+      : 'PEM. Used with verify-ca and verify-full, instead of the system trust store.'),
+    clearRoot: check('Remove the stored CA certificate', f.clearRoot),
+    sslCert: field('Client certificate', f.sslCert, p.ssl_client_cert
+      ? 'A client certificate is stored. Choose a file to replace it. PEM, leaf first.'
+      : 'PEM, leaf first. For servers that require a client certificate.'),
+    sslKey: field('Client private key', f.sslKey, 'Unencrypted PEM (PKCS#8, PKCS#1 or SEC1).'),
+    clearCert: check('Remove the stored client certificate', f.clearCert),
+    clearKey: check('Remove the stored client key', f.clearKey),
     path: field('File', f.path, status && !status.sqlite_enabled
       ? 'SQLite is off: allow a folder under Settings → SQLite first.'
       : 'Absolute path on the service host, inside an allowed SQLite folder.'),
@@ -465,7 +485,7 @@ function editConnection(existing) {
   function layout() {
     const e = f.engine.value;
     const show = e === 'sqlite' ? ['path', 'create']
-      : e === 'postgres' ? ['network', 'port', 'database', 'user', 'password', 'ssl']
+      : e === 'postgres' ? ['network', 'port', 'database', 'user', 'password', 'ssl', 'sslRoot', 'sslCert', 'sslKey']
       : ['network', 'port', 'instance', 'database', 'auth', 'user', 'password', 'encrypt', 'trust'];
     if (e === 'mssql') {
       const a = f.auth.value;
@@ -481,6 +501,9 @@ function editConnection(existing) {
       groups.password.firstChild.textContent = a === 'entra_service_principal' ? 'Client secret' : 'Password';
     }
     if (existing && existing.has_password && usesPassword()) show.push('clear');
+    if (e === 'postgres' && p.ssl_root_cert) show.push('clearRoot');
+    if (e === 'postgres' && p.ssl_client_cert) show.push('clearCert');
+    if (e === 'postgres' && existing && existing.has_ssl_client_key) show.push('clearKey');
     engineBox.replaceChildren(...show.map((k) => groups[k]));
     if (!existing) f.port.value = e === 'postgres' ? '5432' : '1433';
   }
@@ -513,7 +536,14 @@ function editConnection(existing) {
     return { method };
   }
 
-  function input() {
+  async function pemFile(input, label) {
+    if (!input.files.length) return null;
+    const text = await input.files[0].text();
+    if (text.length > 65536) throw new Error(`${label} is larger than 64 KiB`);
+    return text;
+  }
+
+  async function input() {
     const e = f.engine.value;
     let params;
     if (e === 'sqlite') {
@@ -521,6 +551,12 @@ function editConnection(existing) {
     } else if (e === 'postgres') {
       params = { engine: 'postgres', host: f.host.value.trim(), port: intOf(f.port, 'Port'),
         database: f.database.value.trim(), user: f.user.value.trim(), ssl_mode: f.sslMode.value };
+      const root = await pemFile(f.sslRoot, 'CA certificate');
+      if (root) params.ssl_root_cert = root;
+      else if (!f.clearRoot.checked && p.ssl_root_cert) params.ssl_root_cert = p.ssl_root_cert;
+      const cert = await pemFile(f.sslCert, 'Client certificate');
+      if (cert) params.ssl_client_cert = cert;
+      else if (!f.clearCert.checked && p.ssl_client_cert) params.ssl_client_cert = p.ssl_client_cert;
     } else {
       params = { engine: 'mssql', host: f.host.value.trim(), port: intOf(f.port, 'Port'),
         auth: mssqlAuth(), encrypt: f.encrypt.value, trust_server_certificate: f.trust.checked };
@@ -540,34 +576,39 @@ function editConnection(existing) {
     } else if (!existing) {
       body.password = '';
     }
+    if (e === 'postgres') {
+      const key = await pemFile(f.sslKey, 'Client private key');
+      if (key) body.ssl_client_key = key;
+      else if (f.clearKey.checked || (f.clearCert.checked && !params.ssl_client_cert)) body.ssl_client_key = '';
+    }
     return body;
+  }
+
+  function secretFrom(body) {
+    if (!existing) return '';
+    const keepPassword = existing.has_password && body.password === undefined;
+    const keepKey = existing.has_ssl_client_key && body.ssl_client_key === undefined;
+    return (keepPassword || keepKey) ? `?secret_from=${existing.id}` : '';
   }
 
   async function test(button) {
     let body;
-    try { body = input(); } catch (e) { toast(e.message, true); return; }
+    try { body = await input(); } catch (e) { toast(e.message, true); return; }
     button.disabled = true;
     result.replaceChildren(h('p', { class: 'muted' }, 'Connecting…'));
-    // Unchanged password on a saved profile: the service has it, we don't.
-    const saved = existing && existing.has_password && body.password === undefined;
-    const res = await attempt(() => saved
-      ? api('POST', `/v1/connections/${existing.id}/test`)
-      : api('POST', '/v1/connections/test', body));
+    const res = await attempt(() => api('POST', `/v1/connections/test${secretFrom(body)}`, body));
     button.disabled = false;
     if (!res) { result.replaceChildren(); return; }
     result.replaceChildren(h('div', { class: 'banner ' + (res.ok ? 'info' : 'err') },
       h('b', {}, res.ok ? `Connected in ${res.latency_ms} ms` : 'Could not connect'),
-      res.ok ? res.server_version : res.error,
-      saved ? h('div', { class: 'hint' }, 'Tested the saved settings (the stored password is used). Save first to test changes.') : null));
+      res.ok ? res.server_version : res.error));
   }
 
   async function listDatabases() {
     let body;
-    try { body = input(); } catch (e) { toast(e.message, true); return; }
+    try { body = await input(); } catch (e) { toast(e.message, true); return; }
     f.listDbs.disabled = true;
-    // Unchanged password on a saved profile: the service uses the stored one.
-    const from = existing && existing.has_password && body.password === undefined
-      ? `?secret_from=${existing.id}` : '';
+    const from = secretFrom(body);
     const res = await attempt(() => api('POST', `/v1/connections/databases${from}`, body));
     f.listDbs.disabled = false;
     if (!res) return;
@@ -579,7 +620,7 @@ function editConnection(existing) {
 
   async function save(close) {
     let body;
-    try { body = input(); } catch (e) { toast(e.message, true); return; }
+    try { body = await input(); } catch (e) { toast(e.message, true); return; }
     if (!body.name) { toast('Give the connection a name', true); return; }
     const res = await attempt(() => existing
       ? api('PUT', `/v1/connections/${existing.id}`, body)

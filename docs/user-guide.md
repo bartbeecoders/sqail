@@ -49,7 +49,7 @@ Listing needs an admin token, as *Test* does for an unsaved connection.
 
 | Engine | Notes |
 |---|---|
-| PostgreSQL | *SSL mode* works like libpq's: `prefer` by default. Use `verify-full` when the server has a proper certificate. |
+| PostgreSQL | *SSL mode* works like libpq's: `prefer` by default. CA and client certificates are described in [PostgreSQL TLS](#postgresql-tls). |
 | SQL Server | SQL login, Windows integrated auth (integrated only works when the service runs on Windows), or Microsoft Entra ID for Azure SQL (see [below](#azure-sql-database)). `Encrypt = Required` is the default; tick *Trust server certificate* only for test servers. Named instances are found through SQL Browser; the host field also accepts `SERVER\INSTANCE` and `SERVER,PORT`. Step-by-step: [windows-setup.md](windows-setup.md). |
 | SQLite | The path is a file on the **service's** machine and must be inside one of the service's `sqlite.allowed_dirs`. |
 
@@ -64,6 +64,30 @@ engine:
   routes it to a readable secondary in an availability group but doesn't block
   writes on a plain server. For a hard guarantee, use a login that only has
   read permissions.
+
+### PostgreSQL TLS
+
+*SSL mode* matches libpq:
+
+| Mode | What it does |
+|---|---|
+| `disable` | No TLS. |
+| `prefer` | TLS if the server allows it, otherwise plain. The server is not authenticated. |
+| `require` | TLS is required. The server is not authenticated. |
+| `verify-ca` | TLS, and the server certificate must chain to a trusted CA. The host name is not checked. |
+| `verify-full` | TLS, a trusted CA, and the certificate name must match the host. |
+
+*CA certificate* is a PEM file. With `verify-ca` or `verify-full` it replaces
+the operating system's trust store. Leave it empty to use that store.
+
+*Client certificate* and *Client key* are for servers that require a client
+certificate. The certificate is PEM, leaf first. The key is an unencrypted
+PEM private key (PKCS#8, PKCS#1 or SEC1). The service encrypts the key and
+never sends it back; the form shows only that one is stored. Decrypt an
+encrypted key first (`openssl pkey -in key.pem -out key.pem`).
+
+The files are stored with the connection profile on the service. They are
+not paths on your machine.
 
 ### Azure SQL Database
 
@@ -138,9 +162,18 @@ transaction that is **always rolled back**, so it is safe for `UPDATE` and
   cap, its tab reads like `Result 1 (100,000+)` in the warning colour.
 * A result wider than the pane scrolls sideways (scrollbar at the bottom, or
   Shift+mouse wheel).
-* Click a header to sort. Click, or Shift+click, to select cells, and Ctrl+C
-  copies them as TSV (pastes straight into a spreadsheet). Double-click a cell
-  to see its full value (long text, JSON, binary as hex).
+* Click a cell to select it; Shift+click extends that to a rectangle. Click a
+  row number to select the row, a column name to select the column, and the
+  **#** corner (or Ctrl+A) to select the whole table. Shift+click on a row
+  number or a column name extends that selection. Ctrl+C copies the selection
+  as TSV, which pastes straight into a spreadsheet; Ctrl+Shift+C includes the
+  column names. Right-click for *Copy*, *Copy with headers*, *Copy row*,
+  *Copy column* or *Copy table*. A copy stops after 50 000 rows and says so;
+  export the result for the rest.
+* Click the **▲▼** on a column header to sort (ascending, then descending,
+  then back to the original order). Sorting waits until the result has
+  finished loading.
+* Double-click a cell to see its full value (long text, JSON, binary as hex).
 * **Export** saves the rows in the grid, or re-runs the query and streams
   every row straight to a file, as CSV, JSON, Excel (.xlsx) or SQL `INSERT`s.
   The re-run ignores your row limit and is only bounded by the

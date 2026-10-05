@@ -50,6 +50,7 @@ impl Env {
                 create: true,
             }),
             password: None,
+            ssl_client_key: None,
             read_only: false,
             color: None,
             environment: None,

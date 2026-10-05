@@ -35,6 +35,11 @@ pub enum Msg {
     Probed(Result<(String, sqail_client::proto::Health), String>),
     Provisioned(Result<Provisioned, String>),
     ConnTested(Result<TestResult, String>),
+    /// A PEM chosen for the connection form. `None` when the dialog is cancelled.
+    ConnCertPicked {
+        kind: crate::dialogs::PgCertKind,
+        result: Option<Result<(String, String), String>>,
+    },
     ConnDatabases(String, Result<Vec<String>, String>),
     ConnSaved(Result<Connection, String>),
     ConnDeleted(Result<Uuid, String>),
@@ -651,6 +656,15 @@ impl SqailApp {
             Msg::ConnTested(r) => {
                 if let Dialog::Connection(form) = &mut self.dialog {
                     form.on_tested(r);
+                }
+            }
+            Msg::ConnCertPicked { kind, result } => {
+                if let Dialog::Connection(form) = &mut self.dialog {
+                    match result {
+                        None => {}
+                        Some(Ok((name, pem))) => form.set_cert(kind, name, pem),
+                        Some(Err(e)) => form.error = Some(e),
+                    }
                 }
             }
             Msg::ConnDatabases(key, r) => {
@@ -1832,6 +1846,9 @@ impl SqailApp {
         }
         if grid_out.review_edits {
             self.review_edits(idx);
+        }
+        if let Some(note) = grid_out.copy_note {
+            self.notify(note, false);
         }
         let mut zoom = 0.0;
         egui::CentralPanel::default()

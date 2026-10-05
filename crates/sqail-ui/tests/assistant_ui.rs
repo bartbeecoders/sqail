@@ -98,6 +98,7 @@ fn assistant_panel_streams_an_answer_and_inserts_sql() {
             create: true,
         }),
         password: None,
+        ssl_client_key: None,
         read_only: false,
         color: None,
         environment: None,

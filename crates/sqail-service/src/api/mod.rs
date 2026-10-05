@@ -180,9 +180,18 @@ pub(crate) fn decrypt_password(
     state: &AppState,
     stored: &StoredConnection,
 ) -> ApiResult<Option<String>> {
+    decrypt_secret(state, stored.secret.as_deref())
+}
+
+pub(crate) fn decrypt_ssl_key(
+    state: &AppState,
+    stored: &StoredConnection,
+) -> ApiResult<Option<String>> {
+    decrypt_secret(state, stored.ssl_key.as_deref())
+}
+
+fn decrypt_secret(state: &AppState, stored: Option<&str>) -> ApiResult<Option<String>> {
     stored
-        .secret
-        .as_deref()
         .map(|s| state.key.decrypt(s))
         .transpose()
         .map_err(ApiError::from)
@@ -200,6 +209,7 @@ pub(crate) fn pool_for(
         principal.require(sqail_proto::Scope::Query)?;
     }
     let password = decrypt_password(state, &stored)?;
+    let ssl_key = decrypt_ssl_key(state, &stored)?;
     let pool = state.pools.pool(
         id,
         stored.info.updated_at,
@@ -207,6 +217,7 @@ pub(crate) fn pool_for(
         &DriverSpec {
             params: &stored.info.params,
             password: password.as_deref(),
+            ssl_client_key: ssl_key.as_deref(),
             read_only: stored.info.read_only,
             sqlite_dirs: &state.config.sqlite.allowed_dirs,
         },

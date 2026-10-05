@@ -8,7 +8,7 @@ it.
 
 | Asset | Where it lives |
 |---|---|
-| Database credentials | `service.db` (encrypted, AES-256-GCM); in memory while a pool is open. Entra client secrets are stored the same way; Entra access tokens only in memory |
+| Database credentials | `service.db` (encrypted, AES-256-GCM); in memory while a pool is open. Entra client secrets and PostgreSQL client keys are stored the same way; Entra access tokens only in memory |
 | Master key | `<data-dir>/master.key` (mode 0600) or `SQAIL_MASTER_KEY` |
 | API tokens | Client: OS credential store (fallback: `tokens.toml`, mode 0600). Service: only a SHA-256 hash |
 | Query results | In transit (TLS); never logged; kept in UI memory only |
@@ -28,8 +28,11 @@ sqail ──TLS 1.3 + bearer token (+ optional client cert)──▶ sqail-servi
   both `master.key` and `service.db`. Encryption at rest protects copies and
   backups of `service.db` on their own, not a compromised host.
 * **Databases** are trusted to be what the profile says they are. For
-  Postgres, `verify-full` authenticates the server; `prefer`/`require` only
-  encrypt the link.
+  Postgres, `verify-full` checks the certificate chain and the host name,
+  and `verify-ca` checks the chain only. A CA certificate in the profile
+  replaces the system trust store for those two modes. `prefer` and
+  `require` only encrypt the link. A client certificate is presented when
+  the profile has one.
 
 ## Threats and mitigations
 
@@ -40,7 +43,7 @@ sqail ──TLS 1.3 + bearer token (+ optional client cert)──▶ sqail-servi
 | Stolen or guessed API token | 256-bit random tokens; only SHA-256 hashes stored; constant-time compare; revocation; per-token rate limit; `last_used_at` tracking | `token_lifecycle`, `scopes_and_revocation`, `rate_limit_applies_per_token` |
 | Unauthorised use of the service | Every route except `/v1/health` and the OpenAPI doc needs a token; scopes `read` < `query` < `admin`; `read` can only query read-only profiles | `scopes_and_revocation`, `read_scope_only_queries_read_only_profiles` |
 | Stronger client authentication | Optional mutual TLS (`tls.client_ca`), on top of tokens | `mutual_tls_requires_a_client_certificate` |
-| Credential disclosure through the API | Passwords are write-only: never returned; `has_password` only. Entra sign-in errors carry only Entra's own message | `passwords_are_write_only`, `rejected_credentials_explain_without_leaking` |
+| Credential disclosure through the API | Passwords and PostgreSQL client keys are write-only: never returned; `has_password` and `has_ssl_client_key` only. Entra sign-in errors carry only Entra's own message | `passwords_are_write_only`, `pg_ssl_certs_are_stored_and_the_key_is_write_only`, `rejected_credentials_explain_without_leaking` |
 | Credential disclosure at rest | AES-256-GCM with a random nonce per value; tampering detected | `round_trip`, `tampering_is_detected`, `wrong_key_fails` |
 | Secrets or row values in logs | Authorization is a sensitive header; values are never logged; audit stores SQL text only (can be disabled) | `logs_contain_no_secrets_or_row_values` |
 | SQL injection through catalog browsing | All names travel as bind parameters; the one exception (SQLite schema) must match an attached database first | `introspect.rs` review; engine matrix tests |

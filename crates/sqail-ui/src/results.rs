@@ -303,6 +303,18 @@ pub struct Selection {
     pub focus: (usize, usize),
 }
 
+/// Where a click landed in the grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GridHit {
+    Cell(usize, usize),
+    /// The row-number gutter.
+    Row(usize),
+    /// The column name (not the sort button).
+    Column(usize),
+    /// The `#` corner.
+    Table,
+}
+
 impl Selection {
     pub fn rows(&self) -> std::ops::RangeInclusive<usize> {
         self.anchor.0.min(self.focus.0)..=self.anchor.0.max(self.focus.0)
@@ -313,7 +325,58 @@ impl Selection {
     pub fn contains(&self, row: usize, col: usize) -> bool {
         self.rows().contains(&row) && self.cols().contains(&col)
     }
+
+    /// `n_rows` may be 0. `n_cols` is at least 1.
+    pub fn click(
+        current: Option<Self>,
+        hit: GridHit,
+        shift: bool,
+        n_rows: usize,
+        n_cols: usize,
+    ) -> Self {
+        let last_row = n_rows.saturating_sub(1);
+        let last_col = n_cols.saturating_sub(1);
+        match hit {
+            GridHit::Table => Self {
+                anchor: (0, 0),
+                focus: (last_row, last_col),
+            },
+            GridHit::Row(r) => match (current, shift) {
+                (Some(s), true) => Self {
+                    anchor: (s.anchor.0, 0),
+                    focus: (r, last_col),
+                },
+                _ => Self {
+                    anchor: (r, 0),
+                    focus: (r, last_col),
+                },
+            },
+            GridHit::Column(c) => match (current, shift) {
+                (Some(s), true) => Self {
+                    anchor: (0, s.anchor.1),
+                    focus: (last_row, c),
+                },
+                _ => Self {
+                    anchor: (0, c),
+                    focus: (last_row, c),
+                },
+            },
+            GridHit::Cell(r, c) => match (current, shift) {
+                (Some(s), true) => Self {
+                    anchor: s.anchor,
+                    focus: (r, c),
+                },
+                _ => Self {
+                    anchor: (r, c),
+                    focus: (r, c),
+                },
+            },
+        }
+    }
 }
+
+/// Clipboard copies stop here so a million-row result cannot freeze the UI.
+pub const COPY_ROW_LIMIT: usize = 50_000;
 
 /// One execution of SQL from a tab.
 pub struct Run {
@@ -508,6 +571,17 @@ pub fn fmt_duration(d: Duration) -> String {
 
 /// Tab-separated text of the selected cells (optionally with a header row).
 pub fn selection_tsv(rs: &ResultSet, sel: &Selection, headers: bool) -> String {
+    selection_tsv_capped(rs, sel, headers, usize::MAX).0
+}
+
+/// Like [`selection_tsv`], but at most `max_rows` data rows. The bool is
+/// `true` when more rows were selected than were written.
+pub fn selection_tsv_capped(
+    rs: &ResultSet,
+    sel: &Selection,
+    headers: bool,
+    max_rows: usize,
+) -> (String, bool) {
     let cols: Vec<usize> = sel.cols().filter(|&c| c < rs.columns.len()).collect();
     let mut out = String::new();
     if headers {
@@ -515,7 +589,12 @@ pub fn selection_tsv(rs: &ResultSet, sel: &Selection, headers: bool) -> String {
         out.push_str(&names.join("\t"));
         out.push('\n');
     }
-    for r in sel.rows().filter(|&r| r < rs.len()) {
+    let mut truncated = false;
+    for (written, r) in sel.rows().filter(|&r| r < rs.len()).enumerate() {
+        if written == max_rows {
+            truncated = true;
+            break;
+        }
         let row = rs.row(r);
         let cells: Vec<String> = cols
             .iter()
@@ -532,7 +611,7 @@ pub fn selection_tsv(rs: &ResultSet, sel: &Selection, headers: bool) -> String {
         out.push_str(&cells.join("\t"));
         out.push('\n');
     }
-    out
+    (out, truncated)
 }
 
 #[cfg(test)]
@@ -650,5 +729,39 @@ mod tests {
             selection_tsv(&run.results[0], &sel, true),
             "n\ts\n1\ta b\n2\t\n"
         );
+        let (capped, truncated) = selection_tsv_capped(&run.results[0], &sel, false, 1);
+        assert_eq!(capped, "1\ta b\n");
+        assert!(truncated);
+    }
+
+    #[test]
+    fn clicks_select_rows_columns_and_the_table() {
+        let table = Selection::click(None, GridHit::Table, false, 4, 3);
+        assert!(table.contains(0, 0) && table.contains(3, 2));
+        assert!(!table.contains(4, 0));
+
+        let row = Selection::click(None, GridHit::Row(1), false, 4, 3);
+        assert_eq!(row.rows(), 1..=1);
+        assert_eq!(row.cols(), 0..=2);
+        let rows = Selection::click(Some(row), GridHit::Row(3), true, 4, 3);
+        assert_eq!(rows.rows(), 1..=3);
+        assert_eq!(rows.cols(), 0..=2);
+
+        let col = Selection::click(None, GridHit::Column(1), false, 4, 3);
+        assert_eq!(col.rows(), 0..=3);
+        assert_eq!(col.cols(), 1..=1);
+        let cols = Selection::click(Some(col), GridHit::Column(0), true, 4, 3);
+        assert_eq!(cols.cols(), 0..=1);
+        assert_eq!(cols.rows(), 0..=3);
+
+        let cell = Selection::click(None, GridHit::Cell(1, 1), false, 4, 3);
+        assert_eq!(cell.anchor, (1, 1));
+        let block = Selection::click(Some(cell), GridHit::Cell(2, 2), true, 4, 3);
+        assert_eq!(block.rows(), 1..=2);
+        assert_eq!(block.cols(), 1..=2);
+        // Shift-click a row number from a cell still selects whole rows.
+        let from_cell = Selection::click(Some(cell), GridHit::Row(3), true, 4, 3);
+        assert_eq!(from_cell.rows(), 1..=3);
+        assert_eq!(from_cell.cols(), 0..=2);
     }
 }

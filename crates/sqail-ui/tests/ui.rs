@@ -340,8 +340,11 @@ fn editor_runs_queries_end_to_end() {
     h.get_by_label("Result 1 (3)");
     shot(&mut h, "01-results");
 
-    // --- sorting by clicking a header -----------------------------------
-    h.get_by_label_contains("score").click();
+    // --- sorting by the column's arrow (the name selects the column) ----
+    h.get_all_by_label("▲▼")
+        .nth(2)
+        .expect("score sort")
+        .click();
     h.step();
     h.step();
     {

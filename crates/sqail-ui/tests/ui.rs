@@ -341,10 +341,7 @@ fn editor_runs_queries_end_to_end() {
     shot(&mut h, "01-results");
 
     // --- sorting by the column's arrow (the name selects the column) ----
-    h.get_all_by_label("▲▼")
-        .nth(2)
-        .expect("score sort")
-        .click();
+    h.get_all_by_label("▲▼").nth(2).expect("score sort").click();
     h.step();
     h.step();
     {

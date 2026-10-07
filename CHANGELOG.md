@@ -7,6 +7,8 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
 
 ## Unreleased
 
+## 1.2.0 — 2026-10-07
+
 ### sqail
 
 - **Copy from the result grid.** Click a row number to select that row, a

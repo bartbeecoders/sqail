@@ -7,6 +7,8 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
 
 ## Unreleased
 
+## 1.3.0 — 2026-10-10
+
 ### sqail
 
 - **Duplicate a connection.** Right-click a connection for *Duplicate…*: the

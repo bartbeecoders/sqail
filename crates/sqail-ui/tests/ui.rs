@@ -455,6 +455,46 @@ fn connection_tree_folders_rename_and_drag() {
     assert_eq!(saved[0].folder.as_deref(), Some("Production"));
 }
 
+/// With no connections at all, the tree's toolbar still works.
+#[test]
+fn toolbar_works_on_an_empty_tree() {
+    let e = env();
+    let client = Client::new(&Target {
+        url: format!("https://{}", e.server.addr),
+        token: e.server.bootstrap_token.clone().unwrap(),
+        trust: Trust::Pinned(e.server.fingerprint.clone()),
+        identity: None,
+    })
+    .unwrap();
+    e.rt.block_on(async {
+        for c in client.connections().await.unwrap() {
+            client.delete_connection(c.id).await.unwrap();
+        }
+    });
+    let mut h = Harness::builder()
+        .with_size([1280.0, 800.0])
+        .build_eframe(|cc| SqailApp::new(cc));
+    wait(&mut h, "service connection", |a| {
+        a.service.status == ServiceStatus::Connected
+    });
+    h.run_steps(4);
+    h.get_by_label("+ Folder").click();
+    h.run_steps(4);
+    assert!(
+        h.state().schema.rename.is_some(),
+        "the new folder is being named"
+    );
+    h.key_press(Key::Enter);
+    h.run_steps(4);
+    h.get_by_label("New folder");
+    h.get_by_label("+ Connection").click();
+    h.run_steps(4);
+    assert!(matches!(
+        h.state().dialog,
+        sqail_ui::dialogs::Dialog::Connection(_)
+    ));
+}
+
 /// The settings window: pick a theme, turn off the close prompt, and both
 /// take effect and are saved.
 #[test]

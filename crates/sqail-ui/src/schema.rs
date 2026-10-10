@@ -278,6 +278,15 @@ pub fn sidebar_ui(ui: &mut egui::Ui, app: &mut SqailApp) {
     );
     ui.separator();
 
+    // Toolbar actions apply even when the tree below has nothing to show.
+    tree(ui, app, connected, &mut actions);
+    for a in actions {
+        apply(app, a, ui.ctx());
+    }
+}
+
+/// The connections and folders, or why there are none.
+fn tree(ui: &mut egui::Ui, app: &mut SqailApp, connected: bool, actions: &mut Vec<Action>) {
     if !connected {
         ui.label(RichText::new("Not connected to a service.").weak());
         if ui.button("Connect to a service…").clicked() {
@@ -314,7 +323,7 @@ pub fn sidebar_ui(ui: &mut egui::Ui, app: &mut SqailApp) {
                     c,
                     &filter,
                     dark,
-                    &mut actions,
+                    actions,
                 );
             }
             for name in &folders {
@@ -323,15 +332,7 @@ pub fn sidebar_ui(ui: &mut egui::Ui, app: &mut SqailApp) {
                     .filter(|c| c.folder.as_deref() == Some(name.as_str()))
                     .collect();
                 folder_node(
-                    ui,
-                    app,
-                    &folders,
-                    name,
-                    &members,
-                    &client,
-                    &filter,
-                    dark,
-                    &mut actions,
+                    ui, app, &folders, name, &members, &client, &filter, dark, actions,
                 );
             }
             if dragging {
@@ -351,10 +352,6 @@ pub fn sidebar_ui(ui: &mut egui::Ui, app: &mut SqailApp) {
                 }
             }
         });
-
-    for a in actions {
-        apply(app, a, ui.ctx());
-    }
 }
 
 #[allow(clippy::too_many_arguments)]

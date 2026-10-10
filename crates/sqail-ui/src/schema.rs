@@ -10,8 +10,9 @@ use sqail_client::proto::{
 use uuid::Uuid;
 
 use crate::app::{Msg, ServiceStatus, SqailApp};
-use crate::dialogs::{ConnForm, Dialog};
+use crate::dialogs::{ConnForm, Dialog, DiscoverForm};
 use crate::editor::SqlDrop;
+use crate::folders::{ConnDrag, Rename, RenameTarget};
 use crate::sql;
 use crate::sql::drop::{DropItem, ObjectKind};
 use crate::theme;
@@ -52,6 +53,8 @@ pub struct SchemaMsg {
 pub struct SchemaTree {
     data: HashMap<Uuid, HashMap<SchemaKey, Load<SchemaData>>>,
     pub filter: String,
+    /// A connection or folder being renamed in place.
+    pub rename: Option<crate::folders::Rename>,
 }
 
 impl SchemaTree {
@@ -189,7 +192,20 @@ enum Action {
         table: String,
     },
     NewTab(Uuid),
+    /// The connection form, optionally for a new connection in a folder.
+    NewConnection(Option<String>),
+    NewFolder,
+    DeleteFolder(String),
+    StartRename(RenameTarget, String),
+    CommitRename,
+    CancelRename,
+    Move {
+        conn: Uuid,
+        folder: Option<String>,
+    },
     Edit(Uuid),
+    Duplicate(Uuid),
+    DiscoverAzure(Uuid),
     Delete(Uuid, String),
     Test(Uuid),
     Refresh(Uuid),
@@ -223,19 +239,12 @@ enum Action {
 
 pub fn sidebar_ui(ui: &mut egui::Ui, app: &mut SqailApp) {
     let mut actions = Vec::new();
+    let connected = app.service.status == ServiceStatus::Connected;
     ui.horizontal(|ui| {
         ui.heading("Connections");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let connected = app.service.status == ServiceStatus::Connected;
             if ui
-                .add_enabled(connected, egui::Button::new("+ Add"))
-                .on_hover_text("New connection")
-                .clicked()
-            {
-                app.dialog = Dialog::Connection(Box::new(ConnForm::new_default()));
-            }
-            if ui
-                .add_enabled(connected, egui::Button::new("⟳"))
+                .add_enabled(connected, egui::Button::new("⟳").small())
                 .on_hover_text("Refresh")
                 .clicked()
             {
@@ -244,6 +253,24 @@ pub fn sidebar_ui(ui: &mut egui::Ui, app: &mut SqailApp) {
             }
         });
     });
+    // The tree's toolbar.
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        if ui
+            .add_enabled(connected, egui::Button::new("+ Connection").small())
+            .on_hover_text("New connection")
+            .clicked()
+        {
+            actions.push(Action::NewConnection(None));
+        }
+        if ui
+            .add_enabled(connected, egui::Button::new("+ Folder").small())
+            .on_hover_text("New folder: drag connections into it")
+            .clicked()
+        {
+            actions.push(Action::NewFolder);
+        }
+    });
     ui.add(
         egui::TextEdit::singleline(&mut app.schema.filter)
             .hint_text("Filter tables…")
@@ -251,14 +278,15 @@ pub fn sidebar_ui(ui: &mut egui::Ui, app: &mut SqailApp) {
     );
     ui.separator();
 
-    if app.service.status != ServiceStatus::Connected {
+    if !connected {
         ui.label(RichText::new("Not connected to a service.").weak());
         if ui.button("Connect to a service…").clicked() {
             app.dialog = Dialog::Welcome(Default::default());
         }
         return;
     }
-    if app.service.connections.is_empty() {
+    let folders = crate::folders::all_folders(app);
+    if app.service.connections.is_empty() && folders.is_empty() {
         ui.label(RichText::new("No connections yet.").weak());
         if ui.button("Add a connection…").clicked() {
             app.dialog = Dialog::Connection(Box::new(ConnForm::new_default()));
@@ -270,48 +298,56 @@ pub fn sidebar_ui(ui: &mut egui::Ui, app: &mut SqailApp) {
     let connections = app.service.connections.clone();
     let client = app.service.client.clone();
     let filter = app.schema.filter.to_lowercase();
+    // Dragging a connection that is in a folder: offer to take it out.
+    let dragging = egui::DragAndDrop::payload::<ConnDrag>(ui.ctx())
+        .and_then(|d| connections.iter().find(|c| c.id == d.0))
+        .is_some_and(|c| c.folder.is_some());
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            let mut folders: Vec<Option<String>> =
-                connections.iter().map(|c| c.folder.clone()).collect();
-            folders.sort();
-            folders.dedup();
-            for folder in folders {
-                let members: Vec<&Connection> =
-                    connections.iter().filter(|c| c.folder == folder).collect();
-                match &folder {
-                    Some(name) => {
-                        CollapsingHeader::new(RichText::new(name).strong())
-                            .id_salt(("folder", name))
-                            .default_open(true)
-                            .show(ui, |ui| {
-                                for c in &members {
-                                    connection_node(
-                                        ui,
-                                        app_ref(app),
-                                        &client,
-                                        c,
-                                        &filter,
-                                        dark,
-                                        &mut actions,
-                                    );
-                                }
-                            });
-                    }
-                    None => {
-                        for c in &members {
-                            connection_node(
-                                ui,
-                                app_ref(app),
-                                &client,
-                                c,
-                                &filter,
-                                dark,
-                                &mut actions,
-                            );
-                        }
-                    }
+            // Connections without a folder first, then the folders.
+            for c in connections.iter().filter(|c| c.folder.is_none()) {
+                connection_node(
+                    ui,
+                    app_ref(app, &folders),
+                    &client,
+                    c,
+                    &filter,
+                    dark,
+                    &mut actions,
+                );
+            }
+            for name in &folders {
+                let members: Vec<&Connection> = connections
+                    .iter()
+                    .filter(|c| c.folder.as_deref() == Some(name.as_str()))
+                    .collect();
+                folder_node(
+                    ui,
+                    app,
+                    &folders,
+                    name,
+                    &members,
+                    &client,
+                    &filter,
+                    dark,
+                    &mut actions,
+                );
+            }
+            if dragging {
+                ui.add_space(6.0);
+                let (_, dropped) = ui.dnd_drop_zone::<ConnDrag, ()>(
+                    egui::Frame::group(ui.style()).inner_margin(6),
+                    |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(RichText::new("Drop here to take it out of its folder").weak());
+                    },
+                );
+                if let Some(d) = dropped {
+                    actions.push(Action::Move {
+                        conn: d.0,
+                        folder: None,
+                    });
                 }
             }
         });
@@ -321,16 +357,109 @@ pub fn sidebar_ui(ui: &mut egui::Ui, app: &mut SqailApp) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn folder_node(
+    ui: &mut egui::Ui,
+    app: &mut SqailApp,
+    folders: &[String],
+    name: &str,
+    members: &[&Connection],
+    client: &Option<Client>,
+    filter: &str,
+    dark: bool,
+    actions: &mut Vec<Action>,
+) {
+    let target = RenameTarget::Folder(name.to_string());
+    if let Some(r) = app.schema.rename.as_mut().filter(|r| r.target == target) {
+        rename_field(ui, r, actions);
+        return;
+    }
+    let header = CollapsingHeader::new(RichText::new(name).strong())
+        .id_salt(("folder", name))
+        .default_open(true)
+        .show(ui, |ui| {
+            if members.is_empty() {
+                ui.label(RichText::new("Empty: drag connections here").weak().small());
+            }
+            for c in members {
+                connection_node(ui, app_ref(app, folders), client, c, filter, dark, actions);
+            }
+        });
+    let resp = &header.header_response;
+    if let Some(conn) = conn_drop(ui, resp) {
+        actions.push(Action::Move {
+            conn,
+            folder: Some(name.to_string()),
+        });
+    }
+    resp.context_menu(|ui| {
+        if ui.button("New connection here…").clicked() {
+            actions.push(Action::NewConnection(Some(name.to_string())));
+            ui.close();
+        }
+        if ui.button("Rename").clicked() {
+            actions.push(Action::StartRename(target.clone(), name.to_string()));
+            ui.close();
+        }
+        if members.is_empty() && ui.button("Delete folder").clicked() {
+            actions.push(Action::DeleteFolder(name.to_string()));
+            ui.close();
+        }
+    });
+}
+
+/// The in-place rename field. Enter or clicking elsewhere saves; Esc cancels.
+fn rename_field(ui: &mut egui::Ui, r: &mut Rename, actions: &mut Vec<Action>) {
+    let id = egui::Id::new("tree_rename");
+    let mut out = egui::TextEdit::singleline(&mut r.text)
+        .id(id)
+        .desired_width(f32::INFINITY)
+        .show(ui);
+    if r.focus {
+        r.focus = false;
+        out.response.request_focus();
+        let all = egui::text::CCursorRange::two(
+            egui::text::CCursor::new(0),
+            egui::text::CCursor::new(r.text.chars().count()),
+        );
+        out.state.cursor.set_char_range(Some(all));
+        out.state.store(ui.ctx(), id);
+    } else if out.response.lost_focus() {
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            actions.push(Action::CancelRename);
+        } else {
+            actions.push(Action::CommitRename);
+        }
+    }
+}
+
+/// While a connection is dragged over `resp`, outline it; the connection
+/// dropped on it.
+fn conn_drop(ui: &egui::Ui, resp: &egui::Response) -> Option<Uuid> {
+    if resp.dnd_hover_payload::<ConnDrag>().is_some() {
+        ui.painter().rect_stroke(
+            resp.rect.expand(2.0),
+            4.0,
+            egui::Stroke::new(1.5, theme::accent(ui.visuals().dark_mode)),
+            egui::StrokeKind::Outside,
+        );
+    }
+    resp.dnd_release_payload::<ConnDrag>().map(|d| d.0)
+}
+
 /// The parts of the app the tree needs while drawing.
 struct TreeCtx<'a> {
     schema: &'a mut SchemaTree,
     worker: &'a crate::worker::Worker,
+    /// Every folder, for “Move to folder”.
+    folders: &'a [String],
 }
 
-fn app_ref(app: &mut SqailApp) -> TreeCtx<'_> {
+fn app_ref<'a>(app: &'a mut SqailApp, folders: &'a [String]) -> TreeCtx<'a> {
     TreeCtx {
         schema: &mut app.schema,
         worker: &app.worker,
+        folders,
     }
 }
 
@@ -343,6 +472,15 @@ fn connection_node(
     dark: bool,
     actions: &mut Vec<Action>,
 ) {
+    if let Some(r) = t
+        .schema
+        .rename
+        .as_mut()
+        .filter(|r| r.target == RenameTarget::Connection(c.id))
+    {
+        rename_field(ui, r, actions);
+        return;
+    }
     let color = c
         .color
         .as_deref()
@@ -412,6 +550,35 @@ fn connection_node(
             actions.push(Action::Edit(c.id));
             ui.close();
         }
+        if ui.button("Rename").clicked() {
+            actions.push(Action::StartRename(
+                RenameTarget::Connection(c.id),
+                c.name.clone(),
+            ));
+            ui.close();
+        }
+        if ui.button("Duplicate…").clicked() {
+            actions.push(Action::Duplicate(c.id));
+            ui.close();
+        }
+        ui.menu_button("Move to folder", |ui| {
+            if c.folder.is_some() && ui.button("(no folder)").clicked() {
+                actions.push(Action::Move {
+                    conn: c.id,
+                    folder: None,
+                });
+                ui.close();
+            }
+            for f in t.folders {
+                if c.folder.as_deref() != Some(f.as_str()) && ui.button(f).clicked() {
+                    actions.push(Action::Move {
+                        conn: c.id,
+                        folder: Some(f.clone()),
+                    });
+                    ui.close();
+                }
+            }
+        });
         if ui.button("Test").clicked() {
             actions.push(Action::Test(c.id));
             ui.close();
@@ -427,6 +594,16 @@ fn connection_node(
             });
             ui.close();
         }
+        if let sqail_client::proto::ConnectionParams::Mssql(p) = &c.params
+            && p.auth.is_entra()
+            && ui
+                .button("Discover Azure databases…")
+                .on_hover_text("Add the databases in the Azure subscriptions this sign-in can read")
+                .clicked()
+        {
+            actions.push(Action::DiscoverAzure(c.id));
+            ui.close();
+        }
         ui.separator();
         if ui.button("Delete…").clicked() {
             actions.push(Action::Delete(c.id, c.name.clone()));
@@ -434,7 +611,32 @@ fn connection_node(
         }
     });
     if header.header_response.double_clicked() {
-        actions.push(Action::NewTab(c.id));
+        actions.push(Action::Edit(c.id));
+    }
+    // Drag the row onto a folder (or a connection in one) to move it there.
+    let row = &header.header_response;
+    let drag = ui.interact(row.rect, row.id, egui::Sense::click_and_drag());
+    if drag.dragged()
+        && let Some(pos) = ui.ctx().pointer_latest_pos()
+    {
+        egui::Area::new(egui::Id::new("conn_drag_label"))
+            .order(egui::Order::Tooltip)
+            .interactable(false)
+            .fixed_pos(pos + egui::vec2(14.0, 10.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.label(c.name.as_str());
+                });
+            });
+    }
+    drag.dnd_set_drag_payload(ConnDrag(c.id));
+    if let Some(conn) = conn_drop(ui, row)
+        && conn != c.id
+    {
+        actions.push(Action::Move {
+            conn,
+            folder: c.folder.clone(),
+        });
     }
 }
 
@@ -803,6 +1005,41 @@ fn apply(app: &mut SqailApp, a: Action, ctx: &egui::Context) {
             if let Some(c) = app.service.connection(id) {
                 app.dialog = Dialog::Connection(Box::new(ConnForm::edit(c)));
             }
+        }
+        Action::NewConnection(folder) => {
+            app.dialog = Dialog::Connection(Box::new(ConnForm::in_folder(folder)));
+        }
+        Action::NewFolder => crate::folders::new_folder(app),
+        Action::DeleteFolder(name) => crate::folders::delete_folder(app, &name),
+        Action::StartRename(target, current) => {
+            app.schema.rename = Some(Rename::new(target, &current));
+        }
+        Action::CommitRename => crate::folders::commit_rename(app),
+        Action::CancelRename => app.schema.rename = None,
+        Action::Move { conn, folder } => crate::folders::move_connection(app, conn, folder),
+        Action::Duplicate(id) => {
+            if let Some(c) = app.service.connection(id) {
+                let taken: Vec<&str> = app
+                    .service
+                    .connections
+                    .iter()
+                    .map(|c| c.name.as_str())
+                    .collect();
+                app.dialog = Dialog::Connection(Box::new(ConnForm::duplicate(c, &taken)));
+            }
+        }
+        Action::DiscoverAzure(id) => {
+            let (Some(client), Some(c)) = (app.service.client.clone(), app.service.connection(id))
+            else {
+                return;
+            };
+            app.dialog = Dialog::AzureDiscover(Box::new(DiscoverForm::new(c)));
+            app.worker.run(async move {
+                Msg::AzureDiscovered {
+                    source: id,
+                    result: client.azure_discover(id).await.map_err(|e| e.to_string()),
+                }
+            });
         }
         Action::Delete(id, name) => app.dialog = Dialog::ConfirmDelete(id, name),
         Action::Test(id) => {

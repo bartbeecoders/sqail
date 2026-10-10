@@ -33,7 +33,7 @@ Pick the setup that fits:
    **sqail.exe**.
 2. Choose **Use the local service**. sqail starts `sqail-service.exe` from its
    own folder, creates a token and stores it in Windows Credential Manager.
-3. Click **+ Add** next to *Connections* in the sidebar (or *Connections →
+3. Click **+ Connection** under *Connections* in the sidebar (or *Connections →
    New connection…*) and choose **SQL Server**:
 
    | Field | What to enter |
@@ -192,7 +192,7 @@ hint. More examples:
 ```
 
 **With sqail**, on any PC, signed in with the **admin** token: click
-**+ Add** next to *Connections*, fill in the form (see the table in [A](#a-just-me)),
+**+ Connection** under *Connections*, fill in the form (see the table in [A](#a-just-me)),
 then **Test** and **Save**.
 
 ### B4. Give users access

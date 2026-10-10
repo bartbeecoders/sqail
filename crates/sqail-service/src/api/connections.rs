@@ -5,14 +5,16 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use serde::Deserialize;
 use sqail_proto::{
-    Connection, ConnectionInput, ConnectionParams, MssqlAuth, NamedItem, PgSslMode, Scope,
-    TestResult,
+    AzureDiscovery, Connection, ConnectionInput, ConnectionParams, MssqlAuth, NamedItem, PgSslMode,
+    Scope, TestResult,
 };
 use utoipa::IntoParams;
 use uuid::Uuid;
 
 use super::{decrypt_password, decrypt_ssl_key, load_connection};
 use crate::auth::Principal;
+use crate::azure::{ARM, Arm};
+use crate::engine::entra::{Audience, Entra};
 use crate::engine::registry::{DriverSpec, build_driver};
 use crate::engine::sqlite::check_path;
 use crate::engine::tls_client::{self, PEM_LIMIT};
@@ -97,21 +99,30 @@ fn record<'a>(
     }
 }
 
+/// With `secret_from`, an omitted `password` or `ssl_client_key` is copied
+/// from that profile (duplicating a connection, adding discovered databases).
 #[utoipa::path(post, path = "/v1/connections", tag = "connections", request_body = ConnectionInput,
+    params(SecretFromQuery),
     responses((status = 201, body = Connection), (status = 400, body = sqail_proto::Problem)))]
 pub async fn create(
     State(state): State<AppState>,
     p: Principal,
+    Query(q): Query<SecretFromQuery>,
     Json(input): Json<ConnectionInput>,
 ) -> ApiResult<(StatusCode, Json<Connection>)> {
     p.require(Scope::Admin)?;
     let mut input = input;
     normalize_pg(&mut input)?;
     validate(&state, &input)?;
-    let ssl = resolve_ssl_key(&state, &input, None)?;
+    let source = q
+        .secret_from
+        .map(|id| load_connection(&state, id))
+        .transpose()?;
+    let ssl = resolve_ssl_key(&state, &input, source.as_ref())?;
     let secret = match input.password.as_deref() {
         Some(pw) if !pw.is_empty() => Some(state.key.encrypt(pw)?),
-        _ => None,
+        Some(_) => None,
+        None => source.and_then(|s| s.secret),
     };
     let id =
         state
@@ -260,6 +271,53 @@ pub async fn databases_unsaved(
         Ok(r) => Ok(Json(r?)),
         Err(_) => Err(DbError::Timeout.into()),
     }
+}
+
+/// The databases in the Azure subscriptions that this connection's Microsoft
+/// Entra ID identity can read: Azure SQL servers, SQL managed instances and
+/// PostgreSQL flexible servers. Admin only. The identity needs the Reader role
+/// (or any role that can list these resources) on the subscriptions.
+#[utoipa::path(post, path = "/v1/connections/{id}/azure/discover", tag = "connections",
+    params(("id" = Uuid, Path)),
+    responses((status = 200, body = AzureDiscovery), (status = 400, body = sqail_proto::Problem),
+        (status = 502, body = sqail_proto::Problem)))]
+pub async fn azure_discover(
+    State(state): State<AppState>,
+    p: Principal,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<AzureDiscovery>> {
+    p.require(Scope::Admin)?;
+    let stored = load_connection(&state, id)?;
+    let ConnectionParams::Mssql(params) = &stored.info.params else {
+        return Err(not_entra());
+    };
+    let password = decrypt_password(&state, &stored)?;
+    let entra = Entra::for_audience(&params.auth, password.as_deref(), Audience::Arm)?
+        .ok_or_else(not_entra)?;
+    let started = Instant::now();
+    let res = async { Arm::new(ARM, entra.token().await?)?.discover().await };
+    let res = match tokio::time::timeout(Duration::from_secs(50), res).await {
+        Ok(r) => r,
+        Err(_) => Err(DbError::Timeout),
+    };
+    state.store.audit(AuditEvent {
+        actor: &p.name,
+        action: "connection.azure_discover",
+        target: Some(id.to_string()),
+        detail: res
+            .as_ref()
+            .ok()
+            .map(|d| format!("{} databases", d.databases.len())),
+        duration_ms: Some(started.elapsed().as_millis() as i64),
+        success: res.is_ok(),
+    });
+    Ok(Json(res?))
+}
+
+fn not_entra() -> ApiError {
+    ApiError::bad_request(
+        "Azure discovery needs a SQL Server connection that signs in with Microsoft Entra ID",
+    )
 }
 
 struct ResolvedKey {

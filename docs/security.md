@@ -8,7 +8,7 @@ it.
 
 | Asset | Where it lives |
 |---|---|
-| Database credentials | `service.db` (encrypted, AES-256-GCM); in memory while a pool is open. Entra client secrets and PostgreSQL client keys are stored the same way; Entra access tokens only in memory |
+| Database credentials | `service.db` (encrypted, AES-256-GCM); in memory while a pool is open. Entra client secrets and PostgreSQL client keys are stored the same way; Entra access tokens (Azure SQL, and Resource Manager for discovery) only in memory |
 | Master key | `<data-dir>/master.key` (mode 0600) or `SQAIL_MASTER_KEY` |
 | API tokens | Client: OS credential store (fallback: `tokens.toml`, mode 0600). Service: only a SHA-256 hash |
 | Query results | In transit (TLS); never logged; kept in UI memory only |

@@ -21,8 +21,9 @@ pub struct Key<'a> {
 #[derive(Default)]
 struct Highlighter;
 
-impl ComputerMut<Key<'_>, LayoutJob> for Highlighter {
-    fn compute(&mut self, key: Key<'_>) -> LayoutJob {
+/// The key plus the theme generation: a new palette recolours the text.
+impl ComputerMut<(Key<'_>, u64), LayoutJob> for Highlighter {
+    fn compute(&mut self, (key, _generation): (Key<'_>, u64)) -> LayoutJob {
         layout(key)
     }
 }
@@ -30,7 +31,8 @@ impl ComputerMut<Key<'_>, LayoutJob> for Highlighter {
 type Cache = FrameCache<LayoutJob, Highlighter>;
 
 pub fn highlight(ctx: &egui::Context, key: Key<'_>) -> LayoutJob {
-    ctx.memory_mut(|m| m.caches.cache::<Cache>().get(key).clone())
+    let generation = crate::theme::generation();
+    ctx.memory_mut(|m| m.caches.cache::<Cache>().get((key, generation)).clone())
 }
 
 /// Token classes that get distinct formats.

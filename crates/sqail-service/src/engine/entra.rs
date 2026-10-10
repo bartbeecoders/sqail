@@ -1,4 +1,5 @@
-//! Microsoft Entra ID (Azure AD) access tokens for Azure SQL.
+//! Microsoft Entra ID (Azure AD) access tokens for Azure SQL, and for Azure
+//! Resource Manager when discovering databases.
 //!
 //! A token is fetched when a connection opens and reused until five minutes
 //! before it expires. Secrets and tokens never reach the logs or error
@@ -12,16 +13,50 @@ use tokio::sync::Mutex;
 
 use super::{DbError, Result};
 
-/// Token scope (v2 endpoints) and resource (managed identity) of Azure SQL.
-const SCOPE: &str = "https://database.windows.net/.default";
-const RESOURCE: &str = "https://database.windows.net/";
 /// Microsoft.Data.SqlClient's public client app, which SSMS and ADO.NET use
 /// for Entra password sign-in.
 const SQLCLIENT_APP: &str = "2fd908ad-0664-4344-b9be-cd3e8b574c38";
+/// The Azure CLI's public client app, pre-authorized for Resource Manager.
+const AZURE_CLI_APP: &str = "04b07795-8ddb-461a-bbee-02f9e1bf7b46";
 const AUTHORITY: &str = "https://login.microsoftonline.com";
 /// Azure Instance Metadata Service (VMs, VM scale sets, AKS node identity).
 const IMDS: &str = "http://169.254.169.254/metadata/identity/oauth2/token";
 const REFRESH_MARGIN: Duration = Duration::from_secs(300);
+
+/// What a token is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Audience {
+    /// Signing in to Azure SQL.
+    Sql,
+    /// Azure Resource Manager: listing subscriptions and servers.
+    Arm,
+}
+
+impl Audience {
+    /// Token scope (v2 endpoints).
+    fn scope(self) -> &'static str {
+        match self {
+            Audience::Sql => "https://database.windows.net/.default",
+            Audience::Arm => "https://management.azure.com/.default",
+        }
+    }
+
+    /// Resource (managed identity endpoints).
+    fn resource(self) -> &'static str {
+        match self {
+            Audience::Sql => "https://database.windows.net/",
+            Audience::Arm => "https://management.azure.com/",
+        }
+    }
+
+    /// Public client app for password sign-in when the profile names none.
+    fn password_app(self) -> &'static str {
+        match self {
+            Audience::Sql => SQLCLIENT_APP,
+            Audience::Arm => AZURE_CLI_APP,
+        }
+    }
+}
 
 enum Flow {
     Password {
@@ -42,6 +77,7 @@ enum Flow {
 
 pub struct Entra {
     flow: Flow,
+    audience: Audience,
     authority: String,
     imds: String,
     /// App Service, Functions and Container Apps: `IDENTITY_ENDPOINT` and
@@ -52,8 +88,17 @@ pub struct Entra {
 }
 
 impl Entra {
-    /// `None` for authentication methods that are not Entra ID.
+    /// An Azure SQL token source; `None` for methods that are not Entra ID.
     pub fn from_auth(auth: &MssqlAuth, password: Option<&str>) -> Result<Option<Self>> {
+        Self::for_audience(auth, password, Audience::Sql)
+    }
+
+    /// `None` for authentication methods that are not Entra ID.
+    pub fn for_audience(
+        auth: &MssqlAuth,
+        password: Option<&str>,
+        audience: Audience,
+    ) -> Result<Option<Self>> {
         let secret = |what: &str| match password {
             Some(p) if !p.is_empty() => Ok(p.to_string()),
             _ => Err(DbError::Invalid(format!("{what} is required"))),
@@ -66,7 +111,7 @@ impl Entra {
             } => Flow::Password {
                 tenant: tenant_of(tenant.as_deref().unwrap_or("organizations"))?,
                 client_id: nonempty(client_id.as_deref())
-                    .unwrap_or(SQLCLIENT_APP)
+                    .unwrap_or(audience.password_app())
                     .into(),
                 user: user.trim().into(),
                 password: secret("password")?,
@@ -94,6 +139,7 @@ impl Entra {
             .map_err(|e| DbError::Internal(e.to_string()))?;
         Ok(Some(Self {
             flow,
+            audience,
             authority: AUTHORITY.into(),
             imds: IMDS.into(),
             app_service,
@@ -119,6 +165,7 @@ impl Entra {
     }
 
     async fn fetch(&self) -> std::result::Result<(String, Duration), String> {
+        let scope = self.audience.scope();
         let token_url = |tenant: &str| format!("{}/{tenant}/oauth2/v2.0/token", self.authority);
         let req = match &self.flow {
             Flow::Password {
@@ -129,7 +176,7 @@ impl Entra {
             } => self.http.post(token_url(tenant)).form(&[
                 ("grant_type", "password"),
                 ("client_id", client_id),
-                ("scope", SCOPE),
+                ("scope", scope),
                 ("username", user),
                 ("password", password),
             ]),
@@ -141,10 +188,10 @@ impl Entra {
                 ("grant_type", "client_credentials"),
                 ("client_id", client_id),
                 ("client_secret", secret),
-                ("scope", SCOPE),
+                ("scope", scope),
             ]),
             Flow::ManagedIdentity { client_id } => {
-                let mut query = vec![("resource", RESOURCE)];
+                let mut query = vec![("resource", self.audience.resource())];
                 if let Some(id) = client_id {
                     query.push(("client_id", id));
                 }
@@ -263,14 +310,20 @@ mod tests {
                     move |Path(tenant): Path<String>, Form(f): Form<HashMap<String, String>>| {
                         c1.fetch_add(1, Ordering::SeqCst);
                         async move {
-                            assert_eq!(f["scope"], SCOPE);
+                            let aud = if f["scope"].contains("management") { "arm" } else { "sql" };
+                            assert!(
+                                f["scope"] == Audience::Sql.scope() || f["scope"] == Audience::Arm.scope()
+                            );
                             let ok = match f["grant_type"].as_str() {
                                 "password" => f["password"] == "pw",
                                 "client_credentials" => f["client_secret"] == "secret",
                                 _ => false,
                             };
                             if ok {
-                                let t = format!("tok-{tenant}-{}", f["client_id"]);
+                                let t = match aud {
+                                    "sql" => format!("tok-{tenant}-{}", f["client_id"]),
+                                    _ => format!("{aud}-{tenant}-{}", f["client_id"]),
+                                };
                                 (StatusCode::OK, Json(json!({"access_token": t, "expires_in": 3599})))
                             } else {
                                 (
@@ -290,7 +343,7 @@ mod tests {
                         c2.fetch_add(1, Ordering::SeqCst);
                         async move {
                             assert_eq!(headers["metadata"], "true");
-                            assert_eq!(q["resource"], RESOURCE);
+                            assert_eq!(q["resource"], Audience::Sql.resource());
                             let id = q.get("client_id").cloned().unwrap_or("system".into());
                             Json(json!({"access_token": format!("mi-{id}"), "expires_in": "86399"}))
                         }
@@ -371,6 +424,33 @@ mod tests {
             client_id: Some("uami".into()),
         };
         assert_eq!(entra(&base, user, None).token().await.unwrap(), "mi-uami");
+    }
+
+    #[tokio::test]
+    async fn resource_manager_tokens_default_to_the_azure_cli_app() {
+        let (base, _) = fake_entra().await;
+        let auth = MssqlAuth::EntraPassword {
+            user: "ann@contoso.com".into(),
+            tenant: None,
+            client_id: None,
+        };
+        let mut e = Entra::for_audience(&auth, Some("pw"), Audience::Arm)
+            .unwrap()
+            .unwrap();
+        e.authority = base.clone();
+        assert_eq!(
+            e.token().await.unwrap(),
+            format!("arm-organizations-{AZURE_CLI_APP}")
+        );
+        let sp = MssqlAuth::EntraServicePrincipal {
+            tenant: "t".into(),
+            client_id: "app".into(),
+        };
+        let mut e = Entra::for_audience(&sp, Some("secret"), Audience::Arm)
+            .unwrap()
+            .unwrap();
+        e.authority = base;
+        assert_eq!(e.token().await.unwrap(), "arm-t-app");
     }
 
     #[test]

@@ -26,3 +26,24 @@ There is no horizontal scrolling on the resilts table
 
 in the text editor, add text zooming. User the middle mouse button scroll to zoom in and out of the text
 
+
+
+Improvments on the connections
+- add the possibility to copy connections
+- double clicking on a connection should open the edit dialog
+- add auto discovery:
+    - use the azure connection to query the databases present in a subscription (MS sql, postgres etc)
+
+Closing a tab does not work.
+
+Add a settings page where we can keep application wide settings:
+- theme of the app (ligh, dark, other color themes, omarchy default)
+- whedn closing a tab, the system ask for confirmation, this ask should be optional --> setting
+- and other settings you can find
+
+Connection tree improvements
+- add a small toolbar to the treeview
+    - add new fodler button
+    - add new connection button
+- allow in place rename of connections and folders
+- allow drag and drop of connections tto other folders

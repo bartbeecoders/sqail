@@ -7,6 +7,46 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
 
 ## Unreleased
 
+### sqail
+
+- **Duplicate a connection.** Right-click a connection for *Duplicate…*: the
+  form opens filled in from it, named “… (copy)”, and keeps its stored
+  password and client key unless you type new ones.
+- **Double-click a connection to edit it.** *New query tab* stays in the
+  right-click menu.
+- **Discover Azure databases.** Right-click a SQL Server connection that
+  signs in with Microsoft Entra ID for *Discover Azure databases…*: it lists
+  the Azure SQL, SQL Managed Instance and PostgreSQL flexible server
+  databases in the subscriptions that identity can read, and adds the ones
+  you tick as connections.
+- **Connection tree toolbar and folders.** *+ Connection* and *+ Folder*
+  buttons sit above the tree. Drag connections onto a folder (or *Move to
+  folder* in the right-click menu), and rename connections and folders in
+  place with *Rename*. Renaming a folder moves all of its connections.
+- **Settings window.** *File → Settings…* (Ctrl+,) gathers every
+  application-wide setting: theme, interface size, editor font size,
+  completion and formatting, the row limit, starting the local service and
+  the AI assistant's provider, models and programs.
+- **Colour themes.** Besides sqail's light and dark: Nord, Tokyo Night,
+  Gruvbox, Catppuccin Mocha, Catppuccin Latte, Solarized Light, and
+  **Omarchy**, which uses the current Omarchy theme's colours and follows
+  theme switches live. New installs on Omarchy start with it. The editor's
+  syntax colours follow the theme.
+- **Optional close prompt.** Turn off *Ask before closing a tab with unsaved
+  changes* (Settings → Tabs) to close such tabs at once. Tabs with an open
+  transaction still ask.
+- **Interface size.** Scale the whole interface from 75 % to 200 %.
+- **Fixed:** the × on a tab didn't close it (the click selected the tab
+  instead), and *Save* in the “Unsaved changes” prompt saved the file but
+  left the tab open.
+
+### sqail-service
+
+- `POST /v1/connections/{id}/azure/discover` lists the databases in the
+  Azure subscriptions a Microsoft Entra ID profile can read (admin).
+- `POST /v1/connections` takes `?secret_from=<id>` to copy a stored password
+  and client key into the new profile.
+
 ## 1.2.0 — 2026-10-07
 
 ### sqail

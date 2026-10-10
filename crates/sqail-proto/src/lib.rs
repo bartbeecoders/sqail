@@ -257,6 +257,17 @@ pub enum MssqlAuth {
 }
 
 impl MssqlAuth {
+    /// Whether this is a Microsoft Entra ID method, which can also list the
+    /// databases in Azure subscriptions.
+    pub fn is_entra(&self) -> bool {
+        matches!(
+            self,
+            MssqlAuth::EntraPassword { .. }
+                | MssqlAuth::EntraServicePrincipal { .. }
+                | MssqlAuth::EntraManagedIdentity { .. }
+        )
+    }
+
     /// Whether this method takes a secret in [`ConnectionInput::password`].
     pub fn uses_password(&self) -> bool {
         !matches!(
@@ -344,6 +355,74 @@ pub struct TestResult {
     pub latency_ms: u64,
     pub server_version: Option<String>,
     pub error: Option<String>,
+}
+
+// ------------------------------------------------------- azure discovery --
+
+/// `POST /v1/connections/{id}/azure/discover` — the databases in the Azure
+/// subscriptions that a Microsoft Entra ID connection's identity can read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct AzureDiscovery {
+    pub subscriptions: Vec<AzureSubscription>,
+    pub databases: Vec<AzureDatabase>,
+    /// Subscriptions or servers that could not be listed, and why.
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct AzureSubscription {
+    pub id: String,
+    pub name: String,
+}
+
+/// The kind of Azure resource a discovered database lives on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum AzureServerKind {
+    /// Azure SQL Database logical server.
+    SqlServer,
+    /// Azure SQL Managed Instance.
+    SqlManagedInstance,
+    /// Azure Database for PostgreSQL flexible server.
+    PostgresFlexible,
+}
+
+impl AzureServerKind {
+    pub fn engine(self) -> Engine {
+        match self {
+            AzureServerKind::SqlServer | AzureServerKind::SqlManagedInstance => Engine::Mssql,
+            AzureServerKind::PostgresFlexible => Engine::Postgres,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AzureServerKind::SqlServer => "Azure SQL",
+            AzureServerKind::SqlManagedInstance => "SQL Managed Instance",
+            AzureServerKind::PostgresFlexible => "PostgreSQL",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct AzureDatabase {
+    pub kind: AzureServerKind,
+    pub subscription_id: String,
+    pub resource_group: String,
+    /// The server's resource name.
+    pub server: String,
+    /// Fully qualified host name to connect to.
+    pub host: String,
+    pub port: u16,
+    pub database: String,
+    pub location: String,
+    /// The server's administrator login, when Azure reports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_login: Option<String>,
 }
 
 // ---------------------------------------------------------------- queries --

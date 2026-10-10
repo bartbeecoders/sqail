@@ -222,6 +222,292 @@ fn workspace_history_and_snippets_survive_a_restart() {
     drop(e.dir);
 }
 
+/// The Azure discovery dialog with a canned result (no Azure needed): add
+/// the new databases, and see the existing one marked as added.
+#[test]
+fn azure_discovery_adds_connections() {
+    use sqail_client::proto::{
+        AzureDatabase, AzureDiscovery, AzureServerKind, AzureSubscription, MssqlAuth, MssqlEncrypt,
+        MssqlParams,
+    };
+    use sqail_ui::dialogs::{Dialog, DiscoverForm};
+
+    let e = env();
+    let client = Client::new(&Target {
+        url: format!("https://{}", e.server.addr),
+        token: e.server.bootstrap_token.clone().unwrap(),
+        trust: Trust::Pinned(e.server.fingerprint.clone()),
+        identity: None,
+    })
+    .unwrap();
+    let source =
+        e.rt.block_on(client.create_connection(&ConnectionInput {
+            name: "azure first".into(),
+            params: ConnectionParams::Mssql(MssqlParams {
+                host: "first.database.windows.net".into(),
+                port: 1433,
+                instance: None,
+                database: Some("first".into()),
+                auth: MssqlAuth::EntraServicePrincipal {
+                    tenant: "contoso.onmicrosoft.com".into(),
+                    client_id: "app".into(),
+                },
+                encrypt: MssqlEncrypt::Required,
+                trust_server_certificate: false,
+            }),
+            password: Some("client-secret".into()),
+            ssl_client_key: None,
+            read_only: false,
+            color: None,
+            environment: None,
+            folder: None,
+        }))
+        .unwrap();
+    let db = |kind, server: &str, host: &str, database: &str| AzureDatabase {
+        kind,
+        subscription_id: "s1".into(),
+        resource_group: "rg-data".into(),
+        server: server.into(),
+        host: host.into(),
+        port: if kind == AzureServerKind::PostgresFlexible {
+            5432
+        } else {
+            1433
+        },
+        database: database.into(),
+        location: "westeurope".into(),
+        admin_login: Some("dbadmin".into()),
+    };
+    let found = AzureDiscovery {
+        subscriptions: vec![AzureSubscription {
+            id: "s1".into(),
+            name: "Development".into(),
+        }],
+        databases: vec![
+            db(
+                AzureServerKind::SqlServer,
+                "first",
+                "first.database.windows.net",
+                "first",
+            ),
+            db(
+                AzureServerKind::SqlServer,
+                "first",
+                "first.database.windows.net",
+                "sales",
+            ),
+            db(
+                AzureServerKind::PostgresFlexible,
+                "pg1",
+                "pg1.postgres.database.azure.com",
+                "app",
+            ),
+        ],
+        warnings: vec!["Locked (Azure SQL): AuthorizationFailed: no access".into()],
+    };
+
+    let mut h = app([1280.0, 800.0]);
+    wait(&mut h, "both connections", |a| {
+        a.service.connections.len() == 2
+    });
+    {
+        let app = h.state_mut();
+        let src = app.service.connection(source.id).unwrap().clone();
+        let mut form = DiscoverForm::new(&src);
+        form.on_discovered(Ok(found), &app.service.connections);
+        app.dialog = Dialog::AzureDiscover(Box::new(form));
+    }
+    h.run_steps(4);
+    shot(&mut h, "15-azure-discovery");
+    h.get_by_label("Add 2 connections").click();
+    wait(&mut h, "added connections", |a| {
+        a.service.connections.len() == 4 && matches!(a.dialog, Dialog::None)
+    });
+    let conns = &h.state().service.connections;
+    let sales = conns.iter().find(|c| c.name == "first/sales").unwrap();
+    assert!(sales.has_password, "the client secret was copied");
+    assert_eq!(sales.folder.as_deref(), Some("Azure"));
+    let pg = conns.iter().find(|c| c.name == "pg1/app").unwrap();
+    assert!(!pg.has_password);
+    match &pg.params {
+        ConnectionParams::Postgres(p) => assert_eq!(p.user, "dbadmin"),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The tab's × closes it, a middle click too, and a click on the tab
+/// selects it.
+#[test]
+fn tabs_close_with_the_close_button() {
+    let e = env();
+    let mut h = app([1280.0, 800.0]);
+    h.state_mut().new_tab(None);
+    h.state_mut().new_tab(None);
+    h.run_steps(2);
+    assert_eq!(h.state().tabs.len(), 3);
+
+    h.get_by_label("Query 1").click();
+    h.run_steps(2);
+    assert_eq!(h.state().active, 0, "clicking a tab selects it");
+
+    h.get_all_by_label("×")
+        .nth(1)
+        .expect("second tab's ×")
+        .click();
+    h.run_steps(2);
+    let titles: Vec<_> = h.state().tabs.iter().map(|t| t.title.clone()).collect();
+    assert_eq!(titles, ["Query 1", "Query 3"]);
+
+    h.get_by_label("Query 3")
+        .click_button(egui::PointerButton::Middle);
+    h.run_steps(2);
+    assert_eq!(h.state().tabs.len(), 1);
+
+    // Unsaved changes: Save in the prompt writes the file, then closes the tab.
+    let file = e.dir.path().join("notes.sql");
+    let idx = h.state_mut().new_tab(None);
+    h.state_mut().tabs[idx].set_file(file.clone(), "SELECT 1".into());
+    h.state_mut().tabs[idx].text = "SELECT 2".into();
+    h.run_steps(2);
+    h.get_all_by_label("×").nth(1).expect("notes.sql ×").click();
+    h.run_steps(4);
+    h.get_by_label("Unsaved changes");
+    h.get_by_label("Save").click();
+    wait(&mut h, "saved and closed", |a| a.tabs.len() == 1);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "SELECT 2");
+}
+
+/// The connection tree: a new folder from the toolbar, renamed in place, a
+/// connection dragged into it, and the connection and folder renamed.
+#[test]
+fn connection_tree_folders_rename_and_drag() {
+    let e = env();
+    let url = format!("https://{}", e.server.addr);
+    let mut h = app([1280.0, 800.0]);
+    let settle = |h: &mut Harness<'_, SqailApp>| h.run_steps(4);
+    let type_and_enter = |h: &mut Harness<'_, SqailApp>, text: &str| {
+        // The field opens focused with its text selected: typing replaces it.
+        h.event(egui::Event::Text(text.into()));
+        h.step();
+        h.key_press(Key::Enter);
+        h.run_steps(4);
+    };
+
+    // New folder: the toolbar adds it and opens it for renaming.
+    h.get_by_label("+ Folder").click();
+    settle(&mut h);
+    type_and_enter(&mut h, "Prod");
+    assert_eq!(h.state().settings.folders[&url], ["Prod"]);
+    h.get_by_label("Empty: drag connections here");
+    shot(&mut h, "18-tree-new-folder");
+
+    // Drag the connection onto the folder.
+    let from = h.get_by_label("people db").rect().center();
+    let to = h.get_by_label("Prod").rect().center();
+    h.hover_at(from);
+    h.step();
+    h.drag_at(from);
+    h.step();
+    for i in 1..=6 {
+        h.hover_at(from + (to - from) * (i as f32 / 6.0));
+        h.step();
+    }
+    shot(&mut h, "19-tree-dragging");
+    h.drop_at(to);
+    settle(&mut h);
+    wait(&mut h, "moved into the folder", |a| {
+        a.service.connections[0].folder.as_deref() == Some("Prod")
+    });
+    assert!(
+        !h.state().settings.folders.contains_key(&url),
+        "a folder with connections is stored on the service"
+    );
+
+    // Rename the connection, then the folder, in place.
+    h.get_by_label("people db").click_secondary();
+    settle(&mut h);
+    h.get_by_label("Rename").click();
+    settle(&mut h);
+    type_and_enter(&mut h, "people");
+    wait(&mut h, "renamed connection", |a| {
+        a.service.connections[0].name == "people"
+    });
+    h.get_by_label("Prod").click_secondary();
+    settle(&mut h);
+    h.get_by_label("Rename").click();
+    settle(&mut h);
+    type_and_enter(&mut h, "Production");
+    wait(&mut h, "renamed folder", |a| {
+        a.service.connections[0].folder.as_deref() == Some("Production")
+    });
+    shot(&mut h, "20-tree-renamed");
+
+    // The service has it too, not just the tree.
+    let client = Client::new(&Target {
+        url,
+        token: e.server.bootstrap_token.clone().unwrap(),
+        trust: Trust::Pinned(e.server.fingerprint.clone()),
+        identity: None,
+    })
+    .unwrap();
+    let saved = e.rt.block_on(client.connections()).unwrap();
+    assert_eq!(saved[0].name, "people");
+    assert_eq!(saved[0].folder.as_deref(), Some("Production"));
+}
+
+/// The settings window: pick a theme, turn off the close prompt, and both
+/// take effect and are saved.
+#[test]
+fn settings_window_changes_theme_and_close_prompt() {
+    use sqail_ui::settings::ThemePref;
+
+    let e = env();
+    let mut h = app([1280.0, 800.0]);
+    let settle = |h: &mut Harness<'_, SqailApp>| h.run_steps(4);
+    h.get_by_label("File").click();
+    settle(&mut h);
+    h.get_by_label_contains("Settings…").click();
+    settle(&mut h);
+    h.get_by_label("Settings");
+
+    h.get_by_label("Theme").click();
+    settle(&mut h);
+    h.get_by_label("Nord").click();
+    settle(&mut h);
+    assert_eq!(h.state().settings.theme, ThemePref::Nord);
+    assert_eq!(h.ctx.theme(), egui::Theme::Dark);
+    shot(&mut h, "16-settings-nord");
+
+    h.get_by_label("Tabs").click();
+    settle(&mut h);
+    h.get_by_label("Ask before closing a tab with unsaved changes")
+        .click();
+    settle(&mut h);
+    assert!(!h.state().settings.confirm_close_tab);
+    h.get_by_label("Close").click();
+    settle(&mut h);
+    assert!(matches!(h.state().dialog, sqail_ui::dialogs::Dialog::None));
+
+    h.state_mut().tabs[0].text =
+        "-- Nord\nSELECT id, upper(name) AS name\nFROM people\nWHERE score > 9.5 AND name <> 'Ada';"
+            .into();
+    h.run_steps(4);
+    shot(&mut h, "17-nord-editor");
+
+    let saved = std::fs::read_to_string(e.ui_dir.join("settings.toml")).unwrap();
+    assert!(saved.contains("theme = \"nord\""), "{saved}");
+    assert!(saved.contains("confirm_close_tab = false"), "{saved}");
+
+    // A tab with unsaved changes now closes without asking.
+    let idx = h.state_mut().new_tab(None);
+    h.state_mut().tabs[idx].text = "SELECT 'draft'".into();
+    h.run_steps(2);
+    h.get_all_by_label("×").nth(1).expect("draft ×").click();
+    settle(&mut h);
+    assert_eq!(h.state().tabs.len(), 1);
+    assert!(matches!(h.state().dialog, sqail_ui::dialogs::Dialog::None));
+}
+
 #[test]
 fn narrow_window_keeps_the_editor_out_of_the_side_panels() {
     let e = env();
@@ -489,7 +775,7 @@ fn editor_runs_queries_end_to_end() {
     // --- create a connection through the form -----------------------------
     // Modals position themselves over a few frames; settle before clicking.
     let settle = |h: &mut Harness<'_, SqailApp>| h.run_steps(4);
-    h.get_by_label("+ Add").click();
+    h.get_by_label("+ Connection").click();
     settle(&mut h);
     h.get_by_label("SQLite").click();
     settle(&mut h);
@@ -528,6 +814,45 @@ fn editor_runs_queries_end_to_end() {
             .iter()
             .any(|c| c.name == "scratch")
     );
+
+    // --- duplicate it from the context menu, then double-click to edit ----
+    settle(&mut h);
+    h.get_by_label("scratch").click_secondary();
+    settle(&mut h);
+    h.get_by_label("Duplicate…").click();
+    settle(&mut h);
+    h.get_by_label("Duplicate connection");
+    h.get_by_label("Save").click();
+    wait(&mut h, "duplicated connection", |a| {
+        a.service.connections.len() == 3
+    });
+    let copy = h
+        .state()
+        .service
+        .connections
+        .iter()
+        .find(|c| c.name == "scratch (copy)")
+        .expect("copy saved")
+        .clone();
+    match &copy.params {
+        ConnectionParams::Sqlite(p) => assert_eq!(p.path, scratch.to_string_lossy()),
+        other => panic!("copied as {other:?}"),
+    }
+    settle(&mut h);
+    // The harness spreads the two clicks over a few 0.25 s frames: allow a
+    // slower double-click than egui's default 0.3 s, and let enough time
+    // pass since the last click that this is not a triple click.
+    h.ctx
+        .options_mut(|o| o.input_options.max_double_click_delay = 1.0);
+    h.run_steps(10);
+    let node = h.get_by_label("scratch (copy)");
+    node.click();
+    node.click();
+    settle(&mut h);
+    h.get_by_label("Edit connection");
+    h.get_by_label("Cancel").click();
+    settle(&mut h);
+    assert!(matches!(h.state().dialog, sqail_ui::dialogs::Dialog::None));
 
     // --- CSV import through the dialog -------------------------------------
     let csv = dir.path().join("more.csv");

@@ -43,6 +43,18 @@ pub enum Msg {
     ConnDatabases(String, Result<Vec<String>, String>),
     ConnSaved(Result<Connection, String>),
     ConnDeleted(Result<Uuid, String>),
+    /// Renames and moves in the connection tree are saved; the failures.
+    TreeSaved(Vec<String>),
+    /// Databases found in Azure with the identity of connection `source`.
+    AzureDiscovered {
+        source: Uuid,
+        result: Result<sqail_client::proto::AzureDiscovery, String>,
+    },
+    /// Connections created from discovered databases, and the failures.
+    AzureAdded {
+        added: usize,
+        errors: Vec<String>,
+    },
     SessionOpened {
         tab: u64,
         connection: Uuid,
@@ -69,6 +81,8 @@ pub enum Msg {
     FileSaved {
         tab: u64,
         result: Result<PathBuf, String>,
+        /// Saved from the “Unsaved changes” prompt: close the tab now.
+        close: bool,
     },
     Notice {
         text: String,
@@ -156,7 +170,6 @@ pub struct SqailApp {
     notice: Option<(String, bool, Instant)>,
     /// Value shown in the cell viewer window: (title, text).
     pub viewer: Option<(String, String)>,
-    pending_close: Option<usize>,
     pub history: crate::local::History,
     pub snippets: crate::local::Snippets,
     pub sidebar: crate::sidebar::View,
@@ -170,13 +183,19 @@ pub struct SqailApp {
     pub palette: Option<crate::palette::Palette>,
     pub assistant: crate::assistant::Assistant,
     pub designers: crate::designer::Designers,
+    /// With the Omarchy theme: when its colours were last read, and checked.
+    omarchy_seen: Option<std::time::SystemTime>,
+    theme_checked: Instant,
 }
 
 impl SqailApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::install(&cc.egui_ctx);
         let settings = Settings::load();
-        apply_theme(&cc.egui_ctx, settings.theme);
+        let theme_error = theme::apply(&cc.egui_ctx, settings.theme).err();
+        // The UI scale is a setting; egui's own Ctrl+0 would bypass it.
+        cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        cc.egui_ctx.set_zoom_factor(settings.ui_scale);
         let mut app = Self {
             worker: Worker::new(cc.egui_ctx.clone()),
             service: Service {
@@ -195,7 +214,6 @@ impl SqailApp {
             dialog: Dialog::None,
             notice: None,
             viewer: None,
-            pending_close: None,
             history: crate::local::History::load(),
             snippets: crate::local::Snippets::load(),
             sidebar: Default::default(),
@@ -208,11 +226,16 @@ impl SqailApp {
             palette: None,
             assistant: Default::default(),
             designers: Default::default(),
+            omarchy_seen: theme::omarchy_stamp(),
+            theme_checked: Instant::now(),
             settings,
         };
         app.restore_workspace();
         if let Some(w) = app.keymap.warnings.first().cloned() {
             app.notify(w, true);
+        }
+        if let Some(e) = theme_error {
+            app.notify(e, true);
         }
         match app.settings.active().cloned() {
             Some(profile) => app.connect(profile),
@@ -403,6 +426,40 @@ impl SqailApp {
         self.history.push(entry);
     }
 
+    /// Switch to `pref` and save it. An unavailable Omarchy theme is
+    /// reported, and the system theme shows meanwhile.
+    pub fn set_theme(&mut self, ctx: &egui::Context, pref: ThemePref) {
+        self.settings.theme = pref;
+        self.settings.save();
+        self.omarchy_seen = theme::omarchy_stamp();
+        if let Err(e) = theme::apply(ctx, pref) {
+            self.notify(e, true);
+        }
+    }
+
+    pub fn set_ui_scale(&mut self, ctx: &egui::Context, scale: f32) {
+        self.settings.ui_scale = scale.clamp(0.75, 2.0);
+        self.settings.save();
+        ctx.set_zoom_factor(self.settings.ui_scale);
+    }
+
+    /// Follow Omarchy theme switches (`omarchy theme set`) while running.
+    fn follow_omarchy(&mut self, ctx: &egui::Context) {
+        if self.settings.theme != ThemePref::Omarchy
+            || self.theme_checked.elapsed() < std::time::Duration::from_secs(2)
+        {
+            return;
+        }
+        self.theme_checked = Instant::now();
+        let stamp = theme::omarchy_stamp();
+        if stamp.is_some() && stamp != self.omarchy_seen {
+            self.omarchy_seen = stamp;
+            // A failure here is a half-written theme; the next check retries.
+            let _ = theme::apply(ctx, ThemePref::Omarchy);
+        }
+        ctx.request_repaint_after(std::time::Duration::from_secs(2));
+    }
+
     pub fn notify(&mut self, text: impl Into<String>, error: bool) {
         self.notice = Some((text.into(), error, Instant::now()));
     }
@@ -431,8 +488,7 @@ impl SqailApp {
     pub fn request_close_tab(&mut self, idx: usize) {
         if self.tabs[idx].in_transaction {
             self.dialog = Dialog::ConfirmCloseTransaction(Some(idx));
-        } else if self.tabs[idx].is_dirty() {
-            self.pending_close = Some(idx);
+        } else if self.tabs[idx].is_dirty() && self.settings.confirm_close_tab {
             self.dialog = Dialog::ConfirmClose(idx);
         } else {
             self.close_tab(idx);
@@ -454,7 +510,6 @@ impl SqailApp {
             self.new_tab(tab.connection);
         }
         self.active = self.active.min(self.tabs.len() - 1);
-        self.pending_close = None;
     }
 
     pub fn engine_of(&self, conn: Option<Uuid>) -> Option<Engine> {
@@ -691,6 +746,38 @@ impl SqailApp {
                     }
                 }
             },
+            Msg::AzureDiscovered { source, result } => {
+                if let Dialog::AzureDiscover(form) = &mut self.dialog
+                    && form.source == source
+                {
+                    form.on_discovered(result, &self.service.connections);
+                }
+            }
+            Msg::AzureAdded { added, errors } => {
+                self.refresh_connections();
+                match errors.first() {
+                    None => {
+                        self.dialog = Dialog::None;
+                        let s = if added == 1 { "" } else { "s" };
+                        self.notify(format!("Added {added} connection{s} from Azure."), false);
+                    }
+                    Some(first) => {
+                        let msg = format!("Added {added}, {} failed: {first}", errors.len());
+                        if let Dialog::AzureDiscover(form) = &mut self.dialog {
+                            form.saving = false;
+                            form.error = Some(msg);
+                        } else {
+                            self.notify(msg, true);
+                        }
+                    }
+                }
+            }
+            Msg::TreeSaved(errors) => {
+                self.refresh_connections();
+                if let Some(first) = errors.first() {
+                    self.notify(format!("Could not save: {first}"), true);
+                }
+            }
             Msg::ConnDeleted(r) => match r {
                 Ok(_) => self.refresh_connections(),
                 Err(e) => self.notify(format!("Delete failed: {e}"), true),
@@ -763,10 +850,13 @@ impl SqailApp {
                 tab.set_file(path, text);
             }
             Msg::FileOpened(Err(e)) => self.notify(format!("Open failed: {e}"), true),
-            Msg::FileSaved { tab, result } => match result {
+            Msg::FileSaved { tab, result, close } => match result {
                 Ok(path) => {
                     if let Some(t) = self.tab_mut(tab) {
                         t.mark_saved(path);
+                    }
+                    if close && let Some(idx) = self.tabs.iter().position(|t| t.id == tab) {
+                        self.close_tab(idx);
                     }
                 }
                 Err(e) => self.notify(format!("Save failed: {e}"), true),
@@ -1153,6 +1243,16 @@ impl SqailApp {
     }
 
     pub fn save_tab(&mut self, idx: usize, save_as: bool) {
+        self.save_tab_then(idx, save_as, false);
+    }
+
+    /// Save, and close the tab once it is saved (not when the save dialog
+    /// is cancelled or the write fails).
+    pub fn save_and_close_tab(&mut self, idx: usize) {
+        self.save_tab_then(idx, false, true);
+    }
+
+    fn save_tab_then(&mut self, idx: usize, save_as: bool, close: bool) {
         let tab = &self.tabs[idx];
         let (id, text) = (tab.id, tab.text.clone());
         let known = tab.path.clone().filter(|_| !save_as);
@@ -1178,7 +1278,11 @@ impl SqailApp {
             let result = std::fs::write(&path, text)
                 .map(|_| path)
                 .map_err(|e| e.to_string());
-            Msg::FileSaved { tab: id, result }
+            Msg::FileSaved {
+                tab: id,
+                result,
+                close,
+            }
         });
     }
 
@@ -1268,9 +1372,10 @@ impl SqailApp {
                 } else {
                     ThemePref::Dark
                 };
-                self.settings.theme = pref;
-                self.settings.save();
-                apply_theme(ctx, pref);
+                self.set_theme(ctx, pref);
+            }
+            Command::OpenSettings => {
+                self.dialog = Dialog::Settings(Box::default());
             }
             Command::ShowConnections => self.show_sidebar(crate::sidebar::View::Connections),
             Command::ShowHistory => self.show_sidebar(crate::sidebar::View::History),
@@ -1440,6 +1545,8 @@ impl SqailApp {
                     self.menu_item(ui, c);
                 }
                 ui.separator();
+                self.menu_item(ui, Command::OpenSettings);
+                ui.separator();
                 if ui.button("Quit").clicked() {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
@@ -1534,17 +1641,16 @@ impl SqailApp {
                 }
             });
             ui.menu_button("View", |ui| {
-                for (pref, label) in [
-                    (ThemePref::System, "Follow system"),
-                    (ThemePref::Light, "Light"),
-                    (ThemePref::Dark, "Dark"),
-                ] {
-                    if ui.radio(self.settings.theme == pref, label).clicked() {
-                        self.settings.theme = pref;
-                        self.settings.save();
-                        apply_theme(ui.ctx(), pref);
+                ui.menu_button("Theme", |ui| {
+                    for pref in ThemePref::ALL {
+                        if ui
+                            .radio(self.settings.theme == pref, pref.label())
+                            .clicked()
+                        {
+                            self.set_theme(ui.ctx(), pref);
+                        }
                     }
-                }
+                });
                 ui.separator();
                 for c in [
                     Command::ShowConnections,
@@ -1670,37 +1776,46 @@ impl SqailApp {
                             } else {
                                 egui::Stroke::NONE
                             });
-                        let resp = frame
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 4.0;
-                                    ui.label(RichText::new("●").color(color.unwrap_or(
-                                        if tab.connection.is_some() {
-                                            theme::accent(dark)
-                                        } else {
-                                            Color32::GRAY
-                                        },
-                                    )));
-                                    let mut title = tab.title.clone();
-                                    if tab.is_dirty() {
-                                        title.push_str(" •");
-                                    }
-                                    let t = RichText::new(title);
-                                    ui.label(if selected { t.strong() } else { t });
-                                    if tab.run.as_ref().is_some_and(|r| r.running) {
-                                        ui.spinner();
-                                    }
-                                    if ui
-                                        .small_button("×")
-                                        .on_hover_text("Close (Ctrl+W)")
-                                        .clicked()
-                                    {
-                                        close = Some(i);
-                                    }
-                                });
+                        // The tab's click sense goes in before its contents,
+                        // so the × button on top of it gets its own clicks.
+                        let sense = egui::UiBuilder::new().sense(egui::Sense::click());
+                        let resp = ui
+                            .scope_builder(sense, |ui| {
+                                frame.show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 4.0;
+                                        // Not selectable: a click on the text selects the tab.
+                                        let dot = RichText::new("●").color(color.unwrap_or(
+                                            if tab.connection.is_some() {
+                                                theme::accent(dark)
+                                            } else {
+                                                Color32::GRAY
+                                            },
+                                        ));
+                                        ui.add(egui::Label::new(dot).selectable(false));
+                                        let mut title = tab.title.clone();
+                                        if tab.is_dirty() {
+                                            title.push_str(" •");
+                                        }
+                                        let t = RichText::new(title);
+                                        ui.add(
+                                            egui::Label::new(if selected { t.strong() } else { t })
+                                                .selectable(false),
+                                        );
+                                        if tab.run.as_ref().is_some_and(|r| r.running) {
+                                            ui.spinner();
+                                        }
+                                        if ui
+                                            .small_button("×")
+                                            .on_hover_text("Close (Ctrl+W)")
+                                            .clicked()
+                                        {
+                                            close = Some(i);
+                                        }
+                                    });
+                                })
                             })
-                            .response
-                            .interact(egui::Sense::click());
+                            .response;
                         if resp.clicked() {
                             self.active = i;
                         }
@@ -1944,14 +2059,6 @@ fn is_session_gone(e: &sqail_client::Error) -> bool {
     }
 }
 
-fn apply_theme(ctx: &egui::Context, pref: ThemePref) {
-    ctx.set_theme(match pref {
-        ThemePref::System => egui::ThemePreference::System,
-        ThemePref::Light => egui::ThemePreference::Light,
-        ThemePref::Dark => egui::ThemePreference::Dark,
-    });
-}
-
 impl eframe::App for SqailApp {
     fn on_exit(&mut self) {
         self.autosave_workspace(true);
@@ -1972,6 +2079,7 @@ impl eframe::App for SqailApp {
             self.handle(m);
         }
         self.shortcuts(&ctx);
+        self.follow_omarchy(&ctx);
 
         egui::Panel::top("menu").show(ui, |ui| self.menu_bar(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));

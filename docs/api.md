@@ -84,7 +84,28 @@ Two admin-only routes take an unsaved profile (the same body as `POST
 (`[{"name": "…"}]`; `name` may be empty; PostgreSQL connects to `postgres` when `database` is
 empty). Add `?secret_from=<id>` to either route to use the password and
 client key stored with profile `<id>` when the body omits them. A value in
-the body, including `""`, is used instead.
+the body, including `""`, is used instead. `POST /v1/connections` takes
+`?secret_from=<id>` too, to copy those secrets into a new profile (the UI's
+*Duplicate…*).
+
+`POST /v1/connections/{id}/azure/discover` (admin) lists the databases in the
+Azure subscriptions that a SQL Server profile's Microsoft Entra ID identity
+can read: Azure SQL servers, SQL managed instances and PostgreSQL flexible
+servers. The service gets an Azure Resource Manager token with the profile's
+credentials (the Azure CLI's public client for `entra_password` without a
+`client_id`). Other profiles get `400`; a failed sign-in or subscription list
+`502`. Servers or subscriptions that can't be listed are reported in
+`warnings` instead of failing the request:
+
+```json
+{"subscriptions": [{"id": "…", "name": "Development"}],
+ "databases": [{"kind": "sql_server", "subscription_id": "…", "resource_group": "rg-data",
+   "server": "sql1", "host": "sql1.database.windows.net", "port": 1433,
+   "database": "sales", "location": "westeurope", "admin_login": "sqladmin"}],
+ "warnings": ["Production (Azure SQL): AuthorizationFailed: …"]}
+```
+
+`kind` is `sql_server`, `sql_managed_instance` or `postgres_flexible`.
 
 ## Running SQL
 

@@ -2,8 +2,8 @@
 
 use egui::{Color32, Id, Modal, RichText};
 use sqail_client::proto::{
-    Connection, ConnectionInput, ConnectionParams, MssqlAuth, MssqlEncrypt, MssqlParams, PgSslMode,
-    PostgresParams, SqliteParams, TestResult,
+    AzureDatabase, AzureDiscovery, AzureServerKind, Connection, ConnectionInput, ConnectionParams,
+    MssqlAuth, MssqlEncrypt, MssqlParams, PgSslMode, PostgresParams, SqliteParams, TestResult,
 };
 use uuid::Uuid;
 
@@ -18,6 +18,8 @@ pub enum Dialog {
     None,
     Welcome(WelcomeForm),
     Connection(Box<ConnForm>),
+    AzureDiscover(Box<DiscoverForm>),
+    Settings(Box<crate::settings_ui::SettingsPage>),
     ConfirmDelete(Uuid, String),
     ConfirmClose(usize),
     SaveSnippet {
@@ -256,6 +258,9 @@ enum DbList {
 
 pub struct ConnForm {
     editing: Option<Uuid>,
+    /// A duplicate of this saved profile: its password and client key are
+    /// copied unless new ones are typed.
+    copy_of: Option<Uuid>,
     name: String,
     engine: EngineChoice,
     host: String,
@@ -302,6 +307,7 @@ impl ConnForm {
     pub fn new_default() -> Self {
         Self {
             editing: None,
+            copy_of: None,
             name: String::new(),
             engine: EngineChoice::Postgres,
             host: "127.0.0.1".into(),
@@ -401,6 +407,28 @@ impl ConnForm {
             }
         }
         f
+    }
+
+    /// A new profile in `folder`.
+    pub fn in_folder(folder: Option<String>) -> Self {
+        Self {
+            folder: folder.unwrap_or_default(),
+            ..Self::new_default()
+        }
+    }
+
+    /// A new profile prefilled from `c`, named “… (copy)”.
+    pub fn duplicate(c: &Connection, taken: &[&str]) -> Self {
+        let mut f = Self::edit(c);
+        f.editing = None;
+        f.copy_of = Some(c.id);
+        f.name = copy_name(&c.name, taken);
+        f
+    }
+
+    /// The saved profile whose stored secrets fill in what the form omits.
+    fn secret_source(&self) -> Option<Uuid> {
+        self.editing.or(self.copy_of)
     }
 
     pub fn on_tested(&mut self, r: Result<TestResult, String>) {
@@ -510,8 +538,8 @@ impl ConnForm {
         Ok(ConnectionInput {
             name,
             params,
-            // Empty field while editing = keep the stored password.
-            password: if self.password.is_empty() && self.editing.is_some() {
+            // Empty field while editing or duplicating = keep the stored password.
+            password: if self.password.is_empty() && self.secret_source().is_some() {
                 None
             } else {
                 Some(self.password.clone())
@@ -535,7 +563,7 @@ impl ConnForm {
         if self.pg_client_cert.trim().is_empty() {
             return Ok(self.has_ssl_client_key.then(String::new));
         }
-        if self.editing.is_some() && self.has_ssl_client_key && !self.pg_key_cleared {
+        if self.secret_source().is_some() && self.has_ssl_client_key && !self.pg_key_cleared {
             return Ok(None);
         }
         Err("Choose the private key for the client certificate".into())
@@ -580,6 +608,17 @@ fn ssl_label(mode: PgSslMode) -> &'static str {
         PgSslMode::VerifyCa => "verify-ca",
         PgSslMode::VerifyFull => "verify-full",
     }
+}
+
+/// `name (copy)`, or `name (copy 2)`, … when that is taken.
+fn copy_name(name: &str, taken: &[&str]) -> String {
+    (1..)
+        .map(|n| match n {
+            1 => format!("{name} (copy)"),
+            n => format!("{name} (copy {n})"),
+        })
+        .find(|c| !taken.contains(&c.as_str()))
+        .unwrap_or_default()
 }
 
 fn check_pem(label: &str, pem: &str, certificate: bool) -> Result<(), String> {
@@ -748,6 +787,8 @@ fn connection_form(ctx: &egui::Context, app: &mut SqailApp) {
         ui.set_width(560.0);
         ui.heading(if form.editing.is_some() {
             "Edit connection"
+        } else if form.copy_of.is_some() {
+            "Duplicate connection"
         } else {
             "New connection"
         });
@@ -915,7 +956,11 @@ fn connection_form(ctx: &egui::Context, app: &mut SqailApp) {
                                             "Password"
                                         },
                                     );
-                                    let hint = if form.has_password { "unchanged" } else { "" };
+                                    let hint = match (form.has_password, form.copy_of) {
+                                        (false, _) => "",
+                                        (true, None) => "unchanged",
+                                        (true, Some(_)) => "copied from the original",
+                                    };
                                     ui.add(
                                         egui::TextEdit::singleline(&mut form.password)
                                             .password(true)
@@ -1110,7 +1155,7 @@ fn connection_form(ctx: &egui::Context, app: &mut SqailApp) {
                 form.dbs = Some((key.clone(), DbList::Loading));
                 // Editing without retyping the password: use the stored one.
                 let secret_from = form
-                    .editing
+                    .secret_source()
                     .filter(|_| input.password.is_none() && form.has_password);
                 let client = client.clone();
                 app.worker.run(async move {
@@ -1132,7 +1177,7 @@ fn connection_form(ctx: &egui::Context, app: &mut SqailApp) {
                 form.test = None;
                 form.error = None;
                 // Omitted password or client key: the service still has them.
-                let secret_from = form.editing.filter(|_| {
+                let secret_from = form.secret_source().filter(|_| {
                     (input.password.is_none() && form.has_password)
                         || (input.ssl_client_key.is_none() && form.has_ssl_client_key)
                 });
@@ -1145,10 +1190,11 @@ fn connection_form(ctx: &egui::Context, app: &mut SqailApp) {
                 form.saving = true;
                 form.error = None;
                 let editing = form.editing;
+                let copy_of = form.copy_of;
                 app.worker.run(async move {
                     let r = match editing {
                         Some(id) => client.update_connection(id, &input).await,
-                        None => client.create_connection(&input).await,
+                        None => client.create_connection_from(&input, copy_of).await,
                     };
                     Msg::ConnSaved(r.map_err(|e| e.to_string()))
                 });
@@ -1186,6 +1232,341 @@ fn connection_form(ctx: &egui::Context, app: &mut SqailApp) {
         };
         Msg::ConnCertPicked { kind, result }
     });
+}
+
+// -------------------------------------------------------- azure discovery --
+
+/// Databases found in Azure with a connection's Entra ID identity, to add
+/// as connections.
+pub struct DiscoverForm {
+    pub source: Uuid,
+    source_name: String,
+    found: Option<Result<AzureDiscovery, String>>,
+    /// Parallel to the discovered databases.
+    picked: Vec<bool>,
+    filter: String,
+    folder: String,
+    pub saving: bool,
+    pub error: Option<String>,
+}
+
+impl DiscoverForm {
+    pub fn new(source: &Connection) -> Self {
+        Self {
+            source: source.id,
+            source_name: source.name.clone(),
+            found: None,
+            picked: Vec::new(),
+            filter: String::new(),
+            folder: "Azure".into(),
+            saving: false,
+            error: None,
+        }
+    }
+
+    pub fn on_discovered(&mut self, r: Result<AzureDiscovery, String>, existing: &[Connection]) {
+        if let Ok(d) = &r {
+            self.picked = d
+                .databases
+                .iter()
+                .map(|db| !already_added(db, existing))
+                .collect();
+        }
+        self.found = Some(r);
+    }
+
+    fn subscription_name<'a>(d: &'a AzureDiscovery, id: &'a str) -> &'a str {
+        d.subscriptions
+            .iter()
+            .find(|s| s.id == id)
+            .map_or(id, |s| s.name.as_str())
+    }
+
+    fn matches(&self, d: &AzureDiscovery, db: &AzureDatabase) -> bool {
+        let f = self.filter.trim().to_lowercase();
+        f.is_empty()
+            || [
+                db.database.as_str(),
+                db.server.as_str(),
+                db.resource_group.as_str(),
+                Self::subscription_name(d, &db.subscription_id),
+                db.kind.label(),
+            ]
+            .iter()
+            .any(|s| s.to_lowercase().contains(&f))
+    }
+}
+
+/// A connection to this database (same engine, host and database) exists.
+fn already_added(db: &AzureDatabase, existing: &[Connection]) -> bool {
+    existing.iter().any(|c| match &c.params {
+        ConnectionParams::Mssql(p) => {
+            db.kind.engine() == sqail_client::proto::Engine::Mssql
+                && p.host.eq_ignore_ascii_case(&db.host)
+                && p.database
+                    .as_deref()
+                    .is_some_and(|d| d.eq_ignore_ascii_case(&db.database))
+        }
+        ConnectionParams::Postgres(p) => {
+            db.kind.engine() == sqail_client::proto::Engine::Postgres
+                && p.host.eq_ignore_ascii_case(&db.host)
+                && p.database == db.database
+        }
+        ConnectionParams::Sqlite(_) => false,
+    })
+}
+
+/// The profile for a discovered database, and the saved profile to copy the
+/// secret from. SQL Server databases sign in like `source`; PostgreSQL ones
+/// get the server's admin login and need a password before they connect.
+pub fn discovered_input(
+    db: &AzureDatabase,
+    source: &Connection,
+    folder: Option<String>,
+) -> (ConnectionInput, Option<Uuid>) {
+    let (params, secret_from) = match (&source.params, db.kind.engine()) {
+        (ConnectionParams::Mssql(src), sqail_client::proto::Engine::Mssql) => (
+            ConnectionParams::Mssql(MssqlParams {
+                host: db.host.clone(),
+                port: db.port,
+                instance: None,
+                database: Some(db.database.clone()),
+                auth: src.auth.clone(),
+                encrypt: MssqlEncrypt::Required,
+                trust_server_certificate: false,
+            }),
+            (src.auth.uses_password() && source.has_password).then_some(source.id),
+        ),
+        _ => (
+            ConnectionParams::Postgres(PostgresParams {
+                host: db.host.clone(),
+                port: db.port,
+                database: db.database.clone(),
+                user: db.admin_login.clone().unwrap_or_default(),
+                ssl_mode: PgSslMode::Require,
+                ssl_root_cert: None,
+                ssl_client_cert: None,
+            }),
+            None,
+        ),
+    };
+    let input = ConnectionInput {
+        name: format!("{}/{}", db.server, db.database),
+        params,
+        password: None,
+        ssl_client_key: None,
+        read_only: source.read_only,
+        color: source.color.clone(),
+        environment: source.environment.clone(),
+        folder,
+    };
+    (input, secret_from)
+}
+
+fn azure_discover(ctx: &egui::Context, app: &mut SqailApp) {
+    let connections = app.service.connections.clone();
+    let Dialog::AzureDiscover(form) = &mut app.dialog else {
+        return;
+    };
+    let mut close = false;
+    let mut add = false;
+    let resp = Modal::new(Id::new("azure_discover")).show(ctx, |ui| {
+        ui.set_width(760.0);
+        ui.heading("Discover Azure databases");
+        ui.label(
+            RichText::new(format!(
+                "Azure SQL, SQL Managed Instance and PostgreSQL databases in the \
+                 subscriptions that “{}” can read.",
+                form.source_name
+            ))
+            .weak(),
+        );
+        ui.add_space(6.0);
+        match &form.found {
+            None => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Asking Azure Resource Manager…");
+                });
+            }
+            Some(Err(e)) => {
+                ui.colored_label(Color32::from_rgb(0xd6, 0x45, 0x45), e);
+                ui.label(
+                    RichText::new(
+                        "The identity needs the Reader role (or another role that can list \
+                         the servers) on the subscriptions.",
+                    )
+                    .weak(),
+                );
+            }
+            Some(Ok(d)) => {
+                let d = d.clone();
+                discovered_list(ui, form, &d, &connections);
+            }
+        }
+        if let Some(e) = &form.error {
+            ui.colored_label(Color32::from_rgb(0xd6, 0x45, 0x45), e);
+        }
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            let n = form.picked.iter().filter(|p| **p).count();
+            let ready = matches!(form.found, Some(Ok(_))) && n > 0 && !form.saving;
+            let s = if n == 1 { "" } else { "s" };
+            if ui
+                .add_enabled(ready, egui::Button::new(format!("Add {n} connection{s}")))
+                .clicked()
+            {
+                add = true;
+            }
+            if ui.button("Cancel").clicked() {
+                close = true;
+            }
+            if form.saving {
+                ui.spinner();
+            }
+        });
+    });
+    if resp.should_close() && !form.saving {
+        close = true;
+    }
+    if close {
+        app.dialog = Dialog::None;
+        return;
+    }
+    if !add {
+        return;
+    }
+    let (Some(client), Some(source), Some(Ok(d))) = (
+        app.service.client.clone(),
+        app.service.connection(form.source).cloned(),
+        &form.found,
+    ) else {
+        return;
+    };
+    let folder = Some(form.folder.trim().to_string()).filter(|f| !f.is_empty());
+    let inputs: Vec<_> = d
+        .databases
+        .iter()
+        .zip(&form.picked)
+        .filter(|(db, picked)| **picked && !already_added(db, &connections))
+        .map(|(db, _)| discovered_input(db, &source, folder.clone()))
+        .collect();
+    form.saving = true;
+    form.error = None;
+    app.worker.run(async move {
+        let mut added = 0;
+        let mut errors = Vec::new();
+        for (input, secret_from) in inputs {
+            match client.create_connection_from(&input, secret_from).await {
+                Ok(_) => added += 1,
+                Err(e) => errors.push(format!("{}: {e}", input.name)),
+            }
+        }
+        Msg::AzureAdded { added, errors }
+    });
+}
+
+fn discovered_list(
+    ui: &mut egui::Ui,
+    form: &mut DiscoverForm,
+    d: &AzureDiscovery,
+    connections: &[Connection],
+) {
+    if !d.warnings.is_empty() {
+        egui::CollapsingHeader::new(
+            RichText::new(format!("{} warning(s)", d.warnings.len()))
+                .color(Color32::from_rgb(0xe6, 0xa2, 0x3c)),
+        )
+        .id_salt("azure_warnings")
+        .show(ui, |ui| {
+            for w in &d.warnings {
+                ui.label(RichText::new(w).small());
+            }
+        });
+    }
+    if d.databases.is_empty() {
+        ui.label(RichText::new("No databases found.").weak());
+        return;
+    }
+    ui.horizontal(|ui| {
+        let l = ui.label("Filter");
+        ui.add(
+            egui::TextEdit::singleline(&mut form.filter)
+                .hint_text("database, server, resource group…")
+                .desired_width(300.0),
+        )
+        .labelled_by(l.id);
+        let visible: Vec<usize> = (0..d.databases.len())
+            .filter(|&i| {
+                form.matches(d, &d.databases[i]) && !already_added(&d.databases[i], connections)
+            })
+            .collect();
+        if ui.small_button("Select all").clicked() {
+            for &i in &visible {
+                form.picked[i] = true;
+            }
+        }
+        if ui.small_button("Select none").clicked() {
+            for &i in &visible {
+                form.picked[i] = false;
+            }
+        }
+    });
+    egui::ScrollArea::vertical()
+        .max_height((ui.ctx().content_rect().height() - 320.0).clamp(160.0, 420.0))
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            egui::Grid::new("azure_dbs")
+                .num_columns(5)
+                .striped(true)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| {
+                    for h in [
+                        "Database",
+                        "Server",
+                        "Type",
+                        "Resource group",
+                        "Subscription",
+                    ] {
+                        ui.label(RichText::new(h).strong());
+                    }
+                    ui.end_row();
+                    for (i, db) in d.databases.iter().enumerate() {
+                        if !form.matches(d, db) {
+                            continue;
+                        }
+                        if already_added(db, connections) {
+                            ui.add_enabled(false, egui::Checkbox::new(&mut true, &db.database))
+                                .on_disabled_hover_text("Already a connection");
+                        } else {
+                            ui.checkbox(&mut form.picked[i], &db.database);
+                        }
+                        ui.label(&db.server).on_hover_text(&db.host);
+                        ui.label(db.kind.label());
+                        ui.label(&db.resource_group);
+                        ui.label(DiscoverForm::subscription_name(d, &db.subscription_id));
+                        ui.end_row();
+                    }
+                });
+        });
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        let l = ui.label("Add to folder");
+        ui.add(egui::TextEdit::singleline(&mut form.folder).desired_width(200.0))
+            .labelled_by(l.id);
+    });
+    if d.databases
+        .iter()
+        .any(|db| db.kind == AzureServerKind::PostgresFlexible)
+    {
+        ui.label(
+            RichText::new(
+                "SQL Server databases sign in like this connection. PostgreSQL databases get \
+                 the server's admin login: edit them to set a password.",
+            )
+            .weak(),
+        );
+    }
 }
 
 // ---------------------------------------------------------- confirmations --
@@ -1267,7 +1648,7 @@ fn confirm_close(ctx: &egui::Context, app: &mut SqailApp) {
     match decision {
         Some(0) => {
             app.dialog = Dialog::None;
-            app.save_tab(idx, false);
+            app.save_and_close_tab(idx);
         }
         Some(1) => {
             app.dialog = Dialog::None;
@@ -1810,6 +2191,8 @@ pub fn show(ctx: &egui::Context, app: &mut SqailApp) {
         Dialog::None => {}
         Dialog::Welcome(_) => welcome(ctx, app),
         Dialog::Connection(_) => connection_form(ctx, app),
+        Dialog::AzureDiscover(_) => azure_discover(ctx, app),
+        Dialog::Settings(_) => crate::settings_ui::show(ctx, app),
         Dialog::ConfirmDelete(..) => confirm_delete(ctx, app),
         Dialog::ConfirmClose(_) => confirm_close(ctx, app),
         Dialog::SaveSnippet { .. } => save_snippet(ctx, app),
@@ -1817,5 +2200,142 @@ pub fn show(ctx: &egui::Context, app: &mut SqailApp) {
         Dialog::ApplyEdits(_) => apply_edits(ctx, app),
         Dialog::DropTable(_) => drop_table(ctx, app),
         Dialog::ConfirmCloseTransaction(target) => confirm_close_transaction(ctx, app, target),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sqail_client::proto::Engine;
+
+    use super::*;
+
+    fn connection(params: ConnectionParams) -> Connection {
+        Connection {
+            id: Uuid::new_v4(),
+            name: "azure".into(),
+            engine: params.engine(),
+            params,
+            has_password: true,
+            has_ssl_client_key: false,
+            read_only: true,
+            color: Some("#c0392b".into()),
+            environment: Some("prod".into()),
+            folder: None,
+            created_at: "2026-01-01T00:00:00Z".parse().unwrap(),
+            updated_at: "2026-01-01T00:00:00Z".parse().unwrap(),
+        }
+    }
+
+    fn entra_source() -> Connection {
+        connection(ConnectionParams::Mssql(MssqlParams {
+            host: "first.database.windows.net".into(),
+            port: 1433,
+            instance: None,
+            database: Some("first".into()),
+            auth: MssqlAuth::EntraServicePrincipal {
+                tenant: "t".into(),
+                client_id: "app".into(),
+            },
+            encrypt: MssqlEncrypt::Required,
+            trust_server_certificate: false,
+        }))
+    }
+
+    fn db(kind: AzureServerKind, host: &str, database: &str) -> AzureDatabase {
+        AzureDatabase {
+            kind,
+            subscription_id: "s1".into(),
+            resource_group: "rg".into(),
+            server: host.split('.').next().unwrap().into(),
+            host: host.into(),
+            port: if kind == AzureServerKind::PostgresFlexible {
+                5432
+            } else {
+                1433
+            },
+            database: database.into(),
+            location: "westeurope".into(),
+            admin_login: Some("dbadmin".into()),
+        }
+    }
+
+    #[test]
+    fn copy_names_count_up() {
+        assert_eq!(copy_name("prod", &["prod"]), "prod (copy)");
+        assert_eq!(
+            copy_name("prod", &["prod", "prod (copy)", "prod (copy 2)"]),
+            "prod (copy 3)"
+        );
+    }
+
+    #[test]
+    fn duplicates_keep_the_secrets_of_the_original() {
+        let src = entra_source();
+        let f = ConnForm::duplicate(&src, &["azure"]);
+        assert_eq!(f.secret_source(), Some(src.id));
+        assert!(f.editing.is_none());
+        let input = f.input().unwrap();
+        assert_eq!(input.name, "azure (copy)");
+        assert_eq!(input.password, None, "the stored secret is copied");
+        assert_eq!(input.params, src.params);
+    }
+
+    #[test]
+    fn discovered_sql_signs_in_like_the_source_and_postgres_as_admin() {
+        let src = entra_source();
+        let sql = db(
+            AzureServerKind::SqlServer,
+            "other.database.windows.net",
+            "sales",
+        );
+        let (input, from) = discovered_input(&sql, &src, Some("Azure".into()));
+        assert_eq!(input.name, "other/sales");
+        assert_eq!(from, Some(src.id));
+        assert!(input.read_only && input.folder.as_deref() == Some("Azure"));
+        let ConnectionParams::Mssql(p) = &input.params else {
+            panic!("{:?}", input.params)
+        };
+        assert_eq!(p.database.as_deref(), Some("sales"));
+        assert!(matches!(p.auth, MssqlAuth::EntraServicePrincipal { .. }));
+
+        let pg = db(
+            AzureServerKind::PostgresFlexible,
+            "pg.postgres.database.azure.com",
+            "app",
+        );
+        let (input, from) = discovered_input(&pg, &src, None);
+        assert_eq!(from, None, "an Entra secret is no PostgreSQL password");
+        assert_eq!(input.params.engine(), Engine::Postgres);
+        let ConnectionParams::Postgres(p) = &input.params else {
+            unreachable!()
+        };
+        assert_eq!(
+            (p.user.as_str(), p.ssl_mode),
+            ("dbadmin", PgSslMode::Require)
+        );
+    }
+
+    #[test]
+    fn discovered_databases_that_exist_are_not_picked() {
+        let src = entra_source();
+        let mut form = DiscoverForm::new(&src);
+        let found = AzureDiscovery {
+            subscriptions: vec![],
+            databases: vec![
+                db(
+                    AzureServerKind::SqlServer,
+                    "FIRST.database.windows.net",
+                    "first",
+                ),
+                db(
+                    AzureServerKind::SqlServer,
+                    "first.database.windows.net",
+                    "second",
+                ),
+            ],
+            warnings: vec![],
+        };
+        form.on_discovered(Ok(found), &[src]);
+        assert_eq!(form.picked, [false, true]);
     }
 }

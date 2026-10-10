@@ -307,6 +307,88 @@ async fn passwords_are_write_only() {
     assert_eq!(conn.params.engine(), sqail_proto::Engine::Postgres);
 }
 
+#[tokio::test]
+async fn copies_take_the_password_from_secret_from() {
+    let h = harness().await;
+    let profile = |name: &str| {
+        json!({"name": name,
+            "params": {"engine": "postgres", "host": "db.invalid", "database": "x", "user": "u"}})
+    };
+    let mut original = profile("pg");
+    original["password"] = json!("hunter2");
+    let id = h.create_connection(original).await;
+
+    let res = h
+        .post(
+            &format!("/v1/connections?secret_from={id}"),
+            &profile("pg (copy)"),
+            &h.admin,
+        )
+        .await;
+    assert_eq!(res.status(), 201);
+    let copy: Connection = res.json().await.unwrap();
+    assert_ne!(copy.id, id);
+    assert!(copy.has_password, "the password was copied");
+
+    // Without secret_from, or with an explicit empty password, nothing is copied.
+    let plain = h.create_connection(profile("plain")).await;
+    let plain: Connection = h.get_json(&format!("/v1/connections/{plain}")).await;
+    assert!(!plain.has_password);
+    let mut cleared = profile("cleared");
+    cleared["password"] = json!("");
+    let res = h
+        .post(
+            &format!("/v1/connections?secret_from={id}"),
+            &cleared,
+            &h.admin,
+        )
+        .await;
+    assert!(!res.json::<Connection>().await.unwrap().has_password);
+
+    let res = h
+        .post(
+            &format!("/v1/connections?secret_from={}", Uuid::new_v4()),
+            &profile("missing"),
+            &h.admin,
+        )
+        .await;
+    assert_eq!(res.status(), 404);
+}
+
+#[tokio::test]
+async fn azure_discovery_needs_an_entra_connection_and_admin() {
+    let h = harness().await;
+    let sql = h
+        .create_connection(json!({"name": "sql", "params": {"engine": "mssql",
+            "host": "db.invalid", "auth": {"method": "sql", "user": "sa"}}, "password": "p"}))
+        .await;
+    let res = h
+        .post(
+            &format!("/v1/connections/{sql}/azure/discover"),
+            &json!({}),
+            &h.admin,
+        )
+        .await;
+    assert_eq!(res.status(), 400);
+    assert!(res.text().await.unwrap().contains("Microsoft Entra ID"));
+
+    let entra = h
+        .create_connection(json!({"name": "azure", "params": {"engine": "mssql",
+            "host": "x.database.windows.net",
+            "auth": {"method": "entra_service_principal", "tenant": "t", "client_id": "c"}},
+            "password": "secret"}))
+        .await;
+    let query = h.token("query").await;
+    let res = h
+        .post(
+            &format!("/v1/connections/{entra}/azure/discover"),
+            &json!({}),
+            &query,
+        )
+        .await;
+    assert_eq!(res.status(), 403);
+}
+
 const KEY_SENTINEL: &str = "SQAIL-KEY-SENTINEL-DO-NOT-LEAK";
 
 /// A line of the key that cannot also appear in the certificate.

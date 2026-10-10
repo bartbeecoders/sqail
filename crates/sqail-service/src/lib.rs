@@ -6,6 +6,7 @@
 
 pub mod api;
 pub mod auth;
+pub mod azure;
 pub mod config;
 pub mod crypto;
 pub mod engine;

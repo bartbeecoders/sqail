@@ -38,7 +38,7 @@ key (PEM) to the service entry in `settings.toml`; see
 
 ## Connections
 
-**+ Add** next to *Connections* in the sidebar (or *Connections → New
+**+ Connection** under *Connections* in the sidebar (or *Connections → New
 connection…*) opens the connection form. Profiles are stored **on the service**,
 so everyone using that service with a suitable token sees the same list.
 Passwords are write-only: the service encrypts them and never sends them back.
@@ -46,6 +46,28 @@ For PostgreSQL and SQL Server, fill in the server and login first, then click
 **⏷** next to *Database* to choose from the databases that login can access
 (you can still type a name). The admin page's *List* button does the same.
 Listing needs an admin token, as *Test* does for an unsaved connection.
+
+Double-click a connection in the sidebar to edit it; *New query tab* is in
+its right-click menu. *Duplicate…* in the same menu opens the form filled in
+from that connection, named “… (copy)”. Leave the password empty to copy the
+stored password (and PostgreSQL client key) from the original.
+
+### Folders
+
+**+ Folder** under *Connections* adds a folder and lets you name it right
+away. Drag a connection onto a folder, or onto a connection inside one, to
+move it there; while you drag a connection that is in a folder, a strip at
+the bottom of the tree takes it out again. *Move to folder* in a
+connection's right-click menu does the same without dragging.
+
+Right-click a connection or a folder for **Rename** to rename it in place:
+Enter or clicking elsewhere saves, Esc cancels. A folder's menu also has
+*New connection here…*, and *Delete folder* when it is empty.
+
+Folders are stored on the service with the connections in them, so everyone
+sees the same ones; renaming a folder updates each of its connections. A
+folder without connections (new, or emptied by moving its connections out)
+exists only in your own sqail, until you move a connection into it.
 
 | Engine | Notes |
 |---|---|
@@ -110,6 +132,29 @@ database, e.g. `CREATE USER [my-app] FROM EXTERNAL PROVIDER;` run by the
 server's Entra admin. The service caches tokens and fetches a new one before
 it expires.
 
+#### Discovering Azure databases
+
+Right-click a SQL Server connection that signs in with Microsoft Entra ID and
+choose **Discover Azure databases…**. The service uses that connection's
+identity to ask Azure Resource Manager for the Azure SQL databases, SQL
+Managed Instance databases and Azure Database for PostgreSQL (flexible
+server) databases in every subscription the identity can read. Tick the ones
+you want, pick a folder (*Azure* by default) and click **Add**. Databases that
+already have a connection are greyed out.
+
+* New SQL Server connections sign in the same way as the original, with its
+  stored password or client secret.
+* New PostgreSQL connections get the server's admin login and SSL mode
+  `require`; edit them to enter the password.
+* Colour, environment tag and read-only are copied from the original.
+
+The identity needs the **Reader** role (or another role that can list these
+resources) on the subscriptions, and the service host needs HTTPS access to
+`management.azure.com`. Entra password sign-in uses the Azure CLI's public
+client for this unless the profile names its own. Subscriptions or servers
+that could not be listed show up as warnings in the dialog. Discovery needs
+an admin token.
+
 ## Writing and running SQL
 
 | Keys | Action |
@@ -130,6 +175,7 @@ it expires.
 | Ctrl+mouse wheel, or the wheel with the middle button held | Zoom the editor text |
 | Ctrl+Shift+B | Expand / collapse the [sidebar](#sidebar) |
 | Ctrl+Shift+A | Expand / collapse the [AI assistant](#ai-assistant) |
+| Ctrl+, | [Settings](#settings) |
 
 The script splitter understands comments, string and identifier quoting,
 Postgres dollar quotes and SQL Server `GO` lines, so *Run statement* picks
@@ -195,7 +241,8 @@ remember their state.
 * **Connections:** a tree of schemas, tables, views, columns, indexes, foreign
   keys and routines, loaded lazily. Right-click a table for *SELECT top 100*,
   *Design table…*, *Import CSV…*, *Script CREATE*, *Drop table…* or *Copy
-  name*; right-click *Tables* or a connection for *New table…*. Drag a table, view or routine
+  name*; right-click *Tables* or a connection for *New table…*. Double-click a
+  connection to edit it. Drag a table, view or routine
   into the editor: inside a statement it inserts the qualified name; on a
   blank line (or below the text) a table or view becomes a formatted
   `SELECT` of all its columns. A procedure becomes `EXEC name` on SQL
@@ -313,6 +360,32 @@ allowed to share with them.
 On Windows, sqail uses the native `grok.exe` behind npm's `grok.cmd`. If it
 can't find it, set `grok_path`.
 
+## Settings
+
+*File → Settings…* (Ctrl+,) opens every application-wide setting in one
+window. Changes apply right away and are saved to `settings.toml`.
+
+| Section | Settings |
+|---|---|
+| Appearance | **Theme**, **interface size** (75–200 %), **editor font size** |
+| Editor | Complete while typing; formatter keyword case and indent (2 or 4 spaces) |
+| Tabs | **Ask before closing a tab with unsaved changes** (on by default). Off, such a tab closes at once and its changes are lost. A tab with an open transaction always asks, because closing it rolls the transaction back. |
+| Queries | Row limit per result set |
+| Service | Start the local service when sqail starts |
+| AI assistant | Provider, model and program path per provider, rows shown to the model, sending the active tab's SQL |
+
+Themes: *Follow system* (sqail's light or dark, whichever the OS uses),
+*sqail light*, *sqail dark*, **Omarchy**, Nord, Tokyo Night, Gruvbox,
+Catppuccin Mocha, Catppuccin Latte and Solarized Light. *View → Theme* has
+the same list.
+
+**Omarchy** takes its colours from the current Omarchy theme
+(`~/.local/state/omarchy/current/theme/colors.toml`), editor syntax colours
+included, and follows along within a couple of seconds when you switch
+themes with `omarchy theme set` or the theme menu. On a first start on
+Omarchy it is the default. Elsewhere, choosing it falls back to *Follow
+system* and says why.
+
 ## Files and settings
 
 sqail keeps its settings in `~/.config/sqail/` on Linux and
@@ -322,7 +395,7 @@ start sqail moves its `sqail2` settings folder and saved tokens over. The files:
 
 | File | Contents |
 |---|---|
-| `settings.toml` | Services, theme, font size, row limit, autocomplete, formatter options |
+| `settings.toml` | Services and everything in [Settings](#settings) |
 | `keybindings.toml` | Your shortcut overrides |
 | `history.jsonl`, `snippets.json`, `workspace.json` | History, snippets, open tabs |
 | `tokens.toml` | Only when the OS credential store is unavailable (mode 0600) |
@@ -345,8 +418,9 @@ Command ids: `query.run`, `query.run_script`, `query.cancel`,
 `file.save_as`, `edit.find`, `edit.format`, `edit.save_snippet`,
 `view.command_palette`, `view.quick_open`, `view.font_bigger`,
 `view.font_smaller`, `view.toggle_theme`, `view.connections`,
-`view.history`, `view.snippets`, `connection.new`, `connection.refresh`,
-`service.connect`.
+`view.history`, `view.snippets`, `view.sidebar`, `view.assistant`,
+`connection.new`, `connection.refresh`, `table.new`, `service.connect`,
+`app.settings`.
 
 Client certificate for a service that requires mTLS, in `settings.toml`:
 

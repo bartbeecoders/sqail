@@ -20,7 +20,7 @@ use cli::Provider;
 use stream::Event;
 
 /// `[assistant]` in settings.toml.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AssistantSettings {
     pub provider: Provider,

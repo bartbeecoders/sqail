@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub services: Vec<ServiceProfile>,
@@ -15,6 +15,11 @@ pub struct Settings {
     pub autostart_local: bool,
     pub theme: ThemePref,
     pub editor_font_size: f32,
+    /// Size of the whole interface (egui zoom factor), 1.0 = 100 %.
+    pub ui_scale: f32,
+    /// Ask before closing a tab with unsaved changes. Tabs with an open
+    /// transaction always ask.
+    pub confirm_close_tab: bool,
     /// Row cap per result set requested from the service.
     pub max_rows: u64,
     /// Open completions while typing (Ctrl+Space always works).
@@ -24,6 +29,9 @@ pub struct Settings {
     pub assistant: crate::assistant::AssistantSettings,
     /// The object browser on the left is expanded (not collapsed to a rail).
     pub sidebar_open: bool,
+    /// Connection folders that have no connections yet, per service URL.
+    /// Folders with connections are stored on the service.
+    pub folders: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -44,12 +52,51 @@ pub struct ServiceProfile {
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum ThemePref {
+    /// sqail's light or dark, following the operating system.
     #[default]
     System,
     Light,
     Dark,
+    /// The colours of the current Omarchy theme, followed live.
+    Omarchy,
+    Nord,
+    TokyoNight,
+    Gruvbox,
+    CatppuccinMocha,
+    CatppuccinLatte,
+    SolarizedLight,
+}
+
+impl ThemePref {
+    pub const ALL: [ThemePref; 10] = [
+        ThemePref::System,
+        ThemePref::Light,
+        ThemePref::Dark,
+        ThemePref::Omarchy,
+        ThemePref::Nord,
+        ThemePref::TokyoNight,
+        ThemePref::Gruvbox,
+        ThemePref::CatppuccinMocha,
+        ThemePref::CatppuccinLatte,
+        ThemePref::SolarizedLight,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ThemePref::System => "Follow system (sqail light / dark)",
+            ThemePref::Light => "sqail light",
+            ThemePref::Dark => "sqail dark",
+            ThemePref::Omarchy => "Omarchy (current theme)",
+            ThemePref::Nord => "Nord",
+            ThemePref::TokyoNight => "Tokyo Night",
+            ThemePref::Gruvbox => "Gruvbox",
+            ThemePref::CatppuccinMocha => "Catppuccin Mocha",
+            ThemePref::CatppuccinLatte => "Catppuccin Latte",
+            ThemePref::SolarizedLight => "Solarized Light",
+        }
+    }
 }
 
 impl Default for Settings {
@@ -60,12 +107,15 @@ impl Default for Settings {
             autostart_local: true,
             theme: ThemePref::System,
             editor_font_size: 14.0,
+            ui_scale: 1.0,
+            confirm_close_tab: true,
             max_rows: 100_000,
             autocomplete: true,
             format_uppercase: true,
             format_indent: 2,
             assistant: Default::default(),
             sidebar_open: true,
+            folders: Default::default(),
         }
     }
 }
@@ -143,6 +193,11 @@ impl Settings {
                 tracing::warn!(error = %e, "settings.toml is invalid; using defaults");
                 Self::default()
             }),
+            // First start: on Omarchy, look like the rest of the desktop.
+            Err(_) if crate::theme::omarchy_available() => Self {
+                theme: ThemePref::Omarchy,
+                ..Self::default()
+            },
             Err(_) => Self::default(),
         }
     }
@@ -169,5 +224,32 @@ impl Settings {
             Some(existing) => *existing = profile,
             None => self.services.push(profile),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn themes_keep_their_old_names_and_add_kebab_case_ones() {
+        #[derive(Deserialize)]
+        struct T {
+            theme: ThemePref,
+        }
+        let t = |s: &str| {
+            toml::from_str::<T>(&format!("theme = \"{s}\""))
+                .unwrap()
+                .theme
+        };
+        assert_eq!(t("dark"), ThemePref::Dark);
+        assert_eq!(t("system"), ThemePref::System);
+        assert_eq!(t("tokyo-night"), ThemePref::TokyoNight);
+        assert_eq!(t("omarchy"), ThemePref::Omarchy);
+        // Settings written before these existed still load.
+        let old: Settings = toml::from_str("theme = \"light\"\nmax_rows = 10").unwrap();
+        assert_eq!(old.theme, ThemePref::Light);
+        assert!(old.confirm_close_tab);
+        assert_eq!(old.ui_scale, 1.0);
     }
 }

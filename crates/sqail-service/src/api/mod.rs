@@ -82,6 +82,7 @@ pub fn router(state: AppState) -> Router {
         .routes(routes!(connections::test_saved))
         .routes(routes!(connections::test_unsaved))
         .routes(routes!(connections::databases_unsaved))
+        .routes(routes!(connections::azure_discover))
         .routes(routes!(query::run))
         .routes(routes!(query::cancel))
         .routes(routes!(explain::on_connection))

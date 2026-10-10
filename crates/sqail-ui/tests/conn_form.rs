@@ -80,7 +80,7 @@ fn database_list_fills_the_database_field() {
         h.state().service.status == ServiceStatus::Connected
     });
 
-    h.get_by_label("+ Add").click();
+    h.get_by_label("+ Connection").click();
     h.step();
     // PostgreSQL on 127.0.0.1 is the form's default.
     fill(&mut h, "Port", "55432");

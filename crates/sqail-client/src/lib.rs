@@ -280,6 +280,28 @@ impl Client {
     pub async fn create_connection(&self, input: &ConnectionInput) -> Result<Connection> {
         self.post("/v1/connections", input).await
     }
+    /// Create a profile whose omitted password or client key is copied from
+    /// the saved profile `secret_from`.
+    pub async fn create_connection_from(
+        &self,
+        input: &ConnectionInput,
+        secret_from: Option<Uuid>,
+    ) -> Result<Connection> {
+        let path = match secret_from {
+            Some(id) => format!("/v1/connections?secret_from={id}"),
+            None => "/v1/connections".into(),
+        };
+        self.post(&path, input).await
+    }
+    /// The databases in the Azure subscriptions that a Microsoft Entra ID
+    /// profile's identity can read.
+    pub async fn azure_discover(&self, id: Uuid) -> Result<AzureDiscovery> {
+        self.post(
+            &format!("/v1/connections/{id}/azure/discover"),
+            &serde_json::json!({}),
+        )
+        .await
+    }
 
     pub async fn update_connection(&self, id: Uuid, input: &ConnectionInput) -> Result<Connection> {
         Self::json(

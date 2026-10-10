@@ -204,6 +204,110 @@
         ],
         "type": "object"
       },
+      "AzureDatabase": {
+        "properties": {
+          "admin_login": {
+            "description": "The server's administrator login, when Azure reports one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "database": {
+            "type": "string"
+          },
+          "host": {
+            "description": "Fully qualified host name to connect to.",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/AzureServerKind"
+          },
+          "location": {
+            "type": "string"
+          },
+          "port": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "resource_group": {
+            "type": "string"
+          },
+          "server": {
+            "description": "The server's resource name.",
+            "type": "string"
+          },
+          "subscription_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "subscription_id",
+          "resource_group",
+          "server",
+          "host",
+          "port",
+          "database",
+          "location"
+        ],
+        "type": "object"
+      },
+      "AzureDiscovery": {
+        "description": "`POST /v1/connections/{id}/azure/discover` — the databases in the Azure\nsubscriptions that a Microsoft Entra ID connection's identity can read.",
+        "properties": {
+          "databases": {
+            "items": {
+              "$ref": "#/components/schemas/AzureDatabase"
+            },
+            "type": "array"
+          },
+          "subscriptions": {
+            "items": {
+              "$ref": "#/components/schemas/AzureSubscription"
+            },
+            "type": "array"
+          },
+          "warnings": {
+            "description": "Subscriptions or servers that could not be listed, and why.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "subscriptions",
+          "databases",
+          "warnings"
+        ],
+        "type": "object"
+      },
+      "AzureServerKind": {
+        "description": "The kind of Azure resource a discovered database lives on.",
+        "enum": [
+          "sql_server",
+          "sql_managed_instance",
+          "postgres_flexible"
+        ],
+        "type": "string"
+      },
+      "AzureSubscription": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "type": "object"
+      },
       "BackupDone": {
         "properties": {
           "path": {
@@ -2046,6 +2150,21 @@
       },
       "post": {
         "operationId": "create",
+        "parameters": [
+          {
+            "description": "When the body omits `password` or `ssl_client_key`, use the secret\nstored with this profile (the connection form while editing).",
+            "in": "query",
+            "name": "secret_from",
+            "required": false,
+            "schema": {
+              "format": "uuid",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -2076,6 +2195,7 @@
             }
           }
         },
+        "summary": "With `secret_from`, an omitted `password` or `ssl_client_key` is copied\nfrom that profile (duplicating a connection, adding discovered databases).",
         "tags": [
           "connections"
         ]
@@ -2302,6 +2422,55 @@
             }
           }
         },
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/v1/connections/{id}/azure/discover": {
+      "post": {
+        "operationId": "azure_discover",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AzureDiscovery"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "summary": "The databases in the Azure subscriptions that this connection's Microsoft\nEntra ID identity can read: Azure SQL servers, SQL managed instances and\nPostgreSQL flexible servers. Admin only. The identity needs the Reader role\n(or any role that can list these resources) on the subscriptions.",
         "tags": [
           "connections"
         ]

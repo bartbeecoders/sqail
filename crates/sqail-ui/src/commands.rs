@@ -40,10 +40,11 @@ pub enum Command {
     NewTable,
     RefreshConnections,
     ConnectService,
+    OpenSettings,
 }
 
 impl Command {
-    pub const ALL: [Command; 32] = [
+    pub const ALL: [Command; 33] = [
         Command::RunCurrent,
         Command::RunScript,
         Command::Cancel,
@@ -76,6 +77,7 @@ impl Command {
         Command::NewTable,
         Command::RefreshConnections,
         Command::ConnectService,
+        Command::OpenSettings,
     ];
 
     /// Stable id used in `keybindings.toml`.
@@ -113,6 +115,7 @@ impl Command {
             Command::NewTable => "table.new",
             Command::RefreshConnections => "connection.refresh",
             Command::ConnectService => "service.connect",
+            Command::OpenSettings => "app.settings",
         }
     }
 
@@ -150,6 +153,7 @@ impl Command {
             Command::NewTable => "New table…",
             Command::RefreshConnections => "Refresh connections",
             Command::ConnectService => "Connect to a service…",
+            Command::OpenSettings => "Settings…",
         }
     }
 
@@ -174,6 +178,7 @@ impl Command {
             Command::FontSmaller => &["Ctrl+Minus"],
             Command::ToggleSidebar => &["Ctrl+Shift+B"],
             Command::ToggleAssistant => &["Ctrl+Shift+A"],
+            Command::OpenSettings => &["Ctrl+Comma"],
             _ => &[],
         }
     }

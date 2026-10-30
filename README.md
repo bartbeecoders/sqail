@@ -418,3 +418,13 @@ curl -sk -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
 3. Tag `v<version>` and push it. `release.yml` runs every check from
    `ci.yml`, attaches the Linux tarball and the Windows zip/MSI to a GitHub
    release, uploads them to the download server, and redeploys the portal.
+
+The deploy jobs (`deploy-binaries` in `release.yml`, `deploy` in
+`portal.yml`) run in the GitHub environment `production`. Keep `VPS_HOST`,
+`VPS_USER`, `VPS_SSH_KEY`, `VPS_SSH_FINGERPRINT`, `ACR_USERNAME` and
+`ACR_PASSWORD` there, not as repository secrets, and limit the environment's
+deployment branches and tags to `main` and `v*`, so a workflow on any other
+branch cannot read them. `VPS_SSH_FINGERPRINT` is the server's SSH host key
+fingerprint (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the VPS,
+the `SHA256:…` part); with it set, the upload and deploy steps refuse a
+server whose host key differs.

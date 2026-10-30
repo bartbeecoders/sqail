@@ -13,6 +13,13 @@ on:
         description: "Release version, added as an image tag"
         type: string
         required: false
+    secrets:
+      ACR_USERNAME: { required: false }
+      ACR_PASSWORD: { required: false }
+      VPS_HOST: { required: false }
+      VPS_USER: { required: false }
+      VPS_SSH_KEY: { required: false }
+      VPS_SSH_FINGERPRINT: { required: false }
   workflow_dispatch:
 
 env:
@@ -22,6 +29,7 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-24.04
+    environment: production
     steps:
       - uses: actions/checkout@v4
 
@@ -48,6 +56,7 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          fingerprint: ${{ secrets.VPS_SSH_FINGERPRINT }}
           script: |
             if command -v kubectl >/dev/null 2>&1; then
               KUBECTL="kubectl"

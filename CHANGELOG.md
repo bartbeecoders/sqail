@@ -19,6 +19,18 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
   (`FROM orders AS o, …`, `FROM t WITH (NOLOCK), …`), after
   `CROSS`/`OUTER APPLY` and `MERGE … USING`, and after T-SQL `INSERT`,
   `DELETE` and `MERGE` without `INTO`/`FROM` (#1).
+- **Script definition explains failures.** When the service can't script a
+  view, procedure or function, the tab that opens shows its explanation as
+  SQL comments instead of a status-bar notice that fades away.
+
+### sqail-service
+
+- **SQL Server: say why a definition is missing** (#44). Scripting a view,
+  procedure, function or trigger with a login that may execute or read it
+  but lacks `VIEW DEFINITION` used to fail with "no definition available
+  (encrypted?)". The error now names the database user and the exact
+  `GRANT VIEW DEFINITION ON SCHEMA::… TO …;` to run, and only mentions
+  encryption for modules that really are `WITH ENCRYPTION`.
 
 ## 1.4.0 — 2026-10-30
 

@@ -272,7 +272,11 @@ remember their state.
 * **Connections:** a tree of schemas, tables, views, columns, indexes, foreign
   keys and routines, loaded lazily. Right-click a table for *SELECT top 100*,
   *Design table…*, *Import CSV…*, *Script CREATE*, *Drop table…* or *Copy
-  name*; right-click *Tables* or a connection for *New table…*. Double-click a
+  name*; right-click a routine for *Script definition* or *Copy name*. When
+  the object can't be scripted, the new tab says why instead; on SQL Server
+  that is usually a missing `VIEW DEFINITION` grant for the service's login,
+  and the tab shows the `GRANT` to run (see `docs/windows-setup.md`).
+  Right-click *Tables* or a connection for *New table…*. Double-click a
   connection to edit it. Drag a table, view or routine
   into the editor: inside a statement it inserts the qualified name; on a
   blank line (or below the text) a table or view becomes a formatted

@@ -100,7 +100,7 @@ impl Exporter {
             }
             Format::Xlsx => {
                 let mut book = Box::new(rust_xlsxwriter::Workbook::new());
-                let sheet = book.add_worksheet_with_constant_memory();
+                let sheet = book.add_worksheet_with_constant_memory()?;
                 write_xlsx_header(sheet, &names)?;
                 Sink::Xlsx {
                     book,
@@ -169,7 +169,7 @@ impl Exporter {
                 book, sheet, row, ..
             } => {
                 if *row > XLSX_ROWS_PER_SHEET {
-                    let ws = book.add_worksheet_with_constant_memory();
+                    let ws = book.add_worksheet_with_constant_memory()?;
                     let names: Vec<&str> = self.columns.iter().map(|c| c.name.as_str()).collect();
                     write_xlsx_header(ws, &names)?;
                     *sheet += 1;
@@ -695,5 +695,29 @@ mod tests {
             sql,
             "INSERT INTO t (id, name) VALUES (1, 'a,\"b\"');\nINSERT INTO t (id, name) VALUES (2, NULL);\n"
         );
+    }
+
+    #[test]
+    fn xlsx_export_writes_a_workbook() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.xlsx");
+        let columns = vec![
+            Column {
+                name: "id".into(),
+                type_name: "int4".into(),
+                logical: LogicalType::Int,
+            },
+            Column {
+                name: "name".into(),
+                type_name: "text".into(),
+                logical: LogicalType::Text,
+            },
+        ];
+        let mut ex = Exporter::create(&path, Format::Xlsx, columns, Engine::Postgres, "t").unwrap();
+        ex.row(&[Cell::Int(1), Cell::Text("a".into())]).unwrap();
+        ex.row(&[Cell::Int(2), Cell::Null]).unwrap();
+        assert_eq!(ex.finish().unwrap(), 2);
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.starts_with(b"PK"), "an xlsx file is a zip archive");
     }
 }

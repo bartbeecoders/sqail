@@ -32,7 +32,7 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 csv = "1.4"
-rust_xlsxwriter = { version = "0.99", features = ["constant_memory"] }
+rust_xlsxwriter = { version = "0.102", features = ["constant_memory"] }
 sqlformat = "0.5"
 
 [lints]

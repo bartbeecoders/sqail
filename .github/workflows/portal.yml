@@ -58,10 +58,14 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           fingerprint: ${{ secrets.VPS_SSH_FINGERPRINT }}
           script: |
-            if command -v kubectl >/dev/null 2>&1; then
+            set -e
+            # A plain kubectl may be installed but unable to read the k3s
+            # kubeconfig (root-only by default), so use it only if it can
+            # reach the cluster; otherwise go through k3s with sudo.
+            if command -v kubectl >/dev/null 2>&1 && kubectl -n sqail get deployment sqail-portal >/dev/null 2>&1; then
               KUBECTL="kubectl"
             else
-              KUBECTL="sudo k3s kubectl"
+              KUBECTL="sudo -n k3s kubectl"
             fi
             $KUBECTL -n sqail rollout restart deployment sqail-portal
             $KUBECTL -n sqail rollout status deployment sqail-portal --timeout=120s

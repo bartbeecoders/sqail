@@ -29,6 +29,9 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
   F3 / Shift+F3 (and Shift+Enter) find next / previous; Esc in the editor
   no longer closes the bar; case-insensitive search works in text whose
   lowercase has a different length (#66).
+- **Fix:** *Edit data* follows the select list: an aliased column
+  (`other_id AS id`) or a literal is no longer written to the table column
+  of that name, which could update the wrong rows (#67).
 
 ### sqail-service
 

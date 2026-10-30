@@ -238,6 +238,9 @@ transaction that is **always rolled back**, so it is safe for `UPDATE` and
 * **✎ Edit data** is available when a result comes from a single table with a
   primary key. Edit cells (double-click or F2), add rows and delete rows. The
   changes are shown as SQL before **Apply** runs them in one transaction.
+  Only `*` and plain column names are editable: aliased columns
+  (`a AS b`), literals and expressions stay read-only, and the primary key
+  must be selected once, without an alias.
 * Messages (`RAISERROR`, `RAISE NOTICE`, `PRINT`) and row counts appear in the
   *Messages* tab.
 

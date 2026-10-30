@@ -265,6 +265,7 @@ pub async fn apply(
                     params: Vec::new(),
                     max_rows: Some(20),
                     timeout_ms: None,
+                    single_statement: false,
                 },
             )
             .await?;

@@ -15,16 +15,9 @@ on:
       - "**.md"
       - ".github/workflows/portal.yml"
       - ".github/workflows/release.yml"
+  # Every pull request runs the checks: main requires them before merging,
+  # and a PR that skipped them could never merge.
   pull_request:
-    paths-ignore:
-      - "sqail-legacy/**"
-      - "sqail.portal/**"
-      - "k8s/**"
-      - "marketing/**"
-      - "Vibecoding/**"
-      - "**.md"
-      - ".github/workflows/portal.yml"
-      - ".github/workflows/release.yml"
   workflow_call:
   workflow_dispatch:
 

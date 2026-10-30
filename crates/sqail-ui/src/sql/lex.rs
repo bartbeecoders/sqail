@@ -27,10 +27,26 @@ pub struct Token {
 }
 
 pub fn tokenize(s: &str, engine: Option<Engine>) -> Vec<Token> {
+    tokenize_checked(s, engine).0
+}
+
+/// [`tokenize`], plus whether the input ends inside a string, quoted name or
+/// block comment that is never closed.
+///
+/// Dialects follow the engine: `E'…'` strings (with backslash escapes) and
+/// `$` inside names are Postgres only, `N'…'` is SQL Server and Postgres, and
+/// block comments nest everywhere except SQLite. Without an engine the lexer
+/// is permissive (every prefix, nesting, no backslash escapes). Postgres with
+/// `standard_conforming_strings = off` is not modelled.
+pub fn tokenize_checked(s: &str, engine: Option<Engine>) -> (Vec<Token>, bool) {
     let b = s.as_bytes();
     let mssql = engine == Some(Engine::Mssql);
     let pg = engine == Some(Engine::Postgres);
+    let nest_comments = engine != Some(Engine::Sqlite);
+    let n_prefix = matches!(engine, None | Some(Engine::Mssql | Engine::Postgres));
+    let e_prefix = matches!(engine, None | Some(Engine::Postgres));
     let mut out = Vec::new();
+    let mut unterminated = false;
     let mut i = 0;
     while i < b.len() {
         let start = i;
@@ -50,49 +66,71 @@ pub fn tokenize(s: &str, engine: Option<Engine>) -> Vec<Token> {
                 Kind::Comment
             }
             b'/' if next == Some(b'*') => {
-                // T-SQL and Postgres nest block comments; SQLite does not,
-                // but nesting is harmless for display.
+                // T-SQL and Postgres nest block comments; SQLite does not
+                // (its first `*/` ends the comment).
                 let mut depth = 0;
+                let mut closed = false;
                 while i < b.len() {
-                    if b[i] == b'/' && b.get(i + 1) == Some(&b'*') {
+                    if b[i] == b'/' && b.get(i + 1) == Some(&b'*') && (nest_comments || depth == 0)
+                    {
                         depth += 1;
                         i += 2;
                     } else if b[i] == b'*' && b.get(i + 1) == Some(&b'/') {
                         depth -= 1;
                         i += 2;
                         if depth == 0 {
+                            closed = true;
                             break;
                         }
                     } else {
                         i += 1;
                     }
                 }
+                unterminated |= !closed;
                 Kind::Comment
             }
             b'\'' => {
-                i = skip_quoted(b, i + 1, b'\'');
+                i = skip_quoted(b, i + 1, b'\'', &mut unterminated);
                 Kind::String
             }
-            b'N' | b'n' | b'E' | b'e' | b'X' | b'x' if next == Some(b'\'') => {
-                i = skip_quoted(b, i + 2, b'\'');
+            b'E' | b'e' if e_prefix && next == Some(b'\'') => {
+                i = if pg {
+                    skip_escaped(b, i + 2, &mut unterminated)
+                } else {
+                    skip_quoted(b, i + 2, b'\'', &mut unterminated)
+                };
+                Kind::String
+            }
+            b'N' | b'n' if n_prefix && next == Some(b'\'') => {
+                i = skip_quoted(b, i + 2, b'\'', &mut unterminated);
+                Kind::String
+            }
+            b'X' | b'x' if next == Some(b'\'') => {
+                i = skip_quoted(b, i + 2, b'\'', &mut unterminated);
                 Kind::String
             }
             b'"' => {
-                i = skip_quoted(b, i + 1, b'"');
+                i = skip_quoted(b, i + 1, b'"', &mut unterminated);
                 Kind::QuotedIdent
             }
             b'`' => {
-                i = skip_quoted(b, i + 1, b'`');
+                i = skip_quoted(b, i + 1, b'`', &mut unterminated);
                 Kind::QuotedIdent
             }
             b'[' if !pg => {
-                i = skip_quoted(b, i + 1, b']');
+                i = skip_quoted(b, i + 1, b']', &mut unterminated);
                 Kind::QuotedIdent
             }
             b'$' if pg => match dollar_tag(b, i) {
                 Some(tag_end) => {
                     let tag = &b[i..tag_end];
-                    i = find(b, tag_end, tag).map_or(b.len(), |p| p + tag.len());
+                    i = match find(b, tag_end, tag) {
+                        Some(p) => p + tag.len(),
+                        None => {
+                            unterminated = true;
+                            b.len()
+                        }
+                    };
                     Kind::String
                 }
                 None => {
@@ -138,7 +176,8 @@ pub fn tokenize(s: &str, engine: Option<Engine>) -> Vec<Token> {
                 Kind::Word
             }
             _ if is_word_byte(c) => {
-                while i < b.len() && is_word_byte(b[i]) {
+                // Postgres names may contain `$` after the first character.
+                while i < b.len() && (is_word_byte(b[i]) || (pg && b[i] == b'$')) {
                     i += 1;
                 }
                 Kind::Word
@@ -166,7 +205,7 @@ pub fn tokenize(s: &str, engine: Option<Engine>) -> Vec<Token> {
             range: start..i.min(b.len()),
         });
     }
-    out
+    (out, unterminated)
 }
 
 fn is_word_byte(c: u8) -> bool {
@@ -183,7 +222,7 @@ fn utf8_len(first: u8) -> usize {
 }
 
 /// Index after the closing quote; a doubled quote is an escape.
-fn skip_quoted(b: &[u8], mut i: usize, q: u8) -> usize {
+fn skip_quoted(b: &[u8], mut i: usize, q: u8, unterminated: &mut bool) -> usize {
     while i < b.len() {
         if b[i] == q {
             if b.get(i + 1) == Some(&q) {
@@ -194,6 +233,22 @@ fn skip_quoted(b: &[u8], mut i: usize, q: u8) -> usize {
         }
         i += 1;
     }
+    *unterminated = true;
+    b.len()
+}
+
+/// A Postgres `E'…'` string body: a backslash escapes the next byte, `''` is
+/// a quote. Returns the index after the closing quote.
+fn skip_escaped(b: &[u8], mut i: usize, unterminated: &mut bool) -> usize {
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 2,
+            b'\'' if b.get(i + 1) == Some(&b'\'') => i += 2,
+            b'\'' => return i + 1,
+            _ => i += 1,
+        }
+    }
+    *unterminated = true;
     b.len()
 }
 
@@ -495,9 +550,96 @@ mod tests {
 
     #[test]
     fn unterminated_things_do_not_panic() {
-        for s in ["'abc", "/* x", "\"q", "$$ body", "é'"] {
+        for s in ["'abc", "/* x", "\"q", "$$ body", "é'", "E'\\", "E'a\\'"] {
             tokenize(s, Some(Engine::Postgres));
             tokenize(s, Some(Engine::Mssql));
+            tokenize(s, Some(Engine::Sqlite));
         }
+    }
+
+    #[test]
+    fn postgres_e_strings_have_backslash_escapes() {
+        let pg = Some(Engine::Postgres);
+        let k = kinds(r"SELECT E'it\'s'; SELECT 1", pg);
+        assert_eq!(k[1], (Kind::String, r"E'it\'s'"));
+        assert_eq!(k[2], (Kind::Semicolon, ";"));
+        assert_eq!(kinds(r"e'a\\'", pg), [(Kind::String, r"e'a\\'")]);
+        assert_eq!(kinds("E'a''b'", pg), [(Kind::String, "E'a''b'")]);
+        // Elsewhere a backslash is an ordinary character and `E` a name.
+        let k = kinds(r"SELECT E'a\'; SELECT 1", Some(Engine::Sqlite));
+        assert_eq!(k[1], (Kind::Word, "E"));
+        assert_eq!(k[2], (Kind::String, r"'a\'"));
+        assert_eq!(k[3], (Kind::Semicolon, ";"));
+        let k = kinds(r"SELECT 'a\'; SELECT 1", pg);
+        assert_eq!(k[1], (Kind::String, r"'a\'"));
+    }
+
+    #[test]
+    fn string_prefixes_follow_the_engine() {
+        assert_eq!(
+            kinds("N'x''y'", Some(Engine::Mssql)),
+            [(Kind::String, "N'x''y'")]
+        );
+        assert_eq!(
+            kinds("N'x'", Some(Engine::Sqlite)),
+            [(Kind::Word, "N"), (Kind::String, "'x'")]
+        );
+        for e in [Engine::Postgres, Engine::Mssql, Engine::Sqlite] {
+            assert_eq!(kinds("X'0A'", Some(e)), [(Kind::String, "X'0A'")]);
+        }
+    }
+
+    #[test]
+    fn block_comments_nest_except_on_sqlite() {
+        let s = "/* a /* b */ c */ SELECT 1";
+        for e in [Engine::Postgres, Engine::Mssql] {
+            let k = kinds(s, Some(e));
+            assert_eq!(k[0], (Kind::Comment, "/* a /* b */ c */"), "{e:?}");
+            assert_eq!(k[1], (Kind::Word, "SELECT"));
+        }
+        let k = kinds(s, Some(Engine::Sqlite));
+        assert_eq!(k[0], (Kind::Comment, "/* a /* b */"));
+        assert_eq!(k[1], (Kind::Word, "c"));
+    }
+
+    #[test]
+    fn quoted_names_and_dollar_bodies() {
+        assert_eq!(
+            kinds("[a]]b]", Some(Engine::Mssql)),
+            [(Kind::QuotedIdent, "[a]]b]")]
+        );
+        let pg = Some(Engine::Postgres);
+        assert_eq!(
+            kinds("$tag$ a $$ b $tag$", pg),
+            [(Kind::String, "$tag$ a $$ b $tag$")]
+        );
+        // `$` inside a Postgres name does not start a dollar quote.
+        assert_eq!(
+            kinds("SELECT a$b$; SELECT 1", pg)[1..3],
+            [(Kind::Word, "a$b$"), (Kind::Semicolon, ";")]
+        );
+    }
+
+    #[test]
+    fn reports_unterminated_input() {
+        let open = |s: &str, e: Engine| tokenize_checked(s, Some(e)).1;
+        for e in [Engine::Postgres, Engine::Mssql, Engine::Sqlite] {
+            for s in ["SELECT 'a", "SELECT 1 /* x", "SELECT \"a", "SELECT `a"] {
+                assert!(open(s, e), "{e:?}: {s}");
+            }
+            for s in [
+                "SELECT 'a'",
+                "SELECT 1 /* x */",
+                "SELECT 1 -- x",
+                "SELECT 'a''b'",
+            ] {
+                assert!(!open(s, e), "{e:?}: {s}");
+            }
+        }
+        assert!(open("SELECT 1 /* a /* b */", Engine::Postgres));
+        assert!(!open("SELECT 1 /* a /* b */", Engine::Sqlite));
+        assert!(open("SELECT $$ x", Engine::Postgres));
+        assert!(open(r"SELECT E'a\'", Engine::Postgres));
+        assert!(open("SELECT [a", Engine::Mssql));
     }
 }

@@ -7,6 +7,59 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
 
 ## Unreleased
 
+### sqail
+
+- **Assistant: stricter read-only check.** `run_query` also refuses
+  transaction control, DDL and admin commands anywhere in the query, a second
+  statement without `;` on SQL Server and unfinished strings or comments; the
+  service now enforces a single statement for assistant queries (new
+  `single_statement` field on `QueryRequest`); and the SQL lexer handles
+  PostgreSQL `E'…'` escapes, `$` in names, SQLite's non-nesting comments and
+  the rest of a `GO 5` line correctly.
+- **Export of the whole result re-runs only that result's statement.** It
+  used to run the entire tab script again on a separate connection, repeating
+  any writes and exporting the first result. Now it runs just the read-only
+  statement behind the shown result, in the tab's session, and refuses
+  otherwise.
+- **Fix:** the completion popup closes when you type a space, comma, `;` or
+  other punctuation, so the next Enter or Tab no longer inserts a
+  suggestion (#65).
+- **Find bar fixes:** Enter in the find field goes to the next match and
+  keeps the focus there (a second Enter no longer replaces the match);
+  F3 / Shift+F3 (and Shift+Enter) find next / previous; Esc in the editor
+  no longer closes the bar; case-insensitive search works in text whose
+  lowercase has a different length (#66).
+- **Fix:** *Edit data* follows the select list: an aliased column
+  (`other_id AS id`) or a literal is no longer written to the table column
+  of that name, which could update the wrong rows (#67).
+- **Fix:** *Run statement* no longer truncates a SQL Server procedure,
+  function, trigger or view whose body has no `BEGIN … END`: the definition
+  runs to the next `GO` (#68).
+
+### sqail-service
+
+- **Pooled connections start clean.** After a query, PostgreSQL connections
+  are reset (settings, role, temp tables, prepared statements, advisory
+  locks) before the next request uses them, so a `SET search_path` or
+  `SET ROLE` no longer leaks into other requests or catalog browsing. SQL
+  Server connections that ran a script or an explain are closed instead of
+  reused, because they cannot be reset.
+- **Timeouts no longer return busy connections to the pool.** Catalog and
+  explain calls cancel their query shortly before the request timeout, and a
+  connection abandoned mid-query is cancelled and closed. A slow
+  `EXPLAIN ANALYZE` no longer leaves a transaction or SHOWPLAN switched on
+  for the next user.
+- **PostgreSQL read-only profiles stay read-only.** Statements that would
+  switch the session or transaction to read-write (`SET … transaction_read_only`,
+  `BEGIN … READ WRITE`, `SET SESSION CHARACTERISTICS`, `RESET ALL`,
+  `set_config()`, `DO` blocks) are refused with 403, and the setting is now
+  part of the connection's startup parameters.
+- **SQLite stays inside its folders.** `ATTACH DATABASE` and `VACUUM INTO`
+  may only name files inside `sqlite.allowed_dirs`, and on read-only
+  profiles no files at all. `file:` URIs and computed file names are
+  refused. Profiles can no longer point into the service's own data folder,
+  even when an allowed folder contains it.
+
 ### Packaging
 
 - The Arch `PKGBUILD` builds again: it downloads the source from GitHub,

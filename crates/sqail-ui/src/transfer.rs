@@ -267,13 +267,63 @@ pub fn sql_literal(engine: Engine, c: &Cell, logical: LogicalType) -> String {
     }
 }
 
-/// Run `sql` on a pooled connection and stream its first result set to
-/// `path` without holding the rows in memory. `progress` gets row counts.
+/// The statement of `script` that produced result set `result` (of `results`
+/// shown), for exporting that whole result by running it again. Only a single
+/// read-only statement qualifies, and only when the script's read-only
+/// statements line up one-to-one with its result sets: otherwise it is not
+/// clear which statement produced the result, and running anything again
+/// could repeat writes. `finished` is false when the run stopped early
+/// (error, cancel), so later statements may not have produced theirs.
+pub fn statement_for_result(
+    script: &str,
+    engine: Engine,
+    result: usize,
+    results: usize,
+    finished: bool,
+) -> std::result::Result<String, String> {
+    const UNCLEAR: &str = "Only a result of a read-only statement can be exported whole, and \
+        this script's results can't be matched to its statements. Run the SELECT on its own, \
+        then export again.";
+    let reads: Vec<&str> = executed_statements(script, engine)
+        .into_iter()
+        .filter(|s| crate::assistant::guard::check_read_only(s, engine).is_ok())
+        .collect();
+    let lines_up = if finished {
+        reads.len() == results
+    } else {
+        reads.len() >= results
+    };
+    match reads.get(result) {
+        Some(s) if lines_up && result < results => Ok(s.to_string()),
+        _ => Err(UNCLEAR.into()),
+    }
+}
+
+/// Statements as the engine sees them: the editor's splitter also breaks at
+/// blank lines (for "run statement at cursor"), so pieces separated only by
+/// whitespace are joined again.
+fn executed_statements(script: &str, engine: Engine) -> Vec<&str> {
+    let mut out: Vec<std::ops::Range<usize>> = Vec::new();
+    for r in crate::sql::statements::split(script, Some(engine)) {
+        match out.last_mut() {
+            Some(prev) if script[prev.end..r.start].trim().is_empty() => prev.end = r.end,
+            _ => out.push(r),
+        }
+    }
+    out.into_iter().map(|r| &script[r]).collect()
+}
+
+/// Run `sql` (one statement) and stream its first result set to `path`
+/// without holding the rows in memory. `progress` gets row counts. With
+/// `expect_columns`, the export is refused unless the result has exactly
+/// these column names (it must be the result the user is looking at).
+#[allow(clippy::too_many_arguments)]
 pub async fn export_query(
     client: &Client,
-    connection: Uuid,
+    on: On,
     engine: Engine,
     sql: &str,
+    expect_columns: Option<&[String]>,
     path: &Path,
     format: Format,
     mut progress: impl FnMut(u64),
@@ -284,13 +334,19 @@ pub async fn export_query(
         // As many as the service allows.
         max_rows: Some(u64::MAX),
         timeout_ms: None,
+        single_statement: false,
     };
-    let mut stream = client.query(On::Connection(connection), &req).await?;
+    let mut stream = client.query(on, &req).await?;
     let mut exporter: Option<Exporter> = None;
     let mut error = None;
     while let Some(ev) = stream.events.next().await {
         match ev? {
             QueryEvent::ResultStart { index: 0, columns } => {
+                if let Some(expected) = expect_columns
+                    && !columns.iter().map(|c| &c.name).eq(expected.iter())
+                {
+                    bail!("the query now returns different columns than the result shown");
+                }
                 exporter = Some(Exporter::create(path, format, columns, engine, "exported")?);
             }
             QueryEvent::Rows { index: 0, rows } => {
@@ -465,6 +521,7 @@ async fn exec(client: &Client, session: Uuid, sql: String, params: Vec<Param>) -
                 params,
                 max_rows: Some(1),
                 timeout_ms: None,
+                single_statement: false,
             },
         )
         .await?;
@@ -565,6 +622,41 @@ mod tests {
             default: None,
             primary_key: false,
         }
+    }
+
+    #[test]
+    fn whole_export_reruns_only_the_statement_shown() {
+        let pg = Engine::Postgres;
+        let pick = |sql: &str, i, n, finished| statement_for_result(sql, pg, i, n, finished);
+        // Writes before the SELECT are not repeated.
+        assert_eq!(
+            pick("INSERT INTO t VALUES (1);\nSELECT * FROM t", 0, 1, true).unwrap(),
+            "SELECT * FROM t"
+        );
+        // The second result comes from the second read.
+        let script = "SELECT 1 AS a;\nUPDATE t SET a = 1;\nSELECT *\n\nFROM t\nWHERE a = 1;";
+        assert_eq!(pick(script, 0, 2, true).unwrap(), "SELECT 1 AS a");
+        assert_eq!(
+            pick(script, 1, 2, true).unwrap(),
+            "SELECT *\n\nFROM t\nWHERE a = 1"
+        );
+        // Manual-commit runs start with BEGIN.
+        assert_eq!(pick("BEGIN;\nSELECT 2", 0, 1, true).unwrap(), "SELECT 2");
+        // A run that stopped early produced only the first results.
+        assert_eq!(
+            pick("SELECT 1;\nSELECT x FROM missing;\nSELECT 3", 0, 1, false).unwrap(),
+            "SELECT 1"
+        );
+        // A statement that writes and returns rows can't be re-run, and the
+        // results no longer line up with the reads.
+        assert!(pick("INSERT INTO t VALUES (1) RETURNING *", 0, 1, true).is_err());
+        assert!(pick("DELETE FROM t RETURNING *;\nSELECT * FROM t", 1, 2, true).is_err());
+        assert!(pick("SELECT 1", 1, 1, true).is_err());
+        // SQL Server needs no `;`: one chunk with two results is unclear.
+        let ms = |sql: &str, i, n| statement_for_result(sql, Engine::Mssql, i, n, true);
+        assert!(ms("SELECT 1\nSELECT 2", 1, 2).is_err());
+        assert!(ms("INSERT INTO t VALUES (1)\nSELECT * FROM t", 0, 1).is_err());
+        assert_eq!(ms("SELECT 1\nGO\nSELECT 2\nGO", 1, 2).unwrap(), "SELECT 2");
     }
 
     #[test]

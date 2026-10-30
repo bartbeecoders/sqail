@@ -72,10 +72,7 @@ fn validate(state: &AppState, input: &ConnectionInput) -> ApiResult<()> {
             _ => Ok(()),
         },
         ConnectionParams::Sqlite(p) => {
-            check_path(
-                std::path::Path::new(&p.path),
-                &state.config.sqlite.allowed_dirs,
-            )?;
+            check_path(std::path::Path::new(&p.path), state.config.sqlite_paths())?;
             Ok(())
         }
         _ => Ok(()),
@@ -262,7 +259,7 @@ pub async fn databases_unsaved(
             password: password.as_deref(),
             ssl_client_key: ssl_key.plain.as_deref(),
             read_only: input.read_only,
-            sqlite_dirs: &state.config.sqlite.allowed_dirs,
+            sqlite: state.config.sqlite_paths(),
         })?;
         let mut conn = driver.connect().await?;
         introspect::databases(conn.as_mut()).await
@@ -476,7 +473,7 @@ async fn run_test(
             password,
             ssl_client_key,
             read_only,
-            sqlite_dirs: &state.config.sqlite.allowed_dirs,
+            sqlite: state.config.sqlite_paths(),
         })?;
         let mut conn = driver.connect().await?;
         conn.server_version().await

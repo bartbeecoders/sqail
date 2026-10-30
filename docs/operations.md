@@ -164,8 +164,10 @@ shared gateway (steps 1, 2, 4 and 5 are all on the admin page's *Settings*):
    a channel you trust.
 3. Open the port in the host firewall, but only to the networks that need it.
 4. Consider `tls.client_ca`, so that a leaked token alone isn't enough.
-5. Set `sqlite.allowed_dirs` deliberately. SQLite profiles can open any file
-   inside those directories with the service's permissions.
+5. Set `sqlite.allowed_dirs` deliberately. SQLite profiles, and `ATTACH` or
+   `VACUUM INTO` on writable SQLite profiles, can open any file inside those
+   directories with the service's permissions. The service's own data dir is
+   always off limits, even when it lies inside an allowed directory.
 
 ## Running as a service
 

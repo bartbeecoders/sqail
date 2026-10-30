@@ -220,7 +220,7 @@ pub(crate) fn pool_for(
             password: password.as_deref(),
             ssl_client_key: ssl_key.as_deref(),
             read_only: stored.info.read_only,
-            sqlite_dirs: &state.config.sqlite.allowed_dirs,
+            sqlite: state.config.sqlite_paths(),
         },
     )?;
     Ok((stored, pool))

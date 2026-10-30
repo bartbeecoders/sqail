@@ -144,6 +144,12 @@ api $URL/v1/connections/$ID/query -d '{"sql": "SELECT id, name FROM customers; U
   and placeholders are the engine's own (`$1`, `@P1`, `?1`):
   `{"sql": "SELECT * FROM t WHERE id = $1", "params": [42]}`.
 * Scripts are split server-side, and SQL Server `GO` lines are honoured.
+* **`single_statement: true`** refuses (with an `error` event, before running
+  anything) a script that is more than one statement. Postgres parses it as a
+  prepared statement and SQLite checks what follows the first statement, so
+  both are exact. SQL Server is best effort: one batch, no `;` between
+  statements and no statement-only keyword (`COMMIT`, `BEGIN`, `DROP`, `EXEC`,
+  `IF`, …) after the first word. Older services ignore the field.
 
 **Cancel:** send `x-query-id: <uuid>` with the query, or read `query_id` from
 `started`, then call `DELETE /v1/queries/{query_id}`. The stream finishes with

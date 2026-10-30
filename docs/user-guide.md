@@ -80,7 +80,12 @@ status bar while that connection is active. **Read-only** profiles also can't
 be edited in the grid. How strictly "read-only" is enforced depends on the
 engine:
 
-* **PostgreSQL:** the session runs with `default_transaction_read_only = on`.
+* **PostgreSQL:** the session runs with `default_transaction_read_only = on`,
+  and the service refuses statements that would switch it off: setting
+  `transaction_read_only` or `default_transaction_read_only`,
+  `BEGIN … READ WRITE`, `SET SESSION CHARACTERISTICS`, `RESET ALL`,
+  `set_config()` and `DO` blocks. A function the role may call can still
+  write, so for a hard guarantee use a role that only has read permissions.
 * **SQLite:** the file is opened read-only.
 * **SQL Server:** the connection declares `ApplicationIntent=ReadOnly`, which
   routes it to a readable secondary in an availability group but doesn't block

@@ -6,9 +6,9 @@ use sqail_proto::{ExplainRequest, Plan, Scope};
 use uuid::Uuid;
 
 use super::pool_for;
-use super::query::owned_session;
+use super::query::{check_read_only, owned_session};
 use crate::auth::Principal;
-use crate::engine::{DbError, explain};
+use crate::engine::{DbError, explain, with_deadline};
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 use crate::store::AuditEvent;
@@ -45,11 +45,23 @@ pub async fn on_connection(
         // ANALYZE executes the statement.
         p.require(Scope::Query)?;
     }
-    let (_, pool) = pool_for(&state, &p, id)?;
+    let (stored, pool) = pool_for(&state, &p, id)?;
+    check_read_only(&stored, &req.sql)?;
     let mut c = pool.get().await?;
-    let res = explain::explain(c.conn(), &req.sql, req.analyze).await;
-    if matches!(res, Err(DbError::Connect(_))) {
-        c.mark_broken();
+    let (limit, grace) = state.config.limits.call_deadline();
+    let canceller = c.conn().canceller();
+    let (res, broken) = with_deadline(
+        canceller,
+        limit,
+        grace,
+        explain::explain(c.conn(), &req.sql, req.analyze),
+    )
+    .await;
+    if broken || matches!(res, Err(DbError::Connect(_) | DbError::Timeout)) {
+        c.discard();
+    } else {
+        // The statement is user SQL: reset (SQL Server: close) before reuse.
+        c.reset_and_release().await;
     }
     audit(&state, &p, id, &req, res.is_ok());
     Ok(Json(res?))
@@ -66,7 +78,8 @@ pub async fn on_session(
     Json(req): Json<ExplainRequest>,
 ) -> ApiResult<Json<Plan>> {
     let session = owned_session(&state, &p, id)?;
-    pool_for(&state, &p, session.connection_id)?;
+    let (stored, _) = pool_for(&state, &p, session.connection_id)?;
+    check_read_only(&stored, &req.sql)?;
     let mut guard = session
         .conn
         .clone()
@@ -75,7 +88,18 @@ pub async fn on_session(
     let conn = guard.as_deref_mut().ok_or_else(|| {
         ApiError::conflict("the session's connection was lost; open a new session")
     })?;
-    let res = explain::explain(conn, &req.sql, req.analyze).await;
+    let (limit, grace) = state.config.limits.call_deadline();
+    let (res, broken) = with_deadline(
+        conn.canceller(),
+        limit,
+        grace,
+        explain::explain(conn, &req.sql, req.analyze),
+    )
+    .await;
+    if broken {
+        // It may still be running: the session cannot use it any more.
+        *guard = None;
+    }
     session.touch();
     audit(&state, &p, session.connection_id, &req, res.is_ok());
     Ok(Json(res?))

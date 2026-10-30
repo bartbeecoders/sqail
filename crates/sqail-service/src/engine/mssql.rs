@@ -364,6 +364,16 @@ impl Conn for MssqlConn {
             .unwrap_or_default())
     }
 
+    async fn reset(&mut self) -> Result<()> {
+        // tiberius has no sp_reset_connection, and a script can change far
+        // more than can be checked (USE, SET LANGUAGE/DATEFORMAT/ROWCOUNT,
+        // SHOWPLAN, #temp tables, EXECUTE AS ...). Connections that ran user
+        // SQL are closed; only catalog calls reuse pooled connections.
+        Err(DbError::Unsupported(
+            "SQL Server connections are not reused after user SQL".into(),
+        ))
+    }
+
     fn engine(&self) -> Engine {
         Engine::Mssql
     }

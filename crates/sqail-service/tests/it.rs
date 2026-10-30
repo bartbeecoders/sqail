@@ -1339,6 +1339,228 @@ async fn postgres_types_and_notices() {
     );
 }
 
+/// One pooled connection per profile, so every request reuses the same one.
+async fn single_connection_harness(request_timeout_secs: u64) -> Harness {
+    harness_with(|c| {
+        c.limits.pool_size = 1;
+        c.limits.request_timeout_secs = request_timeout_secs;
+    })
+    .await
+}
+
+fn one(ev: &[QueryEvent]) -> Value {
+    assert!(error(ev).is_none(), "{ev:?}");
+    rows(ev, 0)[0][0].clone()
+}
+
+async fn columns_of(h: &Harness, c: Uuid, qs: &str) -> Vec<ColumnInfo> {
+    h.get_json(&format!("/v1/connections/{c}/schema/columns?{qs}"))
+        .await
+}
+
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn postgres_pooled_connections_are_reset() {
+    let h = single_connection_harness(60).await;
+    let c = profile(&h, &postgres(), false).await;
+    let pid = one(&h.query(c, "SELECT pg_backend_pid()").await);
+    let ev = h
+        .query(
+            c,
+            "SET search_path = sales; SET application_name = 'leak'; \
+             CREATE TEMP TABLE it_leak (a int); PREPARE it_leak_p AS SELECT 1; \
+             SELECT pg_advisory_lock(4242)",
+        )
+        .await;
+    assert!(error(&ev).is_none(), "{ev:?}");
+    // The script's search_path would make `customers` resolve to sales.
+    assert!(columns_of(&h, c, "name=customers").await.is_empty());
+    assert!(
+        !columns_of(&h, c, "schema=sales&name=customers")
+            .await
+            .is_empty()
+    );
+    let ev = h
+        .query(
+            c,
+            "SELECT pg_backend_pid(), current_setting('search_path'), \
+             current_setting('application_name'), to_regclass('pg_temp.it_leak') IS NULL, \
+             (SELECT count(*) FROM pg_prepared_statements WHERE name = 'it_leak_p'), \
+             (SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid())",
+        )
+        .await;
+    assert_eq!(
+        rows(&ev, 0),
+        vec![vec![
+            pid,
+            json!("\"$user\", public"),
+            json!("sqail"),
+            json!(true),
+            json!(0),
+            json!(0)
+        ]],
+        "same connection, nothing left over"
+    );
+    // The reset keeps the driver's own prepared statements: the binary
+    // (parameterised) path still works on the reused connection.
+    let ev = h
+        .query_on(
+            &format!("/v1/connections/{c}/query"),
+            json!({"sql": "SELECT c_uuid FROM sales.type_zoo WHERE id = $1", "params": [1]}),
+            None,
+        )
+        .await;
+    assert_eq!(one(&ev), json!("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"));
+}
+
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn mssql_connections_that_ran_scripts_are_not_reused() {
+    let h = single_connection_harness(60).await;
+    let c = profile(&h, &mssql(), false).await;
+    let spid = one(&h.query(c, "SELECT @@SPID").await);
+    let ev = h
+        .query(
+            c,
+            "USE master; SET LANGUAGE Deutsch; SET ROWCOUNT 1; CREATE TABLE #it_leak (a int)",
+        )
+        .await;
+    assert!(error(&ev).is_none(), "{ev:?}");
+    let cols = columns_of(&h, c, "schema=sales&name=customers").await;
+    assert!(cols.len() > 1, "{cols:?}");
+    let ev = h
+        .query(
+            c,
+            "SELECT @@SPID, DB_NAME(), @@LANGUAGE, CASE WHEN OBJECT_ID('tempdb..#it_leak') IS NULL THEN 1 ELSE 0 END",
+        )
+        .await;
+    let row = &rows(&ev, 0)[0];
+    assert_ne!(row[0], spid, "the script's connection was reused");
+    assert_eq!(
+        row[1..],
+        [json!("sqail_test"), json!("us_english"), json!(1)]
+    );
+    let ev = h.query(c, "SELECT TOP 3 id FROM sales.customers").await;
+    assert_eq!(rows(&ev, 0).len(), 3);
+}
+
+/// An explain that outlives the request timeout, then a normal query on the
+/// same single-connection profile.
+async fn explain_timeout_leaves_a_clean_pool(d: Dialect, sleep: &str) {
+    let h = single_connection_harness(2).await;
+    let c = profile(&h, &d, false).await;
+    let started = Instant::now();
+    let res = h
+        .post(
+            &format!("/v1/connections/{c}/explain"),
+            &json!({"sql": sleep, "analyze": true}),
+            &h.admin,
+        )
+        .await;
+    assert_eq!(res.status(), 504, "{}", res.text().await.unwrap());
+    assert!(started.elapsed() < Duration::from_secs(8));
+    let started = Instant::now();
+    let ev = h
+        .query(c, &format!("SELECT count(*) FROM {}", (d.t)("customers")))
+        .await;
+    assert!(error(&ev).is_none(), "{ev:?}");
+    assert_eq!(rows(&ev, 0).len(), 1, "rows, not a plan: {ev:?}");
+    assert_eq!(done(&ev).1, None);
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the next query waited for the abandoned one"
+    );
+    let tx = if d.engine == "mssql" {
+        "SELECT @@TRANCOUNT"
+    } else {
+        "SELECT CASE WHEN now() = statement_timestamp() THEN 0 ELSE 1 END"
+    };
+    assert_eq!(one(&h.query(c, tx).await), json!(0));
+    // Catalog calls work too.
+    assert!(
+        !columns_of(&h, c, "schema=sales&name=customers")
+            .await
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn postgres_explain_past_the_request_timeout() {
+    explain_timeout_leaves_a_clean_pool(postgres(), "SELECT pg_sleep(20)").await;
+}
+
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn mssql_explain_past_the_request_timeout() {
+    explain_timeout_leaves_a_clean_pool(mssql(), "WAITFOR DELAY '00:00:20'").await;
+}
+
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn postgres_read_only_profiles_stay_read_only() {
+    let h = single_connection_harness(60).await;
+    let ro = profile(&h, &postgres(), true).await;
+    let pid = one(&h.query(ro, "SELECT pg_backend_pid()").await);
+    let attempts = [
+        "SET default_transaction_read_only = off",
+        "SET SESSION default_transaction_read_only TO false",
+        "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE",
+        "BEGIN READ WRITE; UPDATE sales.products SET active = active WHERE id = 1; COMMIT",
+        "START TRANSACTION READ WRITE",
+        "SET TRANSACTION READ WRITE",
+        "RESET ALL",
+        "SELECT set_config('default_transaction_read_only', 'off', false)",
+        "SELECT 1; SET default_transaction_read_only = off",
+    ];
+    let session: SessionInfo = {
+        let res = h
+            .post("/v1/sessions", &json!({"connection_id": ro}), &h.admin)
+            .await;
+        assert_eq!(res.status(), 201);
+        res.json().await.unwrap()
+    };
+    for sql in attempts {
+        for path in [
+            format!("/v1/connections/{ro}/query"),
+            format!("/v1/sessions/{}/query", session.id),
+        ] {
+            let res = h.post(&path, &json!({"sql": sql}), &h.admin).await;
+            assert_eq!(res.status(), 403, "{path}: {sql}");
+        }
+        let res = h
+            .post(
+                &format!("/v1/connections/{ro}/explain"),
+                &json!({"sql": sql, "analyze": true}),
+                &h.admin,
+            )
+            .await;
+        assert_eq!(res.status(), 403, "explain: {sql}");
+    }
+    // Writable profiles are not restricted.
+    let rw = profile(&h, &postgres(), false).await;
+    let ev = h
+        .query(
+            rw,
+            "SET default_transaction_read_only = off; SHOW transaction_read_only",
+        )
+        .await;
+    assert_eq!(one(&ev), json!("off"));
+
+    // The read-only connection is still the same and still read-only.
+    let ev = h
+        .query(
+            ro,
+            "SELECT pg_backend_pid(), current_setting('default_transaction_read_only')",
+        )
+        .await;
+    assert_eq!(rows(&ev, 0), vec![vec![pid, json!("on")]]);
+    let ev = h
+        .query(ro, "UPDATE sales.products SET active = active WHERE id = 1")
+        .await;
+    assert!(error(&ev).is_some(), "write on a read-only profile");
+}
+
 /// `docs/openapi.json` is the published API reference; it must match what
 /// the service serves. Regenerate with `SQAIL_BLESS=1 cargo test -p
 /// sqail-service --test it openapi`.

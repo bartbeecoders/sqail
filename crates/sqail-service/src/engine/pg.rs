@@ -55,6 +55,11 @@ impl PgDriver {
         if let Some(pw) = password {
             config.password(pw);
         }
+        if read_only {
+            // In the startup packet, so it is the session's reset value:
+            // RESET ALL (and our pool reset) brings it back.
+            config.options("-c default_transaction_read_only=on");
+        }
         let tls = tls_client::for_postgres(tls_client::PgTls {
             mode: p.ssl_mode,
             root_pem: p.ssl_root_cert.as_deref(),
@@ -110,6 +115,7 @@ impl Driver for PgDriver {
             }),
             client,
             notices,
+            read_only: self.read_only,
         }))
     }
 
@@ -122,7 +128,19 @@ struct PgConn {
     client: Client,
     notices: mpsc::UnboundedReceiver<(String, String)>,
     cancel: Arc<PgCancel>,
+    read_only: bool,
 }
+
+/// `DISCARD ALL` without its `DEALLOCATE ALL`: tokio-postgres keeps prepared
+/// statements of its own (type lookups) that must survive. Statements the
+/// user prepared with SQL `PREPARE` are deallocated by name instead.
+const PG_RESET: &str = "CLOSE ALL; SET SESSION AUTHORIZATION DEFAULT; RESET ALL; UNLISTEN *; \
+     SELECT pg_advisory_unlock_all(); DISCARD PLANS; DISCARD TEMP; DISCARD SEQUENCES";
+
+/// Whether a transaction is open, and the SQL to drop user-prepared statements.
+const PG_RESET_PROBE: &str = "SELECT now() <> statement_timestamp(), \
+     coalesce((SELECT string_agg('DEALLOCATE ' || quote_ident(name), '; ') \
+               FROM pg_prepared_statements WHERE from_sql), '')";
 
 struct PgCancel {
     token: CancelToken,
@@ -306,6 +324,38 @@ impl Conn for PgConn {
                 _ => None,
             })
             .unwrap_or_default())
+    }
+
+    async fn reset(&mut self) -> Result<()> {
+        // Fails inside an aborted transaction (25P02), which is what we want.
+        let probe = self
+            .client
+            .simple_query(PG_RESET_PROBE)
+            .await
+            .map_err(db_err)?;
+        let Some(row) = probe.iter().find_map(|m| match m {
+            SimpleQueryMessage::Row(r) => Some(r),
+            _ => None,
+        }) else {
+            return Err(DbError::Internal("reset probe returned no row".into()));
+        };
+        if row.get(0) != Some("f") {
+            return Err(DbError::Invalid("a transaction is open".into()));
+        }
+        let mut sql = PG_RESET.to_string();
+        if let Some(dealloc) = row.get(1).filter(|s| !s.is_empty()) {
+            sql.push_str("; ");
+            sql.push_str(dealloc);
+        }
+        if self.read_only {
+            // Already the reset value from the startup packet; this covers
+            // servers or poolers that ignore startup options.
+            sql.push_str("; SET default_transaction_read_only = on");
+        }
+        self.client.batch_execute(&sql).await.map_err(db_err)?;
+        // Nothing the previous borrower caused may reach the next one.
+        while self.notices.try_recv().is_ok() {}
+        Ok(())
     }
 
     fn engine(&self) -> Engine {

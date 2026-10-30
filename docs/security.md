@@ -48,7 +48,9 @@ sqail ──TLS 1.3 + bearer token (+ optional client cert)──▶ sqail-servi
 | Secrets or row values in logs | Authorization is a sensitive header; values are never logged; audit stores SQL text only (can be disabled) | `logs_contain_no_secrets_or_row_values` |
 | SQL injection through catalog browsing | All names travel as bind parameters; the one exception (SQLite schema) must match an attached database first | `introspect.rs` review; engine matrix tests |
 | Reading arbitrary files through SQLite profiles | Paths must be absolute and inside `sqlite.allowed_dirs` after resolving `..` and symlinks; empty list = SQLite off | `path_must_be_inside_allowed_dirs`, `sqlite_outside_allowed_dirs_is_rejected` |
-| Writes through a "read-only" profile | Postgres: `default_transaction_read_only`; SQLite: opened read-only; the `read` scope is limited to read-only profiles | `engine_postgres`/`engine_sqlite` (read-only part) |
+| Writes through a "read-only" profile | Postgres: `default_transaction_read_only = on` in the startup packet (so every reset restores it), plus a lexical check that refuses statements switching the transaction mode (`SET`/`RESET` of `transaction_read_only` or `default_transaction_read_only`, `READ WRITE`, `SET SESSION CHARACTERISTICS`, `RESET ALL`, `set_config()`, `DO`) on queries, sessions and explain; SQLite: opened read-only; the `read` scope is limited to read-only profiles. See the limitation below | `engine_postgres`/`engine_sqlite` (read-only part), `postgres_read_only_profiles_stay_read_only`, `pg_guard` tests |
+| One request's session state reaching another through the pool | A connection returns to the pool only when explicitly released. After user SQL, Postgres connections are reset (`DISCARD ALL` minus the driver's own prepared statements, user `PREPARE`s deallocated) and SQL Server connections are closed; a failed reset closes the connection | `postgres_pooled_connections_are_reset`, `mssql_connections_that_ran_scripts_are_not_reused`, `engine::tests` |
+| A request cut off by the request timeout leaving its query running on a pooled connection | Catalog and explain calls have their own deadline below `request_timeout_secs` and cancel their query; a connection dropped without being released is cancelled and closed, never pooled | `postgres_explain_past_the_request_timeout`, `mssql_explain_past_the_request_timeout`, `abandoned_connections_are_cancelled_and_closed` |
 | Resource exhaustion | Body limit (8 MiB); request timeout; per-query row cap and timeout; pool size per profile; sessions capped per token and reaped when idle; the client caps NDJSON line length | `max_rows_truncates`, `timeout_stops_a_running_query`, `NdjsonDecoder` |
 | Crashes on hostile input | Lexers, splitters, completer, formatter and the NDJSON decoder are fuzzed | `cargo run --profile fuzz -p sqail-fuzz -- <secs>` (10 min: 13.2M inputs, 0 crashes; one real bug found and fixed; 2 min on every CI run) |
 | Abandoned transactions holding locks | A transaction left open outside a session is rolled back and reported; idle sessions close (rollback); the UI asks before closing a tab or quitting with one open | `open_transaction_outside_session_is_rolled_back`, UI test |
@@ -68,6 +70,10 @@ sqail ──TLS 1.3 + bearer token (+ optional client cert)──▶ sqail-servi
 * **SQL Server read-only profiles** use `ApplicationIntent=ReadOnly`, which is
   only enforced on availability-group secondaries. Use a login with read-only
   rights.
+* **PostgreSQL read-only profiles** are a session setting plus a statement
+  check, not a permission. A function or procedure the role may call can
+  still change the setting or write. Real enforcement needs a database role
+  without write rights; use one wherever read-only matters.
 * **SQL Server cancel** uses `KILL`, which needs `ALTER ANY CONNECTION`.
   Without it the service drops the connection, and the server finishes the
   batch in the background.

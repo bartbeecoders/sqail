@@ -579,7 +579,15 @@ pub async fn ddl(conn: &mut dyn Conn, schema: Option<&str>, name: &str) -> Resul
         Engine::Mssql => {
             let obj = rows(
                 conn,
-                "SELECT RTRIM(o.type), OBJECT_DEFINITION(o.object_id), s.name
+                // OBJECT_DEFINITION is NULL both for encrypted modules and
+                // when the login can see the object (any permission on it,
+                // e.g. EXECUTE or SELECT) but lacks VIEW DEFINITION, so fetch
+                // what is needed to tell the two apart.
+                "SELECT RTRIM(o.type), OBJECT_DEFINITION(o.object_id), s.name,
+                        OBJECTPROPERTY(o.object_id, 'IsEncrypted'),
+                        HAS_PERMS_BY_NAME(QUOTENAME(s.name) + '.' + QUOTENAME(o.name),
+                                          'OBJECT', 'VIEW DEFINITION'),
+                        USER_NAME(), o.type_desc
                  FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id
                  WHERE s.name = COALESCE(@P1, SCHEMA_NAME()) AND o.name = @P2",
                 vec![param(schema), param(Some(name))],
@@ -587,15 +595,58 @@ pub async fn ddl(conn: &mut dyn Conn, schema: Option<&str>, name: &str) -> Resul
             .await?;
             let row = obj.first().ok_or_else(not_found)?;
             let schema_name = get_str(&row[2]).unwrap_or_else(|| "dbo".into());
-            match get_str(&row[0]).as_deref() {
-                Some("U") => ms_table_ddl(conn, &schema_name, name).await?,
-                _ => get_str(&row[1]).ok_or_else(|| {
-                    DbError::Invalid(format!("no definition available for '{name}' (encrypted?)"))
-                })?,
+            match (get_str(&row[0]).as_deref(), get_str(&row[1])) {
+                (Some("U"), _) => ms_table_ddl(conn, &schema_name, name).await?,
+                (_, Some(def)) => def,
+                (_, None) => {
+                    return Err(DbError::Invalid(ms_no_definition(
+                        &schema_name,
+                        name,
+                        get_bool(&row[3]),
+                        // NULL means "could not check": don't blame permissions.
+                        row[4].is_null() || get_bool(&row[4]),
+                        get_str(&row[5]).as_deref(),
+                        get_str(&row[6]).as_deref(),
+                    )));
+                }
             }
         }
     };
     Ok(Ddl { ddl })
+}
+
+/// Why SQL Server returned no definition for a visible object that isn't a
+/// table.
+fn ms_no_definition(
+    schema: &str,
+    name: &str,
+    encrypted: bool,
+    can_view_definition: bool,
+    user: Option<&str>,
+    type_desc: Option<&str>,
+) -> String {
+    let object = format!("{}.{}", ms_ident(schema), ms_ident(name));
+    if encrypted {
+        format!(
+            "{object} was created WITH ENCRYPTION; SQL Server does not return the source \
+             of encrypted modules, not even to their owner"
+        )
+    } else if !can_view_definition {
+        let user = user.map_or_else(|| "<user>".to_string(), ms_ident);
+        format!(
+            "the service's database user {user} lacks VIEW DEFINITION on {object} \
+             (EXECUTE or SELECT only lets it see that the object exists). \
+             A database owner can grant it with:\n\
+             GRANT VIEW DEFINITION ON SCHEMA::{} TO {user};",
+            ms_ident(schema)
+        )
+    } else {
+        let kind = type_desc.map_or_else(
+            || "object".to_string(),
+            |t| t.to_lowercase().replace('_', " "),
+        );
+        format!("{object} ({kind}) has no T-SQL definition to script")
+    }
 }
 
 fn pg_ident(s: &str) -> String {
@@ -749,5 +800,25 @@ mod tests {
         assert_eq!(pg_ident("Orders"), "\"Orders\"");
         assert_eq!(pg_ident("a\"b"), "\"a\"\"b\"");
         assert_eq!(ms_ident("a]b"), "[a]]b]");
+    }
+
+    #[test]
+    fn mssql_missing_definition_says_why() {
+        let enc = ms_no_definition("dbo", "p", true, false, Some("app"), None);
+        assert!(enc.contains("WITH ENCRYPTION"), "{enc}");
+        assert!(!enc.contains("GRANT"), "{enc}");
+
+        let perm = ms_no_definition("sales", "p", false, false, Some("app]x"), None);
+        assert!(
+            perm.contains("lacks VIEW DEFINITION on [sales].[p]"),
+            "{perm}"
+        );
+        assert!(
+            perm.ends_with("GRANT VIEW DEFINITION ON SCHEMA::[sales] TO [app]]x];"),
+            "{perm}"
+        );
+
+        let clr = ms_no_definition("dbo", "p", false, true, None, Some("CLR_STORED_PROCEDURE"));
+        assert!(clr.contains("(clr stored procedure)"), "{clr}");
     }
 }

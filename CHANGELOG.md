@@ -14,6 +14,14 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
   the tab menu or Settings → Tabs, stay at the front of the one row). They
   are tinted and marked ⚑, have no close button, and are remembered with the
   workspace.
+- **Fix:** completion offers tables, not columns, where only a table fits:
+  after a comma in the `FROM` list following an alias or a table hint
+  (`FROM orders AS o, …`, `FROM t WITH (NOLOCK), …`), after
+  `CROSS`/`OUTER APPLY` and `MERGE … USING`, and after T-SQL `INSERT`,
+  `DELETE` and `MERGE` without `INTO`/`FROM` (#1).
+- **Script definition explains failures.** When the service can't script a
+  view, procedure or function, the tab that opens shows its explanation as
+  SQL comments instead of a status-bar notice that fades away.
 - **Long values in the result grid.** Columns start wider: up to about
   80 characters (was 48), measured over the first 1 000 rows (was 50) and
   again as rows stream in. A cut-off value shows in full on hover. Double-click
@@ -22,6 +30,15 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
   rows** option (grid right-click menu or Settings → Queries, off by
   default) wraps values and shows their line breaks, with rows up to 10
   lines tall (#48).
+
+### sqail-service
+
+- **SQL Server: say why a definition is missing** (#44). Scripting a view,
+  procedure, function or trigger with a login that may execute or read it
+  but lacks `VIEW DEFINITION` used to fail with "no definition available
+  (encrypted?)". The error now names the database user and the exact
+  `GRANT VIEW DEFINITION ON SCHEMA::… TO …;` to run, and only mentions
+  encryption for modules that really are `WITH ENCRYPTION`.
 
 ## 1.4.0 — 2026-10-30
 

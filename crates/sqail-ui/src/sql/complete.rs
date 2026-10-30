@@ -628,16 +628,7 @@ pub fn complete(
         let last = before
             .last()
             .map(|t| sql[t.range.clone()].to_ascii_uppercase());
-        let clause = before
-            .iter()
-            .rev()
-            .find(|t| t.kind == Kind::Word && is_keyword(&sql[t.range.clone()]))
-            .map(|t| sql[t.range.clone()].to_ascii_uppercase());
-        let table_position = matches!(
-            last.as_deref(),
-            Some("FROM" | "JOIN" | "UPDATE" | "INTO" | "TABLE")
-        ) || (last.as_deref() == Some(",")
-            && clause.as_deref() == Some("FROM"));
+        let table_position = is_table_position(sql, &before, engine);
 
         if table_position {
             let schemas = cat.schemas().unwrap_or_else(|| vec![default.to_string()]);
@@ -748,6 +739,88 @@ pub fn complete(
         range: start + p..start + rel,
         items,
     })
+}
+
+/// Clause keywords: the nearest one before the cursor says what is expected
+/// there. `AS`, table hints (`WITH (NOLOCK)`) and the like are not clauses.
+const CLAUSES: &[&str] = &[
+    "SELECT",
+    "FROM",
+    "JOIN",
+    "APPLY",
+    "USING",
+    "WHERE",
+    "ON",
+    "SET",
+    "GROUP",
+    "ORDER",
+    "HAVING",
+    "VALUES",
+    "INTO",
+    "UPDATE",
+    "INSERT",
+    "DELETE",
+    "MERGE",
+    "RETURNING",
+    "OUTPUT",
+    "WINDOW",
+    "LIMIT",
+    "OFFSET",
+    "UNION",
+    "EXCEPT",
+    "INTERSECT",
+];
+
+/// The nearest clause keyword at the same parenthesis depth as the end of
+/// `before`, skipping parenthesised content. Stops at an unclosed `(`: the
+/// cursor is inside it, and nothing outside says what belongs there.
+fn clause_before(sql: &str, before: &[&Token]) -> Option<(usize, String)> {
+    let mut depth = 0usize;
+    for (i, t) in before.iter().enumerate().rev() {
+        match t.kind {
+            Kind::Close => depth += 1,
+            Kind::Open if depth == 0 => return None,
+            Kind::Open => depth -= 1,
+            Kind::Word if depth == 0 => {
+                let w = sql[t.range.clone()].to_ascii_uppercase();
+                if CLAUSES.contains(&w.as_str()) {
+                    return Some((i, w));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether only a table (or schema, or CTE) name belongs right after
+/// `before`, the tokens before the word being typed.
+fn is_table_position(sql: &str, before: &[&Token], engine: Engine) -> bool {
+    let Some(last) = before.last() else {
+        return false;
+    };
+    let last = sql[last.range.clone()].to_ascii_uppercase();
+    match last.as_str() {
+        "FROM" | "JOIN" | "APPLY" | "UPDATE" | "INTO" | "TABLE" => true,
+        // `MERGE … USING src` and Postgres `DELETE FROM t USING other` take
+        // a table; `JOIN t USING (col)` takes columns.
+        "USING" => !matches!(
+            clause_before(sql, &before[..before.len() - 1]),
+            Some((_, c)) if c == "JOIN"
+        ),
+        // T-SQL may leave out INTO/FROM: `INSERT t`, `DELETE t`, `MERGE t`.
+        "INSERT" | "DELETE" | "MERGE" => engine == Engine::Mssql,
+        // A list of tables: `FROM a AS x, |`, `FROM t WITH (NOLOCK), |`.
+        "," => match clause_before(sql, before) {
+            Some((_, c)) if matches!(c.as_str(), "FROM" | "JOIN" | "APPLY") => true,
+            Some((i, c)) if c == "USING" => !matches!(
+                clause_before(sql, &before[..i]),
+                Some((_, c)) if c == "JOIN"
+            ),
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 fn column_cand(engine: Engine, c: &ColumnInfo, table: &str) -> Candidate {
@@ -926,11 +999,130 @@ mod tests {
     }
 
     fn labels(text: &str) -> Vec<String> {
+        labels_for(Engine::Postgres, text)
+    }
+
+    fn labels_for(engine: Engine, text: &str) -> Vec<String> {
         let cursor = text.find('|').expect("cursor marker");
         let t = text.replace('|', "");
-        complete(&t, cursor, Engine::Postgres, &Fake)
+        complete(&t, cursor, engine, &Fake)
             .map(|c| c.items.into_iter().map(|i| i.label).collect())
             .unwrap_or_default()
+    }
+
+    /// Tables and schemas, no columns: what a table position must offer.
+    #[track_caller]
+    fn assert_tables(engine: Engine, text: &str) {
+        let l = labels_for(engine, text);
+        // `public` is the default schema on Postgres only, so `notes` may be
+        // qualified.
+        for want in ["notes", "sales.orders", "sales"] {
+            assert!(
+                l.iter()
+                    .any(|x| x == want || x.ends_with(&format!(".{want}"))),
+                "{engine:?} {text}: {l:?}"
+            );
+        }
+        for col in ["id", "status", "customer_id", "name", "body"] {
+            assert!(!l.contains(&col.to_string()), "{engine:?} {text}: {l:?}");
+        }
+    }
+
+    /// Columns, not a table list.
+    #[track_caller]
+    fn assert_columns(engine: Engine, text: &str) {
+        let l = labels_for(engine, text);
+        assert!(
+            l.contains(&"status".to_string()),
+            "{engine:?} {text}: {l:?}"
+        );
+        assert!(
+            !l.contains(&"sales".to_string()),
+            "{engine:?} {text}: {l:?}"
+        );
+    }
+
+    #[test]
+    fn after_from_offers_tables_not_columns() {
+        for e in [Engine::Postgres, Engine::Mssql, Engine::Sqlite] {
+            let l = labels_for(e, "SELECT * FROM |");
+            assert!(l.iter().any(|x| x.ends_with("notes")), "{e:?}: {l:?}");
+        }
+        assert_tables(Engine::Mssql, "SELECT *\nFROM |");
+        assert_tables(Engine::Mssql, "SELECT * FROM | WHERE status = 1");
+        assert_tables(Engine::Postgres, "SELECT 1;\nSELECT * FROM |");
+        let l = labels_for(Engine::Mssql, "SELECT * FROM n|");
+        assert_eq!(l.first().map(String::as_str), Some("public.notes"), "{l:?}");
+    }
+
+    #[test]
+    fn comma_after_aliased_table() {
+        for e in [Engine::Postgres, Engine::Mssql] {
+            assert_tables(e, "SELECT * FROM sales.orders AS o, |");
+            assert_tables(e, "SELECT * FROM sales.orders o, |");
+        }
+    }
+
+    #[test]
+    fn comma_after_table_hint() {
+        assert_tables(Engine::Mssql, "SELECT * FROM sales.orders WITH (NOLOCK), |");
+        assert_tables(
+            Engine::Mssql,
+            "SELECT * FROM sales.orders o WITH (NOLOCK), |",
+        );
+    }
+
+    #[test]
+    fn cross_and_outer_apply() {
+        assert_tables(Engine::Mssql, "SELECT * FROM sales.orders o CROSS APPLY |");
+        assert_tables(Engine::Mssql, "SELECT * FROM sales.orders o OUTER APPLY |");
+    }
+
+    #[test]
+    fn merge_using() {
+        assert_tables(Engine::Mssql, "MERGE INTO sales.orders AS t USING |");
+        assert_tables(Engine::Mssql, "MERGE sales.orders AS t USING |");
+        assert_tables(Engine::Postgres, "MERGE INTO sales.orders t USING |");
+        assert_tables(Engine::Mssql, "MERGE |");
+    }
+
+    #[test]
+    fn delete_using_is_a_table_but_join_using_is_not() {
+        assert_tables(Engine::Postgres, "DELETE FROM sales.orders o USING |");
+        assert_tables(
+            Engine::Postgres,
+            "DELETE FROM sales.orders o USING sales.customers c, |",
+        );
+        let l = labels("SELECT * FROM sales.orders o JOIN sales.customers c USING |");
+        assert!(!l.contains(&"sales".to_string()), "{l:?}");
+    }
+
+    #[test]
+    fn tsql_insert_and_delete_without_into_or_from() {
+        assert_tables(Engine::Mssql, "INSERT |");
+        assert_tables(Engine::Mssql, "DELETE |");
+        // Postgres needs INTO/FROM there: not a table position.
+        assert!(!labels("INSERT |").contains(&"sales".to_string()));
+        assert!(!labels("DELETE |").contains(&"sales".to_string()));
+    }
+
+    #[test]
+    fn column_lists_stay_columns() {
+        assert_columns(Engine::Postgres, "SELECT id, | FROM sales.orders");
+        assert_columns(
+            Engine::Mssql,
+            "SELECT * FROM sales.orders o, sales.customers c WHERE o.id = 1 AND |",
+        );
+        assert_columns(Engine::Postgres, "UPDATE sales.orders SET id = 1, |");
+        assert_columns(Engine::Mssql, "SELECT * FROM sales.orders ORDER BY id, |");
+        assert_columns(
+            Engine::Postgres,
+            "SELECT * FROM sales.orders o JOIN sales.customers c ON c.id = o.customer_id, |",
+        );
+        assert_columns(
+            Engine::Postgres,
+            "SELECT * FROM sales.orders WHERE id IN (1, |",
+        );
     }
 
     #[test]

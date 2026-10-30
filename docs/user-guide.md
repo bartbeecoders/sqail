@@ -203,7 +203,11 @@ columns and functions of the current connection. After `alias.` it lists
 that alias's columns: tables (`FROM orders o`), CTEs (`WITH x AS (…)`) and
 subqueries (`FROM (SELECT …) s`), with the innermost subquery winning when
 an alias is reused. A column name shared by several tables in the query is
-offered qualified (`o.id`, `c.id`).
+offered qualified (`o.id`, `c.id`). Where only a table fits it offers
+tables, schemas and CTEs instead of columns: after `FROM`, `JOIN`,
+`CROSS`/`OUTER APPLY`, `UPDATE`, `INTO`, `MERGE … USING`, a comma in the
+`FROM` list (also after an alias or a table hint such as
+`WITH (NOLOCK)`), and on SQL Server after `INSERT`, `DELETE` and `MERGE`.
 
 **Transactions:** every tab has its own server session. `BEGIN … COMMIT`
 spans runs, and the status bar shows **in transaction** while one is open.
@@ -281,7 +285,11 @@ remember their state.
 * **Connections:** a tree of schemas, tables, views, columns, indexes, foreign
   keys and routines, loaded lazily. Right-click a table for *SELECT top 100*,
   *Design table…*, *Import CSV…*, *Script CREATE*, *Drop table…* or *Copy
-  name*; right-click *Tables* or a connection for *New table…*. Double-click a
+  name*; right-click a routine for *Script definition* or *Copy name*. When
+  the object can't be scripted, the new tab says why instead; on SQL Server
+  that is usually a missing `VIEW DEFINITION` grant for the service's login,
+  and the tab shows the `GRANT` to run (see `docs/windows-setup.md`).
+  Right-click *Tables* or a connection for *New table…*. Double-click a
   connection to edit it. Drag a table, view or routine
   into the editor: inside a statement it inserts the qualified name; on a
   blank line (or below the text) a table or view becomes a formatted

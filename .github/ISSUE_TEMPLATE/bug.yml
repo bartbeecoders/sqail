@@ -1,0 +1,86 @@
+name: Bug report
+description: Something in sqail or sqail-service doesn't work as it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Security problems go through
+        [a private advisory](https://github.com/bartbeecoders/sqail/security/advisories/new), not here.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - sqail (editor)
+        - sqail-service
+        - AI assistant
+        - Packaging / installer
+        - Website (sqail.io)
+    validations:
+      required: true
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Database engine
+      multiple: true
+      options:
+        - SQL Server
+        - Azure SQL
+        - PostgreSQL
+        - SQLite
+        - Not engine-specific
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      multiple: true
+      options:
+        - Linux (Arch / Omarchy)
+        - Linux (other)
+        - Windows
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The release you installed (the download is named after it), or `sqail-service --version`.
+      placeholder: "1.4.0"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Include the exact error message if there is one.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The smallest SQL or sequence of actions that shows it.
+      placeholder: |
+        1. Connect to …
+        2. Run `SELECT …`
+        3. …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: >
+        Optional. sqail-service logs (`journalctl --user -u sqail-service` on Linux,
+        the event log or service log on Windows) or the editor log (`SQAIL_UI_LOG=debug`).
+        Remove passwords, tokens and data you can't share.
+      render: text

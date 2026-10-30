@@ -1090,6 +1090,15 @@ fn apply(app: &mut SqailApp, a: Action, ctx: &egui::Context) {
                         text: d.ddl,
                         run: false,
                     },
+                    // The service says why (e.g. which GRANT is missing): put
+                    // that in a tab, where it can be read and copied, instead
+                    // of a status-bar notice that fades after a few seconds.
+                    Err(e @ sqail_client::Error::Api { .. }) => Msg::OpenInTab {
+                        connection: conn,
+                        title: format!("{name}.sql"),
+                        text: ddl_error_text(&schema, &name, &e.to_string()),
+                        run: false,
+                    },
                     Err(e) => Msg::Notice {
                         text: format!("Script {name}: {e}"),
                         error: true,
@@ -1141,7 +1150,7 @@ fn apply(app: &mut SqailApp, a: Action, ctx: &egui::Context) {
     }
 }
 
-/// The schema cache seen through the completer's [`Catalog`] trait. Lookups
+/// The schema cache seen through the completer's [`Catalog`](crate::sql::complete::Catalog) trait. Lookups
 /// that miss are recorded so the app can load them.
 pub struct TreeCatalog<'a> {
     tree: &'a SchemaTree,
@@ -1225,5 +1234,34 @@ impl sql::complete::Catalog for TreeCatalog<'_> {
             SchemaData::ForeignKeys(f) => Some(f.clone()),
             _ => None,
         }
+    }
+}
+
+/// What a "Script definition" tab shows when the service could not script the
+/// object: its explanation as SQL comments, so a GRANT it suggests can be
+/// copied (or uncommented) as is.
+fn ddl_error_text(schema: &str, name: &str, error: &str) -> String {
+    let mut text = format!("-- Could not script {schema}.{name}:\n");
+    for line in error.lines() {
+        text.push_str("-- ");
+        text.push_str(line);
+        text.push('\n');
+    }
+    text
+}
+
+#[cfg(test)]
+mod ddl_error_tests {
+    #[test]
+    fn every_line_is_a_comment() {
+        let t = super::ddl_error_text(
+            "dbo",
+            "p",
+            "no rights.\nGRANT VIEW DEFINITION ON SCHEMA::[dbo] TO [u];",
+        );
+        assert_eq!(
+            t,
+            "-- Could not script dbo.p:\n-- no rights.\n-- GRANT VIEW DEFINITION ON SCHEMA::[dbo] TO [u];\n"
+        );
     }
 }

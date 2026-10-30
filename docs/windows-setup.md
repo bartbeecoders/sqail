@@ -90,11 +90,18 @@ USE Sales;
 CREATE USER sqail_reader FOR LOGIN sqail_reader;
 ALTER ROLE db_datareader ADD MEMBER sqail_reader;   -- read all tables
 GRANT SHOWPLAN TO sqail_reader;                      -- query plans (Explain)
-GRANT VIEW DEFINITION TO sqail_reader;               -- schema tree, "Script CREATE"
+GRANT VIEW DEFINITION TO sqail_reader;               -- schema tree, "Script CREATE", "Script definition"
 -- For a read/write profile instead:
 -- ALTER ROLE db_datawriter ADD MEMBER sqail_reader;
 -- GRANT EXECUTE TO sqail_reader;                    -- stored procedures
 ```
+
+`VIEW DEFINITION` is what lets sqail show the source of views, procedures,
+functions and triggers (*Script CREATE*, *Script definition*). `EXECUTE` or
+`SELECT` alone only lets the login see that the object exists: SQL Server then
+returns no source, and sqail says which grant is missing. To allow it for one
+schema only: `GRANT VIEW DEFINITION ON SCHEMA::dbo TO sqail_reader;`. Modules
+created `WITH ENCRYPTION` have no readable source for anyone.
 
 Optional: `GRANT ALTER ANY CONNECTION TO sqail_reader;` (on `master`) lets
 **Cancel** stop a running query with `KILL` straight away. Without it,
@@ -254,6 +261,7 @@ Restart-Service sqail-service
 CREATE LOGIN [CORP\svc-sqail$] FROM WINDOWS;
 USE Sales; CREATE USER [CORP\svc-sqail$] FOR LOGIN [CORP\svc-sqail$];
 ALTER ROLE db_datareader ADD MEMBER [CORP\svc-sqail$];
+GRANT VIEW DEFINITION TO [CORP\svc-sqail$];
 ```
 
 For an ordinary domain account, set it in *services.msc → sqail-service →
@@ -302,6 +310,8 @@ rejected: it is an old-style (X.509 v1) certificate…*
 | sqail: `certificate fingerprint mismatch` | The gateway's certificate changed (a new install or a new certificate). Check the new fingerprint with `sqail-service --data-dir C:\ProgramData\sqail\service fingerprint`, then in sqail use *Service → Forget this service* and connect again. If nothing changed on the gateway, treat it as a possible attack. |
 | sqail can't reach the gateway | Does the admin page's *Overview* say "Only this computer can connect"? Then choose *Settings → Network → Other computers too*. Is the gateway's network profile *Public*? (The firewall rule only covers Domain and Private.) Test with `Test-NetConnection <gateway> -Port 7443`. |
 | The service doesn't start | Read `C:\ProgramData\sqail\service\logs\sqail-service.log` and *Event Viewer → Windows Logs → System* (source *Service Control Manager*). The usual causes are the port being in use, or an unreadable certificate or key file. |
+| *Script definition* / *Script CREATE*: `… lacks VIEW DEFINITION on [dbo].[name]` | The gateway's database user may run or read the object but not see its source. Run the `GRANT VIEW DEFINITION ON SCHEMA::… TO …;` from the message (or `GRANT VIEW DEFINITION TO <user>;` for the whole database), see [B1](#b1-prepare-sql-server). |
+| *Script definition*: `… was created WITH ENCRYPTION` | SQL Server never returns the source of encrypted modules, not even to sysadmins. Script it from source control instead. |
 | `requires the 'query' scope` | The user's token is `read`-scoped and the profile isn't read-only. Give them a `query` token, or mark the profile read-only. |
 
 Logs never contain passwords, tokens or query results. Queries are recorded

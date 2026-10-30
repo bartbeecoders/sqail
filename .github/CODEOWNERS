@@ -1,0 +1,9 @@
+# Changes to these paths need the owner's eye even when someone else (or an
+# agent) opens the pull request.
+*                                       @bartbeecoders
+/.github/                               @bartbeecoders
+/packaging/                             @bartbeecoders
+/deny.toml                              @bartbeecoders
+/.cargo/audit.toml                      @bartbeecoders
+/crates/sqail-service/src/auth.rs       @bartbeecoders
+/crates/sqail-service/src/crypto.rs     @bartbeecoders

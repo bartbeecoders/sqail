@@ -185,7 +185,10 @@ an admin token.
 
 The script splitter understands comments, string and identifier quoting,
 Postgres dollar quotes and SQL Server `GO` lines, so *Run statement* picks
-exactly the statement you're in. Completion knows keywords, schemas, tables,
+exactly the statement you're in. On SQL Server a `CREATE`/`ALTER`
+procedure, function, trigger or view runs to the next `GO` (or the end of
+the tab), with or without `BEGIN … END`, so semicolons and blank lines in
+its body don't cut it short. Completion knows keywords, schemas, tables,
 columns and functions of the current connection. After `alias.` it lists
 that alias's columns: tables (`FROM orders o`), CTEs (`WITH x AS (…)`) and
 subqueries (`FROM (SELECT …) s`), with the innermost subquery winning when

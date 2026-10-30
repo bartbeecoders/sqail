@@ -1386,6 +1386,16 @@ impl SqailApp {
                     t.find.focus = true;
                 }
             }
+            Command::FindNext | Command::FindPrevious => {
+                if let Some(t) = self.tabs.get_mut(idx) {
+                    t.find.open = true;
+                    if t.find.query.is_empty() {
+                        t.find.focus = true;
+                    } else {
+                        t.find.step = Some(cmd == Command::FindPrevious);
+                    }
+                }
+            }
             Command::Format => self.format_tab(idx),
             Command::SaveSnippet => {
                 self.dialog = Dialog::SaveSnippet {
@@ -1588,6 +1598,8 @@ impl SqailApp {
             ui.menu_button("Edit", |ui| {
                 for c in [
                     Command::Find,
+                    Command::FindNext,
+                    Command::FindPrevious,
                     Command::Format,
                     Command::SaveSnippet,
                     Command::CommandPalette,

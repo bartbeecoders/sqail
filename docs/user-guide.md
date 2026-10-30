@@ -176,6 +176,7 @@ an admin token.
 | Ctrl+PageDown / Ctrl+PageUp | Next / previous tab |
 | Ctrl+O / Ctrl+S / Ctrl+Shift+S | Open / save / save as (`.sql` files) |
 | Ctrl+F | Find and replace |
+| F3 / Shift+F3 | Find next / previous (Enter / Shift+Enter in the find field; Esc there closes it) |
 | Ctrl+= / Ctrl+- | Larger / smaller editor font |
 | Ctrl+mouse wheel, or the wheel with the middle button held | Zoom the editor text |
 | Ctrl+Shift+B | Expand / collapse the [sidebar](#sidebar) |
@@ -429,8 +430,9 @@ Command ids: `query.run`, `query.run_script`, `query.cancel`,
 `query.explain`, `query.explain_analyze`, `transaction.commit`,
 `transaction.rollback`, `transaction.toggle_autocommit`, `tab.new`,
 `tab.close`, `tab.next`, `tab.previous`, `file.open`, `file.save`,
-`file.save_as`, `edit.find`, `edit.format`, `edit.save_snippet`,
-`view.command_palette`, `view.quick_open`, `view.font_bigger`,
+`file.save_as`, `edit.find`, `edit.find_next`, `edit.find_previous`,
+`edit.format`, `edit.save_snippet`, `view.command_palette`,
+`view.quick_open`, `view.font_bigger`,
 `view.font_smaller`, `view.toggle_theme`, `view.connections`,
 `view.history`, `view.snippets`, `view.sidebar`, `view.assistant`,
 `connection.new`, `connection.refresh`, `table.new`, `service.connect`,

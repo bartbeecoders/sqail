@@ -10,6 +10,7 @@ pub mod designer;
 pub mod dialogs;
 pub mod editing;
 pub mod editor;
+pub mod find;
 pub mod folders;
 pub mod grid;
 pub mod local;

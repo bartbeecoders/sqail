@@ -24,6 +24,11 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
 - **Fix:** the completion popup closes when you type a space, comma, `;` or
   other punctuation, so the next Enter or Tab no longer inserts a
   suggestion (#65).
+- **Find bar fixes:** Enter in the find field goes to the next match and
+  keeps the focus there (a second Enter no longer replaces the match);
+  F3 / Shift+F3 (and Shift+Enter) find next / previous; Esc in the editor
+  no longer closes the bar; case-insensitive search works in text whose
+  lowercase has a different length (#66).
 
 ### sqail-service
 

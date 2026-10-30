@@ -548,6 +548,73 @@ fn settings_window_changes_theme_and_close_prompt() {
     assert!(matches!(h.state().dialog, sqail_ui::dialogs::Dialog::None));
 }
 
+/// Find bar: Enter / Shift+Enter step through matches and keep the focus in
+/// the field (so the text is never replaced), F3 / Shift+F3 work from the
+/// editor, and Esc in the editor doesn't close the bar (#66).
+#[test]
+fn find_bar_steps_without_editing() {
+    let e = env();
+    let mut h = app([1280.0, 800.0]);
+    let text = "SELECT name FROM people WHERE name = 'x' OR NAME IS NULL";
+    h.state_mut().tabs[0].text = text.into();
+    h.step();
+    let selected = |h: &Harness<'_, SqailApp>| {
+        let c = h.state().tabs[0].cursor;
+        let (a, b) = (c.primary.index.0, c.secondary.index.0);
+        (a.min(b), a.max(b))
+    };
+    let tab_id = h.state().tabs[0].id;
+    let field_focused = |h: &Harness<'_, SqailApp>| {
+        h.ctx
+            .memory(|m| m.has_focus(sqail_ui::editor::find_field_id(tab_id)))
+    };
+
+    h.key_press_modifiers(Modifiers::COMMAND, Key::F);
+    h.run_steps(2);
+    assert!(field_focused(&h), "Ctrl+F focuses the find field");
+    h.event(egui::Event::Text("name".into()));
+    h.run_steps(2);
+    h.key_press(Key::Enter);
+    h.run_steps(2);
+    assert_eq!(selected(&h), (7, 11));
+    h.key_press(Key::Enter);
+    h.run_steps(2);
+    assert_eq!(selected(&h), (30, 34), "second Enter finds the next match");
+    assert_eq!(h.state().tabs[0].text, text, "Enter never edits the text");
+    assert!(field_focused(&h), "focus stays in the find field");
+    h.key_press(Key::Enter);
+    h.run_steps(2);
+    assert_eq!(selected(&h), (44, 48), "case-insensitive by default");
+    h.key_press_modifiers(Modifiers::SHIFT, Key::Enter);
+    h.run_steps(2);
+    assert_eq!(selected(&h), (30, 34), "Shift+Enter goes back");
+    shot(&mut h, "14-find");
+
+    // Esc in the field closes the bar and returns to the editor.
+    h.key_press(Key::Escape);
+    h.run_steps(2);
+    assert!(!h.state().tabs[0].find.open);
+    // F3 / Shift+F3 from the editor reopen it and step.
+    h.key_press(Key::F3);
+    h.run_steps(3);
+    assert!(h.state().tabs[0].find.open);
+    assert_eq!(selected(&h), (44, 48));
+    h.key_press(Key::F3);
+    h.run_steps(3);
+    assert_eq!(selected(&h), (7, 11), "wraps around");
+    h.key_press_modifiers(Modifiers::SHIFT, Key::F3);
+    h.run_steps(3);
+    assert_eq!(selected(&h), (44, 48));
+    assert!(!field_focused(&h));
+    // Esc in the editor (e.g. to dismiss a popup) leaves the bar open.
+    h.key_press(Key::Escape);
+    h.run_steps(2);
+    assert!(h.state().tabs[0].find.open);
+    assert_eq!(h.state().tabs[0].text, text);
+    drop(h);
+    e.server.shutdown();
+}
+
 #[test]
 fn narrow_window_keeps_the_editor_out_of_the_side_panels() {
     let e = env();

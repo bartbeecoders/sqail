@@ -128,7 +128,7 @@ fn generate(rng: &mut Rng, corpus: &[String]) -> String {
                 let b = (a + rng.below(5)).min(chars.len());
                 s = chars[..a].iter().chain(&chars[b..]).collect();
             }
-            _ => s.push_str(rng.pick(PIECES)),
+            _ => s.push_str(rng.pick::<&str>(PIECES)),
         }
     }
     s

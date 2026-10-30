@@ -1,0 +1,39 @@
+name: Feature request
+description: Something sqail should do, or do better.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: How it could work. Keyboard shortcuts, menus, settings, mock-ups are all welcome.
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+      description: Concrete, checkable acceptance criteria.
+      placeholder: |
+        - Typing … after … offers …
+        - Works on SQL Server and PostgreSQL
+    validations:
+      required: true
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Database engine
+      multiple: true
+      options:
+        - SQL Server
+        - Azure SQL
+        - PostgreSQL
+        - SQLite
+        - Not engine-specific

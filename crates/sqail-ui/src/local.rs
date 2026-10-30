@@ -168,6 +168,8 @@ pub struct SavedTab {
     pub connection: Option<Uuid>,
     /// Character offset of the cursor.
     pub cursor: usize,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
 }
 
 impl Workspace {

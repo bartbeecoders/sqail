@@ -555,7 +555,7 @@ pub fn syntax(dark: bool) -> SyntaxColors {
 }
 
 /// Every icon glyph the UI uses; a test checks the bundled fonts have them.
-pub const ICONS: &str = "⊞👁ƒ⚙⟳▶■●×…▲▼";
+pub const ICONS: &str = "⊞👁ƒ⚙⟳▶■●×…▲▼⚑";
 
 #[cfg(test)]
 mod tests {

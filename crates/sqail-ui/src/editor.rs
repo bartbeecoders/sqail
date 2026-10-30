@@ -105,6 +105,8 @@ pub struct Tab {
     pub autocommit: bool,
     /// The tab's session has an open transaction (as of the last run).
     pub in_transaction: bool,
+    /// Pinned tabs come first in the tab strip and have no close button.
+    pub pinned: bool,
     cursor_screen: Option<egui::Pos2>,
 }
 
@@ -131,6 +133,7 @@ impl Tab {
             completion_pending: None,
             autocommit: true,
             in_transaction: false,
+            pinned: false,
             cursor_screen: None,
         }
     }
@@ -139,6 +142,7 @@ impl Tab {
         let mut t = Self::new(id, saved.title.clone(), saved.connection);
         t.path = saved.path.clone();
         t.text = saved.text.clone();
+        t.pinned = saved.pinned;
         // Dirty relative to the file on disk (or to nothing for scratch tabs).
         t.saved = match &saved.path {
             Some(p) => std::fs::read_to_string(p).unwrap_or_default(),
@@ -157,6 +161,7 @@ impl Tab {
             text: self.text.clone(),
             connection: self.connection,
             cursor: self.cursor.primary.index.0,
+            pinned: self.pinned,
         }
     }
 

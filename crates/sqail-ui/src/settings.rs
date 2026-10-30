@@ -20,6 +20,8 @@ pub struct Settings {
     /// Ask before closing a tab with unsaved changes. Tabs with an open
     /// transaction always ask.
     pub confirm_close_tab: bool,
+    /// Show pinned tabs on a row of their own, above the other tabs.
+    pub pinned_tabs_row: bool,
     /// Row cap per result set requested from the service.
     pub max_rows: u64,
     /// Open completions while typing (Ctrl+Space always works).
@@ -109,6 +111,7 @@ impl Default for Settings {
             editor_font_size: 14.0,
             ui_scale: 1.0,
             confirm_close_tab: true,
+            pinned_tabs_row: true,
             max_rows: 100_000,
             autocomplete: true,
             format_uppercase: true,

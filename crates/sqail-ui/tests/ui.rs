@@ -455,6 +455,128 @@ fn connection_tree_folders_rename_and_drag() {
     assert_eq!(saved[0].folder.as_deref(), Some("Production"));
 }
 
+/// Pinning tabs: a pinned tab moves first, loses its ×, ignores middle
+/// clicks, can sit on its own row, and stays pinned after a restart.
+#[test]
+fn pinned_tabs() {
+    let _e = env();
+    let titles = |h: &Harness<'_, SqailApp>| -> Vec<(String, bool)> {
+        h.state()
+            .tabs
+            .iter()
+            .map(|t| (t.title.clone(), t.pinned))
+            .collect()
+    };
+    {
+        let mut h = app([1280.0, 800.0]);
+        let settle = |h: &mut Harness<'_, SqailApp>| h.run_steps(4);
+        h.state_mut().new_tab(None);
+        h.state_mut().new_tab(None);
+        settle(&mut h);
+        assert_eq!(h.state().active, 2);
+
+        h.get_by_label("Query 3").click_secondary();
+        settle(&mut h);
+        h.get_by_label("Pin tab").click();
+        settle(&mut h);
+        assert_eq!(
+            titles(&h),
+            [
+                ("Query 3".into(), true),
+                ("Query 1".into(), false),
+                ("Query 2".into(), false)
+            ]
+        );
+        assert_eq!(h.state().active, 0, "the active tab moved with it");
+        assert_eq!(h.get_all_by_label("×").count(), 2, "no × on the pinned tab");
+        h.get_by_label("Query 3")
+            .click_button(egui::PointerButton::Middle);
+        settle(&mut h);
+        assert_eq!(h.state().tabs.len(), 3, "middle click spares pinned tabs");
+
+        // By default pinned tabs have their own row, above the others.
+        assert!(h.state().settings.pinned_tabs_row);
+        let (pin, other) = (
+            h.get_by_label("Query 3").rect(),
+            h.get_by_label("Query 1").rect(),
+        );
+        assert!(pin.bottom() <= other.top(), "{pin:?} above {other:?}");
+        h.get_by_label("Pinned");
+        shot(&mut h, "21-pinned-row");
+        // One row: the pinned tab sits left of the others.
+        h.get_by_label("Query 1").click_secondary();
+        settle(&mut h);
+        h.get_by_label("Pinned tabs on a separate row").click();
+        settle(&mut h);
+        assert!(!h.state().settings.pinned_tabs_row);
+        let (pin, other) = (
+            h.get_by_label("Query 3").rect(),
+            h.get_by_label("Query 1").rect(),
+        );
+        assert!(pin.center().y == other.center().y && pin.left() < other.left());
+
+        // Pin a second one: it goes after the first pinned tab.
+        h.state_mut().set_pinned(2, true);
+        settle(&mut h);
+        assert_eq!(
+            titles(&h),
+            [
+                ("Query 3".into(), true),
+                ("Query 2".into(), true),
+                ("Query 1".into(), false)
+            ]
+        );
+        h.state().workspace().save();
+    }
+    let h = app([1280.0, 800.0]);
+    assert_eq!(
+        titles(&h),
+        [
+            ("Query 3".into(), true),
+            ("Query 2".into(), true),
+            ("Query 1".into(), false)
+        ]
+    );
+}
+
+/// Press and release on separate frames, like a real mouse.
+fn real_click(h: &mut Harness<'_, SqailApp>, label: &str, button: egui::PointerButton) {
+    let pos = h.get_by_label(label).rect().center();
+    h.hover_at(pos);
+    h.step();
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+        h.step();
+        h.step();
+    }
+    h.run_steps(3);
+}
+
+#[test]
+fn pin_with_real_mouse_clicks() {
+    let _e = env();
+    let mut h = app([1280.0, 800.0]);
+    h.state_mut().new_tab(None);
+    h.run_steps(4);
+    real_click(&mut h, "Query 2", egui::PointerButton::Secondary);
+    shot(&mut h, "22-pin-menu");
+    real_click(&mut h, "Pin tab", egui::PointerButton::Primary);
+    assert!(
+        h.state().tabs[0].pinned,
+        "{:?}",
+        h.state()
+            .tabs
+            .iter()
+            .map(|t| (&t.title, t.pinned))
+            .collect::<Vec<_>>()
+    );
+}
+
 /// With no connections at all, the tree's toolbar still works.
 #[test]
 fn toolbar_works_on_an_empty_tree() {

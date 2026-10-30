@@ -7,6 +7,14 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
 
 ## Unreleased
 
+### sqail
+
+- **Pinned tabs.** Right-click a tab to pin it. Pinned tabs get their own
+  row above the other tabs (or, with *Pinned tabs on a separate row* off in
+  the tab menu or Settings → Tabs, stay at the front of the one row). They
+  are tinted and marked ⚑, have no close button, and are remembered with the
+  workspace.
+
 ## 1.4.0 — 2026-10-30
 
 ### sqail

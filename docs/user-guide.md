@@ -185,6 +185,14 @@ an admin token.
 | Ctrl+Shift+A | Expand / collapse the [AI assistant](#ai-assistant) |
 | Ctrl+, | [Settings](#settings) |
 
+**Pinned tabs.** Right-click a tab for *Pin tab* (or *File → Pin / unpin
+tab*). Pinned tabs get a row of their own, labelled *Pinned*, above the
+other tabs; they are tinted, marked ⚑ and have no close button, and middle
+clicks don't close them. Ctrl+W or *Close tab* in their menu still closes
+them. Untick *Pinned tabs on a separate row* (in the same menu, or Settings →
+Tabs) to keep them at the front of the one tab row instead. Pins are
+remembered with the open tabs.
+
 The script splitter understands comments, string and identifier quoting,
 Postgres dollar quotes and SQL Server `GO` lines, so *Run statement* picks
 exactly the statement you're in. On SQL Server a `CREATE`/`ALTER`
@@ -392,7 +400,7 @@ window. Changes apply right away and are saved to `settings.toml`.
 |---|---|
 | Appearance | **Theme**, **interface size** (75–200 %), **editor font size** |
 | Editor | Complete while typing; formatter keyword case and indent (2 or 4 spaces) |
-| Tabs | **Ask before closing a tab with unsaved changes** (on by default). Off, such a tab closes at once and its changes are lost. A tab with an open transaction always asks, because closing it rolls the transaction back. |
+| Tabs | Pinned tabs on a separate row. **Ask before closing a tab with unsaved changes** (on by default). Off, such a tab closes at once and its changes are lost. A tab with an open transaction always asks, because closing it rolls the transaction back. |
 | Queries | Row limit per result set |
 | Service | Start the local service when sqail starts |
 | AI assistant | Provider, model and program path per provider, rows shown to the model, sending the active tab's SQL |
@@ -444,7 +452,7 @@ Command ids: `query.run`, `query.run_script`, `query.cancel`,
 `view.font_smaller`, `view.toggle_theme`, `view.connections`,
 `view.history`, `view.snippets`, `view.sidebar`, `view.assistant`,
 `connection.new`, `connection.refresh`, `table.new`, `service.connect`,
-`app.settings`.
+`app.settings`, `tab.pin`.
 
 Client certificate for a service that requires mTLS, in `settings.toml`:
 

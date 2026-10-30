@@ -196,6 +196,15 @@ fn section(ui: &mut egui::Ui, section: Section, s: &mut Settings) {
                     );
                 },
             );
+            row(
+                ui,
+                "Pinned tabs",
+                "Pin a tab from its right-click menu. Pinned tabs stay first and have no \
+                 close button.",
+                |ui, _| {
+                    ui.checkbox(&mut s.pinned_tabs_row, "Show pinned tabs on a separate row");
+                },
+            );
         }
         Section::Queries => {
             row(

@@ -43,10 +43,11 @@ pub enum Command {
     RefreshConnections,
     ConnectService,
     OpenSettings,
+    TogglePinTab,
 }
 
 impl Command {
-    pub const ALL: [Command; 35] = [
+    pub const ALL: [Command; 36] = [
         Command::RunCurrent,
         Command::RunScript,
         Command::Cancel,
@@ -82,6 +83,7 @@ impl Command {
         Command::RefreshConnections,
         Command::ConnectService,
         Command::OpenSettings,
+        Command::TogglePinTab,
     ];
 
     /// Stable id used in `keybindings.toml`.
@@ -122,6 +124,7 @@ impl Command {
             Command::RefreshConnections => "connection.refresh",
             Command::ConnectService => "service.connect",
             Command::OpenSettings => "app.settings",
+            Command::TogglePinTab => "tab.pin",
         }
     }
 
@@ -162,6 +165,7 @@ impl Command {
             Command::RefreshConnections => "Refresh connections",
             Command::ConnectService => "Connect to a service…",
             Command::OpenSettings => "Settings…",
+            Command::TogglePinTab => "Pin / unpin tab",
         }
     }
 

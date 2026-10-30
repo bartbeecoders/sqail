@@ -28,7 +28,12 @@ pub fn split(text: &str, engine: Option<Engine>) -> Vec<Range<usize>> {
         }
     };
 
+    // The rest of a `GO` line (a count, a comment) belongs to no statement.
+    let mut skip_until = 0usize;
     for (idx, t) in tokens.iter().enumerate() {
+        if t.range.start < skip_until {
+            continue;
+        }
         let s = &text[t.range.clone()];
         match t.kind {
             Kind::Space => {
@@ -51,6 +56,9 @@ pub fn split(text: &str, engine: Option<Engine>) -> Vec<Range<usize>> {
             {
                 close(&mut start, end, &mut out);
                 blocks = 0;
+                skip_until = text[t.range.end..]
+                    .find('\n')
+                    .map_or(text.len(), |p| t.range.end + p);
                 continue;
             }
             Kind::Open => parens += 1,
@@ -178,6 +186,35 @@ mod tests {
     fn dollar_quoted_bodies_are_whole() {
         let t = "CREATE FUNCTION f() RETURNS int AS $$\nSELECT 1;\n\nSELECT 2;\n$$ LANGUAGE sql;\nSELECT f()";
         assert_eq!(stmts(t, Some(Engine::Postgres)).len(), 2);
+    }
+
+    #[test]
+    fn dialect_strings_and_comments() {
+        assert_eq!(
+            stmts(r"SELECT E'a\'b'; SELECT 1", Some(Engine::Postgres)),
+            [r"SELECT E'a\'b'", "SELECT 1"]
+        );
+        let t = "SELECT 1 /* a /* b */ ; SELECT 2";
+        assert_eq!(
+            stmts(t, Some(Engine::Sqlite)),
+            ["SELECT 1 /* a /* b */", "SELECT 2"]
+        );
+        assert_eq!(stmts(t, Some(Engine::Postgres)), [t]);
+    }
+
+    #[test]
+    fn go_lines() {
+        let ms = Some(Engine::Mssql);
+        assert_eq!(
+            stmts("SELECT 1\nGO 5\nSELECT 2", ms),
+            ["SELECT 1", "SELECT 2"]
+        );
+        assert_eq!(
+            stmts("SELECT 1\nGO -- next\nSELECT 2", ms),
+            ["SELECT 1", "SELECT 2"]
+        );
+        let t = "SELECT 'a\nGO\nb'\n/* x\nGO\n*/ SELECT 2";
+        assert_eq!(stmts(t, ms), [t]);
     }
 
     #[test]

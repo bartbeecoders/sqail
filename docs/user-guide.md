@@ -73,14 +73,19 @@ exists only in your own sqail, until you move a connection into it.
 |---|---|
 | PostgreSQL | *SSL mode* works like libpq's: `prefer` by default. CA and client certificates are described in [PostgreSQL TLS](#postgresql-tls). |
 | SQL Server | SQL login, Windows integrated auth (integrated only works when the service runs on Windows), or Microsoft Entra ID for Azure SQL (see [below](#azure-sql-database)). `Encrypt = Required` is the default; tick *Trust server certificate* only for test servers. Named instances are found through SQL Browser; the host field also accepts `SERVER\INSTANCE` and `SERVER,PORT`. Step-by-step: [windows-setup.md](windows-setup.md). |
-| SQLite | The path is a file on the **service's** machine and must be inside one of the service's `sqlite.allowed_dirs`. |
+| SQLite | The path is a file on the **service's** machine and must be inside one of the service's `sqlite.allowed_dirs` (and not in the service's own data folder). `ATTACH` and `VACUUM INTO` follow the same rule, and read-only profiles can't use them on files at all. |
 
 Give production profiles a colour and an environment tag. Both show in the
 status bar while that connection is active. **Read-only** profiles also can't
 be edited in the grid. How strictly "read-only" is enforced depends on the
 engine:
 
-* **PostgreSQL:** the session runs with `default_transaction_read_only = on`.
+* **PostgreSQL:** the session runs with `default_transaction_read_only = on`,
+  and the service refuses statements that would switch it off: setting
+  `transaction_read_only` or `default_transaction_read_only`,
+  `BEGIN … READ WRITE`, `SET SESSION CHARACTERISTICS`, `RESET ALL`,
+  `set_config()` and `DO` blocks. A function the role may call can still
+  write, so for a hard guarantee use a role that only has read permissions.
 * **SQLite:** the file is opened read-only.
 * **SQL Server:** the connection declares `ApplicationIntent=ReadOnly`, which
   routes it to a readable secondary in an availability group but doesn't block
@@ -223,7 +228,12 @@ transaction that is **always rolled back**, so it is safe for `UPDATE` and
 * **Export** saves the rows in the grid, or re-runs the query and streams
   every row straight to a file, as CSV, JSON, Excel (.xlsx) or SQL `INSERT`s.
   The re-run ignores your row limit and is only bounded by the
-  service's `limits.max_rows` (5 000 000 by default).
+  service's `limits.max_rows` (5 000 000 by default). It runs only the
+  statement that produced the result you're looking at, in the tab's session
+  (so temp tables and uncommitted rows are there), and only if that
+  statement just reads: when it writes, or sqail can't tell which statement
+  produced the result, it refuses and asks you to run the `SELECT` on its own
+  first.
 * **✎ Edit data** is available when a result comes from a single table with a
   primary key. Edit cells (double-click or F2), add rows and delete rows. The
   changes are shown as SQL before **Apply** runs them in one transaction.
@@ -336,10 +346,14 @@ result.
 
 **What it can't do:** change anything. `run_query` accepts only a single
 `SELECT` / `WITH` / `VALUES` statement: writes, DDL, `EXEC`, `SELECT … INTO`,
-`FOR UPDATE`, multiple statements and functions with side effects are
-refused. Every assistant query also runs in its own transaction that is always
-rolled back (read-only on PostgreSQL), so even something that slipped through
-would be undone. The CLI gets no other tools: no shell, no files, no web.
+`FOR UPDATE`, transaction control (`COMMIT`, `ROLLBACK`, …), session and
+admin commands, multiple statements, unfinished strings or comments and
+functions with side effects are refused. The service also refuses anything
+but a single statement for the assistant. Every assistant query also runs in
+its own transaction that is always rolled back (read-only on PostgreSQL), so
+even something that slipped through would be undone. For the strongest
+guarantee, point the assistant at a connection whose login can only read
+(see [security](security.md)). The CLI gets no other tools: no shell, no files, no web.
 When you ask for changes, it writes the SQL for you to review and run
 yourself.
 

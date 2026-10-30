@@ -454,6 +454,14 @@ pub struct QueryRequest {
     pub max_rows: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// Refuse the request unless `sql` is exactly one statement (no `GO`
+    /// either). Checked by the engine where it can (Postgres parses it as a
+    /// prepared statement, SQLite checks the prepared statement's tail);
+    /// SQL Server is best effort: one batch, one `;`-separated statement and
+    /// no statement keyword (transaction control, DDL, control flow) after
+    /// the first word.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub single_statement: bool,
 }
 
 impl QueryRequest {
@@ -463,6 +471,7 @@ impl QueryRequest {
             params: Vec::new(),
             max_rows: None,
             timeout_ms: None,
+            single_statement: false,
         }
     }
 }

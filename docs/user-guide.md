@@ -73,7 +73,7 @@ exists only in your own sqail, until you move a connection into it.
 |---|---|
 | PostgreSQL | *SSL mode* works like libpq's: `prefer` by default. CA and client certificates are described in [PostgreSQL TLS](#postgresql-tls). |
 | SQL Server | SQL login, Windows integrated auth (integrated only works when the service runs on Windows), or Microsoft Entra ID for Azure SQL (see [below](#azure-sql-database)). `Encrypt = Required` is the default; tick *Trust server certificate* only for test servers. Named instances are found through SQL Browser; the host field also accepts `SERVER\INSTANCE` and `SERVER,PORT`. Step-by-step: [windows-setup.md](windows-setup.md). |
-| SQLite | The path is a file on the **service's** machine and must be inside one of the service's `sqlite.allowed_dirs`. |
+| SQLite | The path is a file on the **service's** machine and must be inside one of the service's `sqlite.allowed_dirs` (and not in the service's own data folder). `ATTACH` and `VACUUM INTO` follow the same rule, and read-only profiles can't use them on files at all. |
 
 Give production profiles a colour and an environment tag. Both show in the
 status bar while that connection is active. **Read-only** profiles also can't

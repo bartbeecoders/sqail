@@ -7,6 +7,8 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
 
 ## Unreleased
 
+## 1.4.0 — 2026-10-30
+
 ### sqail
 
 - **Assistant: stricter read-only check.** `run_query` also refuses
@@ -62,6 +64,8 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
 
 ### Packaging
 
+- Dependencies updated for the October 2026 RustSec advisories, among them
+  `rustls`, `rustls-webpki`, `tokio` and `zip` (via `rust_xlsxwriter`).
 - The Arch `PKGBUILD` builds again: it downloads the source from GitHub,
   unpacks it into the right folder and replaces `sqail2`. Each GitHub release
   now carries a copy with the source tarball's checksum filled in.

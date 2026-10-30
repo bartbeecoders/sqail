@@ -1,5 +1,5 @@
 import { Download, ExternalLink } from "lucide-react";
-import { CODEBERG_URL, detectPlatform, getDownloadUrl } from "../lib/constants";
+import { GITHUB_URL, detectPlatform, getDownloadUrl } from "../lib/constants";
 import { releaseFiles, useRelease } from "../lib/release";
 
 export default function Hero() {
@@ -60,7 +60,7 @@ export default function Hero() {
               {ctaLabel}
             </a>
             <a
-              href={CODEBERG_URL}
+              href={GITHUB_URL}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-2 rounded-lg border border-border px-6 py-3 font-semibold text-text-primary transition-colors hover:border-text-muted hover:bg-bg-section"

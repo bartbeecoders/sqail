@@ -1,8 +1,7 @@
 export const GITHUB_URL = "https://github.com/bartbeecoders/sqail";
-export const CODEBERG_URL = "https://codeberg.org/bartbeecoders/sqail";
 export const RELEASES_URL = `${GITHUB_URL}/releases`;
 /** Docs are Markdown files in the repository. */
-export const docUrl = (file: string) => `${CODEBERG_URL}/src/branch/main/docs/${file}`;
+export const docUrl = (file: string) => `${GITHUB_URL}/blob/main/docs/${file}`;
 
 /** Last release of the 0.x Tauri app (now in sqail-legacy/). */
 export const LEGACY_VERSION = "0.6.9";
@@ -68,7 +67,7 @@ export const FEATURES = [
     title: "Free",
     headline: "Open source, no telemetry.",
     description:
-      "MIT licensed, hosted on Codeberg with a GitHub mirror. No account, no paid tier, nothing sent home.",
+      "MIT licensed, hosted on GitHub. No account, no paid tier, nothing sent home.",
   },
 ] as const;
 

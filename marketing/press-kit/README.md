@@ -1,6 +1,6 @@
 # sqail Press Kit
 
-Journalists, bloggers, and podcasters: everything you need to write about sqail is in this folder. Copy anything, no permission required. If you want a quote or a walkthrough, open an issue on [Codeberg](https://codeberg.org/bartbeecoders/sqail) or [GitHub](https://github.com/bartbeecoders/sqail).
+Journalists, bloggers, and podcasters: everything you need to write about sqail is in this folder. Copy anything, no permission required. If you want a quote or a walkthrough, open an issue on [GitHub](https://github.com/bartbeecoders/sqail).
 
 ## Contents
 
@@ -29,5 +29,4 @@ Never write "Sqail", "SQaiL", "sequel", or "S-Q-A-I-L." If you want to style the
 
 Bart — maintainer, everything.
 - GitHub: [@bartbeecoders](https://github.com/bartbeecoders)
-- Codeberg: [@bartbeecoders](https://codeberg.org/bartbeecoders)
-- Issues and coverage requests: open a GitHub or Codeberg issue tagged `press`.
+- Issues and coverage requests: open a GitHub issue tagged `press`.

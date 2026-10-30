@@ -20,4 +20,4 @@ Pre-approved quotes from the maintainer. Use in articles, roundups, or podcast s
 
 ## On open source
 
-> "I want sqail to outlive me. That's why it's MIT, why it's on Codeberg, and why there will never be a paid tier that holds features hostage. Grow with us or fork us — both are fine."
+> "I want sqail to outlive me. That's why it's MIT, why the source is public, and why there will never be a paid tier that holds features hostage. Grow with us or fork us — both are fine."

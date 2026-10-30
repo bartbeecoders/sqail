@@ -24,7 +24,7 @@ Tactical execution plan derived from `marketing-strategy.md`. This is the *what,
 - [x] Changelog page (mirror of RELEASES.md)
 - [x] "Why sqail" comparison table (vs. DBeaver, DataGrip, TablePlus, Beekeeper)
 - [x] Docs section: Getting Started, Connections, AI Setup, Keyboard Shortcuts
-- [x] Footer: Codeberg, GitHub, License, Privacy (no telemetry statement)
+- [x] Footer: GitHub, License, Privacy (no telemetry statement)
 
 ### Branding assets
 
@@ -109,7 +109,7 @@ Target: **1 meaningful public artifact per week**, rotating through the types be
 ### Hacker News
 - **Post format:** *Show HN: [product] — [one-sentence value prop]*
 - **Timing:** Tuesday-Thursday, 08:00-10:00 ET
-- **Body:** Problem, why existing tools don't solve it, what sqail does, what's next. Link to portal + Codeberg.
+- **Body:** Problem, why existing tools don't solve it, what sqail does, what's next. Link to portal + GitHub.
 - **Engagement rule:** first-author replies within 30 min for the first 4 hours
 
 ### Reddit
@@ -136,7 +136,7 @@ Target: **1 meaningful public artifact per week**, rotating through the types be
 - Add to AlternativeTo entries for DBeaver, DataGrip, TablePlus, Beekeeper Studio
 
 ### Community
-- **Discussions:** GitHub Discussions as the primary Q&A venue (Codeberg issues for bugs, Codeberg discussions if enabled)
+- **Discussions:** GitHub Discussions as the primary Q&A venue (GitHub issues for bugs)
 - **Chat:** Matrix room (`#sqail:matrix.org`) — lower barrier than Discord, fits open-source ethos
 - **Code of conduct:** adopt Contributor Covenant; enforce from day one
 
@@ -155,7 +155,7 @@ Use `image-gen` / xAI-image MCP for brand illustrations (per `Vibecoding/marketi
 
 - Download counts per OS, per version
 - Portal traffic + top referrers
-- Codeberg/GitHub stars, issues opened/closed
+- GitHub stars, issues opened/closed
 - Social mentions (manual scan)
 - Note one thing that worked, one thing to change
 

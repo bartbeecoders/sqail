@@ -8,7 +8,7 @@ sqail is a lightweight, open-source SQL editor with first-class AI integration. 
 
 ## Medium (≈120 words)
 
-sqail (pronounced *"snail"*) is a cross-platform desktop SQL client built on Tauri v2. It launches in under a second, ships as a sub-20 MB binary, and integrates AI as a core feature rather than a paid add-on. The editor is Monaco — the same one that powers VS Code — with multi-cursor, split view, and SQL language support. sqail connects to PostgreSQL, MySQL, SQLite, and SQL Server; stores credentials locally in an encrypted SurrealDB; and lets users bring their own API key for Claude, OpenAI, Minimax, Z.ai, LM Studio, or any OpenAI-compatible endpoint. The project is MIT-licensed, hosted on Codeberg with a GitHub mirror, and ships with zero telemetry.
+sqail (pronounced *"snail"*) is a cross-platform desktop SQL client built on Tauri v2. It launches in under a second, ships as a sub-20 MB binary, and integrates AI as a core feature rather than a paid add-on. The editor is Monaco — the same one that powers VS Code — with multi-cursor, split view, and SQL language support. sqail connects to PostgreSQL, MySQL, SQLite, and SQL Server; stores credentials locally in an encrypted SurrealDB; and lets users bring their own API key for Claude, OpenAI, Minimax, Z.ai, LM Studio, or any OpenAI-compatible endpoint. The project is MIT-licensed, hosted on GitHub, and ships with zero telemetry.
 
 ## Long (≈260 words)
 
@@ -18,4 +18,4 @@ The editing experience is based on Monaco, the same editor that powers VS Code, 
 
 Privacy is a product decision, not a marketing line. sqail ships with zero telemetry, stores credentials locally in an encrypted SurrealDB, and only contacts AI providers when the user explicitly configures them. Schema metadata is sent with prompts; row data and credentials never are.
 
-sqail is MIT-licensed, hosted on Codeberg with a GitHub mirror, and binaries are published at [sqail.io](https://sqail.io) for Windows, macOS, and Linux. It is free forever — no account, no freemium trap, no feature gates.
+sqail is MIT-licensed, hosted on GitHub, and binaries are published at [sqail.io](https://sqail.io) for Windows, macOS, and Linux. It is free forever — no account, no freemium trap, no feature gates.

@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import CHANGELOG from "../../../CHANGELOG.md?raw";
-import { CODEBERG_URL } from "../lib/constants";
+import { GITHUB_URL } from "../lib/constants";
 
 interface Section {
   title: string;
@@ -62,7 +62,7 @@ function inline(text: string): ReactNode[] {
         </strong>,
       );
     } else {
-      const href = /^https?:/.test(m[4]) ? m[4] : `${CODEBERG_URL}/src/branch/main/${m[4]}`;
+      const href = /^https?:/.test(m[4]) ? m[4] : `${GITHUB_URL}/blob/main/${m[4]}`;
       out.push(
         <a key={key} href={href} className="text-brand-cyan hover:underline">
           {m[3]}

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **sqail** (pronounced *"snail"*) — A fast, <20 MB, cross-platform desktop SQL editor with first-class AI integration, built on Tauri v2. Speaks PostgreSQL, MySQL, SQLite, and Microsoft SQL Server, plus two remote backends (a self-hosted DbService HTTP proxy and SurrealDB over HTTP). Zero telemetry; credentials and all state live on-disk locally.
 
-Canonical repo is [Codeberg](https://codeberg.org/bartbeecoders/sqail); GitHub is a mirror.
+The repository is on [GitHub](https://github.com/bartbeecoders/sqail).
 
 ## Commands
 

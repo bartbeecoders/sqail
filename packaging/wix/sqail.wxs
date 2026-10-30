@@ -22,7 +22,7 @@
 
     <Icon Id="sqail.ico" SourceFile="$(var.StageDir)\sqail.ico" />
     <Property Id="ARPPRODUCTICON" Value="sqail.ico" />
-    <Property Id="ARPURLINFOABOUT" Value="https://codeberg.org/bartbeecoders/sqail" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/bartbeecoders/sqail" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="sqail">

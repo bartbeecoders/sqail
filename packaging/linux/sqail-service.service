@@ -3,7 +3,7 @@
 # Logs: journalctl --user -u sqail-service
 [Unit]
 Description=sqail-service (HTTPS gateway between sqail and SQL databases)
-Documentation=https://codeberg.org/bartbeecoders/sqail
+Documentation=https://github.com/bartbeecoders/sqail
 After=network-online.target
 Wants=network-online.target
 

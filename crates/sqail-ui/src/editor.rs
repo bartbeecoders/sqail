@@ -324,6 +324,21 @@ fn auto_trigger(text: &str, cursor: usize) -> bool {
     cursor - p >= 2 && !next_is_word && !b[p].is_ascii_digit()
 }
 
+/// Does typing `typed` end the word being completed? Whitespace and
+/// punctuation do, except `.` (qualifier) and identifier quotes.
+fn ends_word(typed: &str) -> bool {
+    typed.chars().last().is_some_and(|c| {
+        !(c.is_alphanumeric() || matches!(c, '_' | '.' | '"' | '[' | '`' | '$' | '@' | '#'))
+    })
+}
+
+/// May a popup refreshed after an edit or cursor move stay open for a
+/// completion of `range`? Not with an empty prefix, unless right after a `.`:
+/// otherwise it would survive word boundaries and swallow Enter/Tab.
+fn keeps_popup(text: &str, range: &std::ops::Range<usize>) -> bool {
+    !range.is_empty() || text.get(..range.start).is_some_and(|s| s.ends_with('.'))
+}
+
 /// Font-size steps asked for with the mouse wheel over the editor this frame:
 /// Ctrl+wheel, or the wheel while the middle button is held. One notch is one
 /// step; trackpad scrolling adds up to a step every 50 points. Call before
@@ -502,11 +517,23 @@ pub fn editor_ui(ui: &mut egui::Ui, tab: &mut Tab, env: &EditorEnv<'_>) {
             let changed = output.response.response.changed();
             let cursor_now = char_to_byte(&tab.text, tab.cursor.primary.index.0);
             if let (Some(eng), Some(cat)) = (engine, env.catalog) {
-                let typed = ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Text(_))));
-                if changed && typed && env.autocomplete && auto_trigger(&tab.text, cursor_now) {
+                let explicit = request;
+                let moved = changed || before != tab.cursor;
+                let typed = ui.input(|i| {
+                    i.events.iter().rev().find_map(|e| match e {
+                        egui::Event::Text(t) => Some(t.clone()),
+                        _ => None,
+                    })
+                });
+                // A space, comma, `;`, … ends the word: close the popup so
+                // the next Enter or Tab goes to the text.
+                if changed && !explicit && typed.as_deref().is_some_and(ends_word) {
+                    tab.completion = None;
+                }
+                if changed && typed.is_some() && env.autocomplete && auto_trigger(&tab.text, cursor_now) {
                     request = true;
                 }
-                if tab.completion.is_some() && (changed || before != tab.cursor || tab.completion_stale) {
+                if tab.completion.is_some() && (moved || tab.completion_stale) {
                     request = true;
                 }
                 if tab.completion_pending.is_some() && (changed || before != tab.cursor) && !request {
@@ -523,7 +550,9 @@ pub fn editor_ui(ui: &mut egui::Ui, tab: &mut Tab, env: &EditorEnv<'_>) {
                         .filter(|p| p.moved)
                         .and_then(|p| p.items.get(p.selected))
                         .map(|c| c.label.clone());
-                    tab.completion = complete::complete(&tab.text, cursor_now, eng, cat).map(|c| {
+                    let fresh = complete::complete(&tab.text, cursor_now, eng, cat)
+                        .filter(|c| explicit || !moved || keeps_popup(&tab.text, &c.range));
+                    tab.completion = fresh.map(|c| {
                         let kept = prev
                             .as_ref()
                             .and_then(|l| c.items.iter().position(|i| &i.label == l));
@@ -896,6 +925,21 @@ mod tests {
         assert!(!auto_trigger("SELECT n", 8));
         assert!(!auto_trigger("SELECT 12", 9), "numbers do not trigger");
         assert!(!auto_trigger("SELECT nam", 9), "mid-word does not trigger");
+    }
+
+    #[test]
+    fn word_boundaries_close_the_popup() {
+        for t in [" ", ",", ";", "(", ")", "=", "\n", "\t", "x, "] {
+            assert!(ends_word(t), "{t:?}");
+        }
+        for t in ["a", "_", ".", "\"", "[", "é", "", "a."] {
+            assert!(!ends_word(t), "{t:?}");
+        }
+        // After an edit, an empty prefix only keeps the popup after `.`.
+        assert!(!keeps_popup("SELECT na, ", &(11..11)));
+        assert!(!keeps_popup("SELECT na ", &(10..10)));
+        assert!(keeps_popup("SELECT o.", &(9..9)));
+        assert!(keeps_popup("SELECT na", &(7..9)));
     }
 
     #[test]

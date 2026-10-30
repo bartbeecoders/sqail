@@ -21,6 +21,9 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
   any writes and exporting the first result. Now it runs just the read-only
   statement behind the shown result, in the tab's session, and refuses
   otherwise.
+- **Fix:** the completion popup closes when you type a space, comma, `;` or
+  other punctuation, so the next Enter or Tab no longer inserts a
+  suggestion (#65).
 
 ### sqail-service
 

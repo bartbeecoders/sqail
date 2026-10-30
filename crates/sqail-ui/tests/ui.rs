@@ -800,6 +800,49 @@ fn editor_runs_queries_end_to_end() {
     );
     assert!(h.state().tabs[0].completion.is_none());
 
+    // A space ends the word: the popup closes and Enter is a newline (#65).
+    h.get_by_role(egui::accesskit::Role::MultilineTextInput)
+        .type_text(" > 1 AND sc");
+    wait(&mut h, "completions for sc", |a| {
+        a.tabs[0]
+            .completion
+            .as_ref()
+            .is_some_and(|p| p.items.iter().any(|i| i.label == "score"))
+    });
+    h.get_by_role(egui::accesskit::Role::MultilineTextInput)
+        .type_text(" ");
+    h.run_steps(2);
+    assert!(
+        h.state().tabs[0].completion.is_none(),
+        "space closes the popup"
+    );
+    h.key_press(Key::Enter);
+    h.run_steps(2);
+    assert!(
+        h.state().tabs[0]
+            .text
+            .starts_with("SELECT * FROM people p WHERE p.score > 1 AND sc \n"),
+        "{:?}",
+        h.state().tabs[0].text
+    );
+    // Same after a comma: no popup of every column.
+    h.get_by_role(egui::accesskit::Role::MultilineTextInput)
+        .type_text("na");
+    wait(&mut h, "completions for na", |a| {
+        a.tabs[0].completion.is_some()
+    });
+    h.get_by_role(egui::accesskit::Role::MultilineTextInput)
+        .type_text(", ");
+    h.run_steps(2);
+    assert!(h.state().tabs[0].completion.is_none(), "comma closes it");
+    h.key_press(Key::Tab);
+    h.run_steps(2);
+    assert!(
+        h.state().tabs[0].text.trim_end().ends_with("sc \nna,"),
+        "Tab must not insert a column: {:?}",
+        h.state().tabs[0].text
+    );
+
     // --- schema tree: expanding the connection lists its tables -----------
     h.get_by_label("people db").click();
     for _ in 0..200 {

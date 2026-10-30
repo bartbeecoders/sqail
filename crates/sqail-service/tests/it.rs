@@ -29,8 +29,12 @@ fn repo_root() -> PathBuf {
 
 async fn harness_with(tweak: impl FnOnce(&mut Config)) -> Harness {
     let dir = tempfile::tempdir().unwrap();
+    // The service's data dir sits inside the allowed SQLite dir, which is
+    // exactly the setup where SQLite must still keep away from it.
+    let data_dir = dir.path().join("service");
+    std::fs::create_dir(&data_dir).unwrap();
     let mut cfg = Config {
-        data_dir: dir.path().to_path_buf(),
+        data_dir,
         bind: "127.0.0.1:0".parse().unwrap(),
         docs_ui: false,
         ..Default::default()
@@ -628,6 +632,81 @@ async fn sqlite_outside_allowed_dirs_is_rejected() {
         )
         .await;
     assert_eq!(res.status(), 400);
+}
+
+#[tokio::test]
+async fn sqlite_profiles_cannot_open_the_service_data_dir() {
+    let h = harness().await;
+    let data = h.dir.path().join("service");
+    for path in [data.join("service.db"), data.join("new.db")] {
+        let res = h
+            .post(
+                "/v1/connections",
+                &json!({"name": "x", "params": {"engine": "sqlite", "path": path, "create": true}}),
+                &h.admin,
+            )
+            .await;
+        assert_eq!(res.status(), 400, "{}", path.display());
+    }
+}
+
+#[tokio::test]
+async fn sqlite_attach_and_vacuum_into_cannot_leave_the_allowed_dirs() {
+    let h = harness().await;
+    let rw = h.sqlite_temp(false).await;
+    let ro = h.sqlite_temp(true).await;
+    h.query(rw, "CREATE TABLE t (a INTEGER); INSERT INTO t VALUES (1)")
+        .await;
+    let outside = tempfile::tempdir().unwrap();
+    let service_db = h.dir.path().join("service/service.db");
+    let stray = outside.path().join("stray.db");
+    let copy = h.dir.path().join("copy.db");
+    let targets = [service_db.display(), stray.display()].map(|p| p.to_string());
+
+    for (conn, kind) in [(rw, "writable"), (ro, "read-only")] {
+        for t in &targets {
+            for sql in [
+                format!("ATTACH DATABASE '{t}' AS x"),
+                format!("VACUUM INTO '{t}'"),
+            ] {
+                let ev = h.query(conn, &sql).await;
+                assert!(error(&ev).is_some(), "{kind}: {sql} was allowed");
+            }
+        }
+        let ev = h
+            .query(conn, &format!("ATTACH 'file:{}' AS x", stray.display()))
+            .await;
+        assert!(error(&ev).is_some(), "{kind}: URI attach was allowed");
+    }
+    assert!(!stray.exists());
+
+    // service.db was not replaced and the service still works.
+    let ev = h.query(rw, "SELECT a FROM t").await;
+    assert_eq!(rows(&ev, 0), vec![vec![json!(1)]]);
+
+    // Read-only profiles write no files at all, even inside the allowed dir.
+    let ev = h
+        .query(ro, &format!("VACUUM INTO '{}'", copy.display()))
+        .await;
+    assert!(error(&ev).is_some());
+    assert!(!copy.exists());
+
+    // Writable profiles may still use files inside the allowed dirs.
+    let ev = h
+        .query(rw, &format!("VACUUM INTO '{}'", copy.display()))
+        .await;
+    assert!(error(&ev).is_none(), "{ev:?}");
+    let ev = h
+        .query(
+            rw,
+            &format!(
+                "ATTACH '{}' AS c; SELECT a FROM c.t; DETACH c",
+                copy.display()
+            ),
+        )
+        .await;
+    assert!(error(&ev).is_none(), "{ev:?}");
+    assert_eq!(rows(&ev, 0), vec![vec![json!(1)]]);
 }
 
 #[tokio::test]

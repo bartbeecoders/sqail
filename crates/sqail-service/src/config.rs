@@ -334,6 +334,14 @@ impl Config {
     pub fn db_path(&self) -> PathBuf {
         self.data_dir.join("service.db")
     }
+
+    /// Where SQLite profiles (and SQL they run) may open files.
+    pub fn sqlite_paths(&self) -> crate::engine::sqlite::PathPolicy<'_> {
+        crate::engine::sqlite::PathPolicy {
+            allowed_dirs: &self.sqlite.allowed_dirs,
+            data_dir: &self.data_dir,
+        }
+    }
 }
 
 #[cfg(test)]

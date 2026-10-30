@@ -7,6 +7,14 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
 
 ## Unreleased
 
+### sqail-service
+
+- **SQLite stays inside its folders.** `ATTACH DATABASE` and `VACUUM INTO`
+  may only name files inside `sqlite.allowed_dirs`, and on read-only
+  profiles no files at all. `file:` URIs and computed file names are
+  refused. Profiles can no longer point into the service's own data folder,
+  even when an allowed folder contains it.
+
 ## 1.3.0 — 2026-10-10
 
 ### sqail

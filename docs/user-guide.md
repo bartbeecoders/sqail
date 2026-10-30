@@ -228,7 +228,12 @@ transaction that is **always rolled back**, so it is safe for `UPDATE` and
 * **Export** saves the rows in the grid, or re-runs the query and streams
   every row straight to a file, as CSV, JSON, Excel (.xlsx) or SQL `INSERT`s.
   The re-run ignores your row limit and is only bounded by the
-  service's `limits.max_rows` (5 000 000 by default).
+  service's `limits.max_rows` (5 000 000 by default). It runs only the
+  statement that produced the result you're looking at, in the tab's session
+  (so temp tables and uncommitted rows are there), and only if that
+  statement just reads: when it writes, or sqail can't tell which statement
+  produced the result, it refuses and asks you to run the `SELECT` on its own
+  first.
 * **✎ Edit data** is available when a result comes from a single table with a
   primary key. Edit cells (double-click or F2), add rows and delete rows. The
   changes are shown as SQL before **Apply** runs them in one transaction.

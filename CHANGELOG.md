@@ -16,6 +16,11 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
   `single_statement` field on `QueryRequest`); and the SQL lexer handles
   PostgreSQL `E'…'` escapes, `$` in names, SQLite's non-nesting comments and
   the rest of a `GO 5` line correctly.
+- **Export of the whole result re-runs only that result's statement.** It
+  used to run the entire tab script again on a separate connection, repeating
+  any writes and exporting the first result. Now it runs just the read-only
+  statement behind the shown result, in the tab's session, and refuses
+  otherwise.
 
 ### sqail-service
 

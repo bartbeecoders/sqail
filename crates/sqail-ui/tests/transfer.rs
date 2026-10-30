@@ -102,9 +102,10 @@ fn round_trip(
     let exported =
         s.rt.block_on(transfer::export_query(
             &s.client,
-            conn,
+            On::Connection(conn),
             engine,
             source_sql,
+            None,
             &csv,
             Format::Csv,
             |_| {},
@@ -204,6 +205,61 @@ line'), (3, 'Grace', NULL, '');
     );
 }
 
+/// "Export whole result" re-runs only the statement behind the result, on
+/// the tab's session: the script's write is not repeated, and a temp table
+/// that only exists in the session is still there.
+#[test]
+fn whole_export_reruns_one_statement_on_the_session() {
+    let s = svc();
+    let conn = s.connect(
+        "lite",
+        ConnectionParams::Sqlite(SqliteParams {
+            path: s.dir.path().join("w.db").to_string_lossy().into(),
+            create: true,
+        }),
+        None,
+    );
+    s.rows(conn, "CREATE TABLE t (a INTEGER)");
+    let session = s.rt.block_on(s.client.open_session(conn)).unwrap().id;
+    let script =
+        "CREATE TEMP TABLE tmp AS SELECT 7 AS a;\nINSERT INTO t VALUES (1);\nSELECT a FROM tmp";
+    let events =
+        s.rt.block_on(
+            s.client
+                .query_all(On::Session(session), &QueryRequest::new(script)),
+        )
+        .unwrap();
+    let results = events
+        .iter()
+        .filter(|e| matches!(e, QueryEvent::ResultStart { .. }))
+        .count();
+    let sql = transfer::statement_for_result(script, Engine::Sqlite, 0, results, true).unwrap();
+    assert_eq!(sql, "SELECT a FROM tmp");
+
+    let path = s.dir.path().join("whole.csv");
+    let export = |cols: &[String]| {
+        s.rt.block_on(transfer::export_query(
+            &s.client,
+            On::Session(session),
+            Engine::Sqlite,
+            &sql,
+            Some(cols),
+            &path,
+            Format::Csv,
+            |_| {},
+        ))
+    };
+    assert_eq!(export(&["a".into()]).unwrap(), 1);
+    assert_eq!(std::fs::read_to_string(&path).unwrap().trim(), "a\n7");
+    // The write ran once, with the script.
+    assert_eq!(
+        s.rows(conn, "SELECT count(*) FROM t"),
+        [[serde_json::json!(1)]]
+    );
+    // A different shape than the result shown is refused.
+    assert!(export(&["b".into()]).is_err());
+}
+
 #[test]
 #[ignore = "needs podman test databases (scripts/db.sh up)"]
 fn csv_round_trip_on_every_engine() {
@@ -301,9 +357,10 @@ fn million_row_export_streams_with_flat_memory() {
     let n =
         s.rt.block_on(transfer::export_query(
             &s.client,
-            pg,
+            On::Connection(pg),
             Engine::Postgres,
             "SELECT oi.*, g FROM sales.order_items oi CROSS JOIN generate_series(1, 34) g",
+            None,
             &path,
             Format::Csv,
             |_| peak = peak.max(rss_kb()),

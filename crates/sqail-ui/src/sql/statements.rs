@@ -2,7 +2,10 @@
 //!
 //! A statement ends at `;`, at a `GO` line (SQL Server), or at a blank line,
 //! except inside parentheses or a `BEGIN … END` / `CASE … END` block, so
-//! procedure and trigger bodies stay whole.
+//! procedure and trigger bodies stay whole. In T-SQL a module
+//! (`CREATE|ALTER [OR ALTER] PROC|FUNCTION|TRIGGER|VIEW`) runs to the next
+//! `GO` whether or not its body has `BEGIN … END`, so `;` and blank lines
+//! inside it don't end it.
 
 use std::ops::Range;
 
@@ -19,6 +22,9 @@ pub fn split(text: &str, engine: Option<Engine>) -> Vec<Range<usize>> {
     let mut parens = 0i32;
     let mut blocks = 0i32;
     let mut prev_word: Option<String> = None;
+    // The first words of the current statement, to spot a T-SQL module.
+    let mut head: Vec<String> = Vec::new();
+    let mut module = false;
 
     let close = |start: &mut Option<usize>, end: usize, out: &mut Vec<Range<usize>>| {
         if let Some(s) = start.take()
@@ -33,15 +39,17 @@ pub fn split(text: &str, engine: Option<Engine>) -> Vec<Range<usize>> {
         match t.kind {
             Kind::Space => {
                 let blank_line = s.matches('\n').count() >= 2;
-                if blank_line && parens == 0 && blocks <= 0 {
+                if blank_line && parens == 0 && blocks <= 0 && !module {
                     close(&mut start, end, &mut out);
+                    head.clear();
                 }
                 continue;
             }
-            Kind::Semicolon if parens <= 0 && blocks <= 0 => {
+            Kind::Semicolon if parens <= 0 && blocks <= 0 && !module => {
                 // `BEGIN;` in Postgres starts a transaction, not a block.
                 close(&mut start, end, &mut out);
                 prev_word = None;
+                head.clear();
                 continue;
             }
             Kind::Word
@@ -51,6 +59,10 @@ pub fn split(text: &str, engine: Option<Engine>) -> Vec<Range<usize>> {
             {
                 close(&mut start, end, &mut out);
                 blocks = 0;
+                parens = 0;
+                module = false;
+                head.clear();
+                prev_word = None;
                 continue;
             }
             Kind::Open => parens += 1,
@@ -73,6 +85,10 @@ pub fn split(text: &str, engine: Option<Engine>) -> Vec<Range<usize>> {
                     "END" if blocks > 0 => blocks -= 1,
                     _ => {}
                 }
+                if engine == Some(Engine::Mssql) && !module && head.len() < 4 {
+                    head.push(upper.clone());
+                    module = is_tsql_module(&head);
+                }
                 prev_word = Some(upper);
             }
             _ => {}
@@ -86,6 +102,23 @@ pub fn split(text: &str, engine: Option<Engine>) -> Vec<Range<usize>> {
     // Leading comments belong to the statement; trailing-only comment chunks
     // are still "statements" (harmless to run), which keeps this simple.
     out
+}
+
+/// Whether a statement starting with `head` is a T-SQL module definition,
+/// whose body runs to the next `GO`.
+fn is_tsql_module(head: &[String]) -> bool {
+    let rest = match head {
+        [first, rest @ ..] if first == "CREATE" || first == "ALTER" => rest,
+        _ => return false,
+    };
+    let rest = match rest {
+        [or, alter, rest @ ..] if or == "OR" && alter == "ALTER" => rest,
+        _ => rest,
+    };
+    matches!(
+        rest.first().map(String::as_str),
+        Some("PROC" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "VIEW")
+    )
 }
 
 fn next_word(text: &str, rest: &[super::lex::Token]) -> Option<String> {
@@ -159,6 +192,38 @@ mod tests {
                 "EXEC p"
             ]
         );
+    }
+
+    #[test]
+    fn tsql_modules_run_to_go() {
+        let e = Some(Engine::Mssql);
+        // No BEGIN … END: the `;` must not end the procedure.
+        let t = "CREATE PROCEDURE p AS\nSELECT 1;\nSELECT 2;\nGO\nEXEC p";
+        assert_eq!(
+            stmts(t, e),
+            ["CREATE PROCEDURE p AS\nSELECT 1;\nSELECT 2;", "EXEC p"]
+        );
+        // A blank line inside the body.
+        let t = "ALTER PROC p AS\nSELECT 1\n\nSELECT 2\nGO\nEXEC p";
+        assert_eq!(
+            stmts(t, e),
+            ["ALTER PROC p AS\nSELECT 1\n\nSELECT 2", "EXEC p"]
+        );
+        // CREATE OR ALTER, lowercase, functions/triggers/views, to end of buffer.
+        for kind in ["function f()", "trigger tr ON t AFTER INSERT", "view v"] {
+            let t = format!("create or alter {kind} AS\nSELECT 1;\n\nSELECT 2;");
+            assert_eq!(stmts(&t, e).len(), 1, "{kind}");
+        }
+        // Statements after GO split normally again.
+        let t = "CREATE VIEW v AS SELECT 1;\nGO\nSELECT 1;\nSELECT 2";
+        assert_eq!(stmts(t, e).len(), 3);
+        // Other engines and other CREATE statements are unaffected.
+        assert_eq!(stmts("CREATE TABLE t (a int);\nSELECT 1", e).len(), 2);
+        let t = "CREATE VIEW v AS SELECT 1;\nSELECT 2";
+        assert_eq!(stmts(t, Some(Engine::Postgres)).len(), 2);
+        // The cursor in the second body statement still picks the whole module.
+        let t = "CREATE PROCEDURE p AS\nSELECT 1;\n\nSELECT 2;\nGO";
+        assert_eq!(at(t, e, t.find("2").unwrap()).unwrap().start, 0);
     }
 
     #[test]

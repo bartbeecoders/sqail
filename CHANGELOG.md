@@ -7,6 +7,10 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
 
 ## Unreleased
 
+- **Fix:** *Run statement* no longer truncates a SQL Server procedure,
+  function, trigger or view whose body has no `BEGIN … END`: the definition
+  runs to the next `GO` (#68).
+
 ## 1.3.0 — 2026-10-10
 
 ### sqail

@@ -112,6 +112,8 @@ pub struct ExecRequest {
     pub sql: String,
     pub params: Vec<Param>,
     pub max_rows: u64,
+    /// Refuse anything but exactly one statement ([`sqail_proto::QueryRequest::single_statement`]).
+    pub single_statement: bool,
 }
 
 /// Builds the result-set events for a driver: numbering, batching, truncation.
@@ -259,6 +261,7 @@ pub async fn fetch_results(
         sql: sql.to_string(),
         params: Vec::new(),
         max_rows: u64::MAX,
+        single_statement: false,
     };
     conn.execute(&req, &sink).await?;
     let EventSink::Collect(buf) = sink else {
@@ -298,6 +301,7 @@ pub async fn fetch_rows(
         sql: sql.to_string(),
         params,
         max_rows: u64::MAX,
+        single_statement: false,
     };
     conn.execute(&req, &sink).await?;
     let EventSink::Collect(buf) = sink else {

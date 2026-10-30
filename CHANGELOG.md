@@ -7,6 +7,14 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
 
 ## Unreleased
 
+- **Assistant: stricter read-only check.** `run_query` also refuses
+  transaction control, DDL and admin commands anywhere in the query, a second
+  statement without `;` on SQL Server and unfinished strings or comments; the
+  service now enforces a single statement for assistant queries (new
+  `single_statement` field on `QueryRequest`); and the SQL lexer handles
+  PostgreSQL `E'…'` escapes, `$` in names, SQLite's non-nesting comments and
+  the rest of a `GO 5` line correctly.
+
 ## 1.3.0 — 2026-10-10
 
 ### sqail

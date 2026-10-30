@@ -429,6 +429,9 @@ impl Backend for ServiceBackend {
         let mut req = QueryRequest::new(sql);
         req.max_rows = Some(max_rows);
         req.timeout_ms = Some(QUERY_TIMEOUT_MS);
+        // The service refuses a second statement even where the guard's
+        // lexer and the engine disagree on where a statement ends.
+        req.single_statement = true;
         let result = self.client.query_all(session, &req).await;
         // Always undo, whatever the query did or however it failed.
         let rollback = run_all(&self.client, session, "ROLLBACK", 1).await;

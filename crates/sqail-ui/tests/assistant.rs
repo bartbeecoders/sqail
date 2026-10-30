@@ -11,9 +11,9 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use sqail_client::proto::{
     ConnectionInput, ConnectionParams, MssqlAuth, MssqlEncrypt, MssqlParams, PgSslMode,
-    PostgresParams,
+    PostgresParams, QueryEvent, QueryRequest, SqliteParams,
 };
-use sqail_client::{Client, Target, Trust};
+use sqail_client::{Client, On, Target, Trust};
 use sqail_ui::assistant::cli::{self, Provider, Request};
 use sqail_ui::assistant::mcp::{Backend, Env, ServiceBackend, serve};
 use sqail_ui::assistant::stream::Event;
@@ -25,18 +25,20 @@ struct Fixture {
     target: Target,
     pg: Uuid,
     ms: Uuid,
+    lite: Uuid,
     _server: sqail_service::Server,
 }
 
 fn fixture() -> Fixture {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let cfg = sqail_service::Config {
+    let mut cfg = sqail_service::Config {
         data_dir: dir.path().join("service"),
         bind: "127.0.0.1:0".parse().unwrap(),
         docs_ui: false,
         ..Default::default()
     };
+    cfg.sqlite.allowed_dirs = vec![dir.path().to_path_buf()];
     std::fs::create_dir_all(&cfg.data_dir).unwrap();
     let server = rt.block_on(sqail_service::start(cfg)).unwrap();
     let target = Target {
@@ -88,12 +90,21 @@ fn fixture() -> Fixture {
         }),
         "Sqail2_dev!Passw0rd",
     );
+    let lite = create(
+        "lite",
+        ConnectionParams::Sqlite(SqliteParams {
+            path: dir.path().join("lite.db").to_string_lossy().into_owned(),
+            create: true,
+        }),
+        "",
+    );
     Fixture {
         _dir: dir,
         rt,
         target,
         pg,
         ms,
+        lite,
         _server: server,
     }
 }
@@ -205,6 +216,95 @@ fn postgres_assistant_transactions_are_read_only() {
         assert_eq!(r[0], ("one\n1\n(1 row)".into(), false));
         backend.close().await;
     });
+}
+
+/// Runs `sql` outside the assistant, failing on any error.
+async fn admin(f: &Fixture, conn: Uuid, sql: &str) -> Vec<QueryEvent> {
+    let client = Client::new(&f.target).unwrap();
+    let events = client
+        .query_all(On::Connection(conn), &QueryRequest::new(sql))
+        .await
+        .unwrap();
+    if let Some(QueryEvent::Error { message, .. }) = events
+        .iter()
+        .find(|e| matches!(e, QueryEvent::Error { .. }))
+    {
+        panic!("{sql}: {message}");
+    }
+    events
+}
+
+/// Queries that try to end the assistant's transaction and write after it,
+/// sent straight to [`ServiceBackend::query`] (past the guard): the service's
+/// single-statement check and the rollback must leave the canary unchanged.
+fn adversarial(f: &Fixture, conn: Uuid, attempts: &[&str]) {
+    let table = format!("sqail_canary_{}", Uuid::new_v4().simple());
+    f.rt.block_on(async {
+        admin(f, conn, &format!("CREATE TABLE {table} (n int)")).await;
+        admin(f, conn, &format!("INSERT INTO {table} VALUES (1)")).await;
+        let backend = ServiceBackend::connect(&f.target, conn).await.unwrap();
+        for attempt in attempts {
+            let sql = attempt.replace("{t}", &table);
+            let engine = backend.engine();
+            assert!(
+                sqail_ui::assistant::guard::check_read_only(&sql, engine).is_err(),
+                "guard allowed: {sql}"
+            );
+            let _ = backend.query(&sql, 5).await;
+            let n = count(&backend, &format!("SELECT COUNT(*) FROM {table}")).await;
+            assert_eq!(n, 1, "{engine:?} wrote through: {sql}");
+        }
+        backend.close().await;
+        admin(f, conn, &format!("DROP TABLE {table}")).await;
+    });
+}
+
+#[test]
+fn adversarial_queries_on_sqlite_change_nothing() {
+    let f = fixture();
+    adversarial(
+        &f,
+        f.lite,
+        &[
+            "SELECT 1; COMMIT; INSERT INTO {t} VALUES (2)",
+            "SELECT 1 /* /* */ ; COMMIT; INSERT INTO {t} VALUES (2); /* */",
+            r"SELECT 'a\'; COMMIT; INSERT INTO {t} VALUES (2); SELECT '",
+            "SELECT 1; END; DELETE FROM {t}",
+        ],
+    );
+}
+
+#[test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+fn adversarial_queries_on_postgres_change_nothing() {
+    let f = fixture();
+    adversarial(
+        &f,
+        f.pg,
+        &[
+            "SELECT 1; COMMIT; INSERT INTO {t} VALUES (2)",
+            r"SELECT E'\''; COMMIT; INSERT INTO {t} VALUES (2); SELECT ''",
+            "SELECT 1 AS a$b$; COMMIT; INSERT INTO {t} VALUES (2); SELECT $b$",
+            "SELECT 1; END; DELETE FROM {t}",
+        ],
+    );
+}
+
+#[test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+fn adversarial_queries_on_sql_server_change_nothing() {
+    let f = fixture();
+    adversarial(
+        &f,
+        f.ms,
+        &[
+            "SELECT 1 COMMIT INSERT INTO {t} VALUES (2)",
+            "SELECT 1; COMMIT; INSERT INTO {t} VALUES (2)",
+            "SELECT 1\nGO\nCOMMIT\nGO\nINSERT INTO {t} VALUES (2)",
+            "SELECT 1 ROLLBACK DELETE FROM {t}",
+            "SELECT 1 IF @@TRANCOUNT > 0 COMMIT DELETE FROM {t}",
+        ],
+    );
 }
 
 async fn count(b: &ServiceBackend, sql: &str) -> i64 {

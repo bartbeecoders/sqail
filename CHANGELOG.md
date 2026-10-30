@@ -7,6 +7,10 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
 
 ## Unreleased
 
+- **Fix:** the completion popup closes when you type a space, comma, `;` or
+  other punctuation, so the next Enter or Tab no longer inserts a
+  suggestion (#65).
+
 ## 1.3.0 — 2026-10-10
 
 ### sqail

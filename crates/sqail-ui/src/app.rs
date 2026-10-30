@@ -22,6 +22,18 @@ use crate::settings::{ServiceProfile, Settings, ThemePref};
 use crate::theme;
 use crate::worker::Worker;
 
+/// Marks a pinned tab (in place of its close button).
+const PIN: &str = "⚑";
+
+/// What a click in the tab strip asks for (applied after drawing).
+enum TabEvent {
+    Select(usize),
+    Close(usize),
+    Pin(usize, bool),
+    New,
+    ToggleRow,
+}
+
 /// Width of a collapsed side panel.
 const RAIL_WIDTH: f32 = 28.0;
 
@@ -361,7 +373,29 @@ impl SqailApp {
             self.tabs.push(Tab::restore(id, saved));
         }
         self.active = ws.active.min(self.tabs.len() - 1);
+        // Pinned tabs first, whatever order the file has.
+        let active = self.tabs[self.active].id;
+        self.tabs.sort_by_key(|t| !t.pinned);
+        self.active = self.tab_index(active).unwrap_or(0);
         self.saved_workspace = Some(ws);
+    }
+
+    fn tab_index(&self, id: u64) -> Option<usize> {
+        self.tabs.iter().position(|t| t.id == id)
+    }
+
+    /// Pin or unpin a tab. Pinned tabs stay together at the start: a newly
+    /// pinned tab goes last among them, an unpinned one first after them.
+    pub fn set_pinned(&mut self, idx: usize, pinned: bool) {
+        if idx >= self.tabs.len() || self.tabs[idx].pinned == pinned {
+            return;
+        }
+        let active = self.tabs[self.active].id;
+        let mut tab = self.tabs.remove(idx);
+        tab.pinned = pinned;
+        let at = self.tabs.iter().filter(|t| t.pinned).count();
+        self.tabs.insert(at, tab);
+        self.active = self.tab_index(active).unwrap_or(0);
     }
 
     pub fn workspace(&self) -> crate::local::Workspace {
@@ -1424,6 +1458,11 @@ impl SqailApp {
             Command::OpenSettings => {
                 self.dialog = Dialog::Settings(Box::default());
             }
+            Command::TogglePinTab => {
+                if let Some(t) = self.tabs.get(idx) {
+                    self.set_pinned(idx, !t.pinned);
+                }
+            }
             Command::ShowConnections => self.show_sidebar(crate::sidebar::View::Connections),
             Command::ShowHistory => self.show_sidebar(crate::sidebar::View::History),
             Command::ShowSnippets => self.show_sidebar(crate::sidebar::View::Snippets),
@@ -1588,6 +1627,7 @@ impl SqailApp {
                     Command::Save,
                     Command::SaveAs,
                     Command::CloseTab,
+                    Command::TogglePinTab,
                 ] {
                     self.menu_item(ui, c);
                 }
@@ -1795,94 +1835,173 @@ impl SqailApp {
     }
 
     fn tab_strip(&mut self, ui: &mut egui::Ui) {
-        let dark = ui.visuals().dark_mode;
-        let mut close = None;
-        let mut new_tab = false;
+        let mut events = Vec::new();
+        let pinned = self.tabs.iter().filter(|t| t.pinned).count();
+        if self.settings.pinned_tabs_row && pinned > 0 {
+            // A bar of its own: tinted background, a line below it.
+            egui::Frame::new()
+                .fill(ui.visuals().faint_bg_color)
+                .inner_margin(egui::Margin::symmetric(4, 3))
+                .corner_radius(4)
+                .show(ui, |ui| {
+                    self.tab_row(ui, "pinned_strip", 0..pinned, false, &mut events);
+                });
+            ui.separator();
+            self.tab_row(ui, "tab_strip", pinned..self.tabs.len(), true, &mut events);
+        } else {
+            self.tab_row(ui, "tab_strip", 0..self.tabs.len(), true, &mut events);
+        }
+        for e in events {
+            match e {
+                TabEvent::Select(i) => self.active = i,
+                TabEvent::Close(i) => self.request_close_tab(i),
+                TabEvent::Pin(i, pinned) => {
+                    self.set_pinned(i, pinned);
+                    if pinned && !self.settings.pinned_tabs_row {
+                        self.notify(
+                            "Pinned. Right-click a tab → “Pinned tabs on a separate row” to \
+                             give pinned tabs their own row.",
+                            false,
+                        );
+                    }
+                }
+                TabEvent::New => {
+                    self.new_tab(None);
+                }
+                TabEvent::ToggleRow => {
+                    self.settings.pinned_tabs_row = !self.settings.pinned_tabs_row;
+                    self.settings.save();
+                }
+            }
+        }
+    }
+
+    /// One row of tabs (`range` of `self.tabs`), scrolling sideways.
+    fn tab_row(
+        &self,
+        ui: &mut egui::Ui,
+        id: &str,
+        range: std::ops::Range<usize>,
+        new_button: bool,
+        events: &mut Vec<TabEvent>,
+    ) {
         egui::ScrollArea::horizontal()
-            .id_salt("tab_strip")
+            .id_salt(id)
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    for (i, tab) in self.tabs.iter().enumerate() {
-                        let conn = tab.connection.and_then(|c| self.service.connection(c));
-                        let color = conn
-                            .and_then(|c| c.color.as_deref())
-                            .and_then(theme::parse_hex);
-                        let selected = i == self.active;
-                        let frame = egui::Frame::new()
-                            .inner_margin(egui::Margin::symmetric(8, 3))
-                            .corner_radius(6)
-                            .fill(if selected {
-                                ui.visuals().extreme_bg_color
-                            } else {
-                                Color32::TRANSPARENT
-                            })
-                            .stroke(if selected {
-                                egui::Stroke::new(
-                                    1.0,
-                                    ui.visuals().widgets.noninteractive.bg_stroke.color,
-                                )
-                            } else {
-                                egui::Stroke::NONE
-                            });
-                        // The tab's click sense goes in before its contents,
-                        // so the × button on top of it gets its own clicks.
-                        let sense = egui::UiBuilder::new().sense(egui::Sense::click());
-                        let resp = ui
-                            .scope_builder(sense, |ui| {
-                                frame.show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.spacing_mut().item_spacing.x = 4.0;
-                                        // Not selectable: a click on the text selects the tab.
-                                        let dot = RichText::new("●").color(color.unwrap_or(
-                                            if tab.connection.is_some() {
-                                                theme::accent(dark)
-                                            } else {
-                                                Color32::GRAY
-                                            },
-                                        ));
-                                        ui.add(egui::Label::new(dot).selectable(false));
-                                        let mut title = tab.title.clone();
-                                        if tab.is_dirty() {
-                                            title.push_str(" •");
-                                        }
-                                        let t = RichText::new(title);
-                                        ui.add(
-                                            egui::Label::new(if selected { t.strong() } else { t })
-                                                .selectable(false),
-                                        );
-                                        if tab.run.as_ref().is_some_and(|r| r.running) {
-                                            ui.spinner();
-                                        }
-                                        if ui
-                                            .small_button("×")
-                                            .on_hover_text("Close (Ctrl+W)")
-                                            .clicked()
-                                        {
-                                            close = Some(i);
-                                        }
-                                    });
-                                })
-                            })
-                            .response;
-                        if resp.clicked() {
-                            self.active = i;
-                        }
-                        if resp.middle_clicked() {
-                            close = Some(i);
-                        }
+                    if !new_button {
+                        ui.label(RichText::new("Pinned").small().weak());
                     }
-                    if ui.button("+").on_hover_text("New tab (Ctrl+T)").clicked() {
-                        new_tab = true;
+                    for i in range {
+                        self.tab_button(ui, i, events);
+                    }
+                    if new_button && ui.button("+").on_hover_text("New tab (Ctrl+T)").clicked() {
+                        events.push(TabEvent::New);
                     }
                 });
             });
-        if let Some(i) = close {
-            self.request_close_tab(i);
+    }
+
+    fn tab_button(&self, ui: &mut egui::Ui, i: usize, events: &mut Vec<TabEvent>) {
+        let dark = ui.visuals().dark_mode;
+        let tab = &self.tabs[i];
+        let conn = tab.connection.and_then(|c| self.service.connection(c));
+        let color = conn
+            .and_then(|c| c.color.as_deref())
+            .and_then(theme::parse_hex);
+        let selected = i == self.active;
+        let accent = theme::accent(dark);
+        let frame = egui::Frame::new()
+            .inner_margin(egui::Margin::symmetric(8, 3))
+            .corner_radius(6)
+            .fill(if selected {
+                ui.visuals().extreme_bg_color
+            } else if tab.pinned {
+                accent.gamma_multiply(0.15)
+            } else {
+                Color32::TRANSPARENT
+            })
+            .stroke(if selected {
+                egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color)
+            } else {
+                egui::Stroke::NONE
+            });
+        // The tab's click sense goes in before its contents, so the × button
+        // on top of it gets its own clicks.
+        let sense = egui::UiBuilder::new().sense(egui::Sense::click());
+        let resp = ui
+            .scope_builder(sense, |ui| {
+                frame.show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        // Not selectable: a click on the text selects the tab.
+                        let dot = RichText::new("●").color(color.unwrap_or(
+                            if tab.connection.is_some() {
+                                theme::accent(dark)
+                            } else {
+                                Color32::GRAY
+                            },
+                        ));
+                        ui.add(egui::Label::new(dot).selectable(false));
+                        if tab.pinned {
+                            ui.add(
+                                egui::Label::new(RichText::new(PIN).color(accent))
+                                    .selectable(false),
+                            )
+                            .on_hover_text("Pinned: right-click to unpin");
+                        }
+                        let mut title = tab.title.clone();
+                        if tab.is_dirty() {
+                            title.push_str(" •");
+                        }
+                        let t = RichText::new(title);
+                        ui.add(
+                            egui::Label::new(if selected { t.strong() } else { t })
+                                .selectable(false),
+                        );
+                        if tab.run.as_ref().is_some_and(|r| r.running) {
+                            ui.spinner();
+                        }
+                        if !tab.pinned
+                            && ui
+                                .small_button("×")
+                                .on_hover_text("Close (Ctrl+W)")
+                                .clicked()
+                        {
+                            events.push(TabEvent::Close(i));
+                        }
+                    });
+                })
+            })
+            .response;
+        if resp.clicked() {
+            events.push(TabEvent::Select(i));
         }
-        if new_tab {
-            self.new_tab(None);
+        // Middle click closes, except pinned tabs.
+        if resp.middle_clicked() && !tab.pinned {
+            events.push(TabEvent::Close(i));
         }
+        resp.context_menu(|ui| {
+            let label = if tab.pinned { "Unpin tab" } else { "Pin tab" };
+            if ui.button(label).clicked() {
+                events.push(TabEvent::Pin(i, !tab.pinned));
+                ui.close();
+            }
+            let mut row = self.settings.pinned_tabs_row;
+            if ui
+                .checkbox(&mut row, "Pinned tabs on a separate row")
+                .clicked()
+            {
+                events.push(TabEvent::ToggleRow);
+                ui.close();
+            }
+            ui.separator();
+            if ui.button("Close tab").clicked() {
+                events.push(TabEvent::Close(i));
+                ui.close();
+            }
+        });
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {

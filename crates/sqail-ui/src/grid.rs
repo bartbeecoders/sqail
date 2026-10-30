@@ -24,13 +24,21 @@ pub struct GridOutput {
     pub review_edits: bool,
     /// Shown when a copy was cut short.
     pub copy_note: Option<String>,
+    /// Switch multi-line rows on or off (a setting).
+    pub toggle_multiline: bool,
 }
 
 /// Longest text we lay out in a cell; the viewer shows the rest.
 const CELL_PREVIEW: usize = 256;
 
 /// `editable`: `Ok` if the shown result may be edited, else the reason.
-pub fn results_ui(ui: &mut egui::Ui, run: &mut Run, editable: Result<(), String>) -> GridOutput {
+/// `multiline`: wrap values and show their line breaks, rows growing to fit.
+pub fn results_ui(
+    ui: &mut egui::Ui,
+    run: &mut Run,
+    editable: Result<(), String>,
+    multiline: bool,
+) -> GridOutput {
     let mut out = GridOutput::default();
 
     ui.horizontal(|ui| {
@@ -167,6 +175,7 @@ pub fn results_ui(ui: &mut egui::Ui, run: &mut Run, editable: Result<(), String>
                 selection,
                 edit,
                 (generation, i),
+                multiline,
                 &mut out,
             );
         }
@@ -443,6 +452,196 @@ fn preview(s: &str) -> String {
     p
 }
 
+/// Rows measured for a result's starting column widths.
+const WIDTH_SAMPLE: usize = 1000;
+/// Widest starting column, in characters. Longer values are cut; hovering
+/// shows them, and auto-fit widens the column.
+const START_CHARS: usize = 80;
+/// Rows auto-fit measures.
+const FIT_SAMPLE: usize = 20_000;
+const MIN_COL_W: f32 = 56.0;
+/// Longest text a cell's tooltip shows.
+const TOOLTIP_CHARS: usize = 2000;
+const TOOLTIP_LINES: usize = 40;
+
+/// What a column's header needs: the name plus the sort arrow.
+fn header_chars(col: &sqail_client::proto::Column) -> usize {
+    col.name.chars().count() + 4
+}
+
+/// Widest first line of column `c` in `rows`, in characters, at most `cap`.
+fn measure(rs: &ResultSet, c: usize, rows: std::ops::Range<usize>, cap: usize) -> usize {
+    let logical = rs.columns[c].logical;
+    rows.map(|r| {
+        let cell = &rs.raw_row(r)[c];
+        if cell.is_null() {
+            return 4;
+        }
+        let text = cell.display(logical);
+        text.lines().next().unwrap_or("").chars().take(cap).count()
+    })
+    .max()
+    .unwrap_or(0)
+}
+
+/// Points for a column `chars` characters wide.
+fn chars_to_w(chars: usize, char_w: f32) -> f32 {
+    (chars as f32 * char_w + 20.0).max(MIN_COL_W)
+}
+
+/// Measure the rows that arrived since the last frame (up to
+/// [`WIDTH_SAMPLE`]). Done once per row, not every frame. If later rows widen
+/// a column that is already shown, the table restarts from the wider widths.
+fn update_widths(rs: &mut ResultSet, char_w: f32) {
+    let n = rs.columns.len();
+    if rs.widths.chars.len() != n {
+        rs.widths = crate::results::ColumnWidths {
+            chars: rs.columns.iter().map(header_chars).collect(),
+            ..Default::default()
+        };
+    }
+    let want = rs.len().min(WIDTH_SAMPLE);
+    let from = rs.widths.sampled;
+    if from >= want {
+        return;
+    }
+    let measured: Vec<usize> = (0..n)
+        .map(|c| measure(rs, c, from..want, START_CHARS))
+        .collect();
+    let w = &mut rs.widths;
+    w.sampled = want;
+    let mut grew = false;
+    for (have, m) in w.chars.iter_mut().zip(measured) {
+        if m > *have {
+            *have = m;
+            grew = true;
+        }
+    }
+    if grew && w.shown.len() == n {
+        let start: Vec<f32> = w
+            .chars
+            .iter()
+            .zip(&w.shown)
+            .map(|(ch, shown)| chars_to_w(*ch, char_w).max(*shown))
+            .collect();
+        w.initial = Some(start);
+        w.reset = true;
+    }
+}
+
+/// The widths a new table starts from.
+fn start_widths(rs: &ResultSet, char_w: f32) -> Vec<f32> {
+    match &rs.widths.initial {
+        Some(w) if w.len() == rs.columns.len() => w.clone(),
+        _ => rs
+            .widths
+            .chars
+            .iter()
+            .map(|c| chars_to_w(*c, char_w))
+            .collect(),
+    }
+}
+
+/// Widen (or narrow) columns to fit their header and values.
+fn auto_fit(rs: &mut ResultSet, cols: std::ops::Range<usize>, char_w: f32) {
+    let n = rs.columns.len();
+    // Other columns keep the width they have now.
+    let mut w: Vec<f32> = if rs.widths.shown.len() == n {
+        rs.widths.shown.clone()
+    } else {
+        start_widths(rs, char_w)
+    };
+    let rows = rs.len().min(FIT_SAMPLE);
+    for c in cols {
+        let chars = measure(rs, c, 0..rows, CELL_PREVIEW + 1).max(header_chars(&rs.columns[c]));
+        w[c] = chars_to_w(chars, char_w);
+    }
+    rs.widths.initial = Some(w);
+    rs.widths.reset = true;
+}
+
+/// Whether a cell's text does not fit its cell, so it is cut off.
+fn cut_off(ctx: &egui::Context, value: &str, font: &egui::FontId, width: f32) -> bool {
+    if value.contains('\n') || value.chars().nth(CELL_PREVIEW).is_some() {
+        return true;
+    }
+    let text_w = ctx.fonts_mut(|f| {
+        f.layout_no_wrap(value.to_string(), font.clone(), Color32::PLACEHOLDER)
+            .size()
+            .x
+    });
+    text_w > width - 2.0
+}
+
+/// A cell's tooltip: the value, cut at a sane length.
+fn tooltip_text(value: &str) -> String {
+    let head: String = value.chars().take(TOOLTIP_CHARS).collect();
+    let cut = head.len() < value.len() || head.lines().nth(TOOLTIP_LINES).is_some();
+    let mut out = head
+        .lines()
+        .take(TOOLTIP_LINES)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if cut {
+        out.push_str("…\n\n(Right-click → View value shows all of it.)");
+    }
+    out
+}
+
+/// Most lines a row shows with multi-line rows on.
+const MAX_LINES: usize = 10;
+/// Most characters of a value a multi-line cell lays out.
+const WRAP_CHARS: usize = 4000;
+
+/// Height of a row of `lines` text lines.
+fn row_height(lines: u8, row_h: f32, line_h: f32) -> f32 {
+    row_h + f32::from(lines.max(1) - 1) * line_h
+}
+
+/// The row a grid position's line count is kept under: original rows by
+/// their index in the result (so sorting keeps it), new rows after them.
+fn line_key(rs: &ResultSet, pos: usize) -> usize {
+    match row_ref(rs, pos) {
+        RowRef::Existing(r) => r,
+        RowRef::New(i) => rs.len() + i,
+    }
+}
+
+/// A value wrapped to the cell's width, line breaks kept, at most
+/// [`MAX_LINES`] lines; and whether it was cut off.
+fn wrapped_galley(
+    ui: &egui::Ui,
+    value: &str,
+    deleted: bool,
+) -> (std::sync::Arc<egui::Galley>, bool) {
+    let mut text: String = value.chars().take(WRAP_CHARS).collect();
+    let capped = text.len() < value.len();
+    // A trailing line break would only add an empty line.
+    while text.ends_with(['\n', '\r']) {
+        text.pop();
+    }
+    let mut rich = RichText::new(text).monospace();
+    if deleted {
+        rich = rich.strikethrough();
+    }
+    let mut job = egui::text::LayoutJob::default();
+    rich.append_to(
+        &mut job,
+        ui.style(),
+        egui::FontSelection::Default,
+        Align::Min,
+    );
+    job.wrap = egui::text::TextWrapping {
+        max_width: ui.available_width(),
+        max_rows: MAX_LINES,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+    };
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
+    let cut = capped || galley.elided;
+    (galley, cut)
+}
+
 /// Right-click actions on a cell.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CellAction {
@@ -507,6 +706,7 @@ fn grid_ui(
     selection: &mut Option<Selection>,
     mut edit: Option<&mut EditState>,
     salt: (u64, usize),
+    multiline: bool,
     out: &mut GridOutput,
 ) {
     if rs.columns.is_empty() {
@@ -515,21 +715,24 @@ fn grid_ui(
     }
     let mono = egui::TextStyle::Monospace.resolve(ui.style());
     let char_w = ui.fonts_mut(|f| f.glyph_width(&mono, '0'));
-    let row_h = ui.fonts_mut(|f| f.row_height(&mono)) + 6.0;
+    let line_h = ui.fonts_mut(|f| f.row_height(&mono));
+    let row_h = line_h + 6.0;
 
-    // Initial widths from the header and the first rows.
-    let widths: Vec<f32> = rs
-        .columns
-        .iter()
-        .enumerate()
-        .map(|(c, col)| {
-            let mut chars = col.name.chars().count() + 2;
-            for r in rs.raw_rows().take(50) {
-                chars = chars.max(r[c].display(col.logical).chars().count().min(48));
-            }
-            (chars as f32 * char_w + 20.0).clamp(56.0, 420.0)
-        })
-        .collect();
+    // Starting widths from the header and the first rows, measured once.
+    update_widths(rs, char_w);
+    let widths = start_widths(rs, char_w);
+    // Multi-line rows: measurements hold for one set of column widths (and
+    // font). Wait for a resize drag to end, so rows don't collapse meanwhile.
+    if multiline && !ui.input(|i| i.pointer.any_down()) {
+        let mut key = rs.widths.shown.clone();
+        key.push(char_w);
+        rs.lines.invalidate_unless(&key);
+    }
+    // Lines measured this frame: (row key, lines).
+    let mut measured: Vec<(usize, u8)> = Vec::new();
+    let mut toggle_multiline = false;
+    // Auto-fit requests: Some(c) = one column, None = all of them.
+    let mut fit: Option<Option<usize>> = None;
     let total_rows = rs.len() + edit.as_ref().map_or(0, |e| e.inserted.len());
     let num_w = (total_rows.max(1).to_string().len() as f32) * char_w + 16.0;
 
@@ -587,11 +790,31 @@ fn grid_ui(
     let new_fill = Color32::from_rgba_unmultiplied(0x3c, 0xb3, 0x71, 40);
     let deleted_fill = Color32::from_rgba_unmultiplied(0xd6, 0x45, 0x45, 45);
 
+    // Column widths as shown this frame, for auto-fit to keep the others.
+    let mut shown = Vec::with_capacity(rs.columns.len());
+
     // egui_extras tables only scroll vertically; wide results scroll sideways here.
     egui::ScrollArea::horizontal()
         .id_salt(("grid-h", salt))
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            // Double-clicking a column's right border fits it. egui_extras
+            // has this built in, but looks for the border under another id
+            // when the table has an id salt, and measures the clipped (cut)
+            // text; so look up the border ourselves (same id as egui_extras
+            // gives it) and measure the values.
+            let state_id = ui.id().with(egui::IdSalt::new(salt));
+            for c in 0..rs.columns.len() {
+                let border = state_id.with("resize_column").with(c + 1);
+                if ui
+                    .ctx()
+                    .read_response(border)
+                    .is_some_and(|r| r.double_clicked())
+                {
+                    fit = Some(Some(c));
+                }
+            }
+            let reset = std::mem::take(&mut rs.widths.reset);
             let mut table = TableBuilder::new(ui)
                 .id_salt(salt)
                 .striped(true)
@@ -600,6 +823,9 @@ fn grid_ui(
                 .auto_shrink([false, false])
                 .cell_layout(Layout::left_to_right(Align::Center))
                 .column(Column::exact(num_w));
+            if reset {
+                table.reset();
+            }
             for w in &widths {
                 table = table.column(
                     Column::initial(*w)
@@ -630,6 +856,10 @@ fn grid_ui(
                     });
                     for (c, col) in rs.columns.iter().enumerate() {
                         header.col(|ui| {
+                            // The cell's rect is the column's width (the
+                            // response's rect is not: the right-to-left
+                            // layout below reaches past the cell).
+                            shown.push(ui.max_rect().width());
                             if selection
                                 .as_ref()
                                 .is_some_and(|s| covers_rows(s, total_rows) && s.cols().contains(&c))
@@ -673,7 +903,7 @@ fn grid_ui(
                                             .selectable(false),
                                     )
                                     .on_hover_text(format!(
-                                        "{} · {}{}\nClick to select this column. Shift+click extends. The arrow sorts.",
+                                        "{} · {}{}\nClick to select this column. Shift+click extends. The arrow sorts.\nDouble-click the column's right border to fit its values.",
                                         col.name,
                                         col.type_name,
                                         if read_only {
@@ -685,13 +915,29 @@ fn grid_ui(
                                 if resp.clicked() {
                                     clicked_col = Some((c, ui.input(|i| i.modifiers.shift)));
                                 }
+                                resp.context_menu(|ui| {
+                                    if ui.button("Auto-fit column").clicked() {
+                                        fit = Some(Some(c));
+                                        ui.close();
+                                    }
+                                    if ui.button("Auto-fit all columns").clicked() {
+                                        fit = Some(None);
+                                        ui.close();
+                                    }
+                                    let mut on = multiline;
+                                    if ui.checkbox(&mut on, "Multi-line rows").clicked() {
+                                        toggle_multiline = true;
+                                        ui.close();
+                                    }
+                                });
                             });
                         });
                     }
                 })
                 .body(|body| {
-                    body.rows(row_h, total_rows, |mut row| {
+                    let add_row = |mut row: egui_extras::TableRow<'_, '_>| {
                         let pos = row.index();
+                        let mut row_lines = 1u8;
                         let rref = row_ref(rs, pos);
                         let deleted = matches!((rref, edit.as_deref()), (RowRef::Existing(r), Some(e)) if e.deleted.contains(&r));
                         let is_new = matches!(rref, RowRef::New(_));
@@ -735,6 +981,8 @@ fn grid_ui(
                                 .as_ref()
                                 .and_then(|e| e.editing.as_ref())
                                 .is_some_and(|(p, col, _)| *p == pos && *col == c);
+                            // Multi-line cells: (lines, cut off).
+                            let mut wrapped: Option<(u8, bool)> = None;
                             let (_, resp) = row.col(|ui| {
                                 let fill = if deleted {
                                     Some(deleted_fill)
@@ -764,6 +1012,18 @@ fn grid_ui(
                                     }
                                     return;
                                 }
+                                if multiline
+                                    && let Some(v) = &value
+                                    && !(is_new && !changed)
+                                    && !is_numeric(logical)
+                                {
+                                    let (galley, cut) = wrapped_galley(ui, v, deleted);
+                                    wrapped = Some((galley.rows.len().clamp(1, MAX_LINES) as u8, cut));
+                                    ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                                        ui.add(egui::Label::new(galley).selectable(false));
+                                    });
+                                    return;
+                                }
                                 let text = match &value {
                                     None => RichText::new("NULL").italics().color(null_color),
                                     Some(v) if is_new && !changed => RichText::new(v).italics().color(null_color),
@@ -772,14 +1032,40 @@ fn grid_ui(
                                         if deleted { t.strikethrough() } else { t }
                                     }
                                 };
+                                // The cell shows the whole value on hover (below).
+                                let label = egui::Label::new(text)
+                                    .truncate()
+                                    .show_tooltip_when_elided(false)
+                                    .selectable(false);
                                 if is_numeric(logical) && value.is_some() && !(is_new && !changed) {
                                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        ui.add(egui::Label::new(text).truncate().selectable(false));
+                                        ui.add(label);
                                     });
                                 } else {
-                                    ui.add(egui::Label::new(text).truncate().selectable(false));
+                                    ui.add(label);
                                 }
                             });
+                            if let Some((n, _)) = wrapped {
+                                row_lines = row_lines.max(n);
+                            }
+                            // A cut-off value shows in full (up to a limit) on hover.
+                            let resp = match &value {
+                                Some(v)
+                                    if resp.hovered()
+                                        && !editing_here
+                                        && wrapped.map_or_else(
+                                            || cut_off(&resp.ctx, v, &mono, resp.rect.width()),
+                                            |(_, cut)| cut,
+                                        ) =>
+                                {
+                                    let tip = tooltip_text(v);
+                                    resp.on_hover_ui(|ui| {
+                                        ui.set_max_width(640.0);
+                                        ui.add(egui::Label::new(RichText::new(tip).monospace()).wrap());
+                                    })
+                                }
+                                _ => resp,
+                            };
                             if resp.clicked() {
                                 let shift = resp.ctx.input(|i| i.modifiers.shift);
                                 clicked_cell = Some((pos, c, shift));
@@ -802,6 +1088,11 @@ fn grid_ui(
                                 item(ui, "Copy column", CellAction::CopyColumn);
                                 item(ui, "Copy table", CellAction::CopyTable);
                                 item(ui, "View value", CellAction::View);
+                                let mut on = multiline;
+                                if ui.checkbox(&mut on, "Multi-line rows").clicked() {
+                                    toggle_multiline = true;
+                                    ui.close();
+                                }
                                 if in_edit {
                                     ui.separator();
                                     if editable {
@@ -818,9 +1109,44 @@ fn grid_ui(
                                 }
                             });
                         }
-                    });
+                        if multiline {
+                            measured.push((line_key(rs, pos), row_lines));
+                        }
+                    };
+                    // Rows of different heights cost a pass over every row's
+                    // (cached) height each frame; only pay for it when some
+                    // shown row needed more than one line.
+                    if multiline && rs.lines.any_tall() {
+                        let heights = (0..total_rows)
+                            .map(|pos| row_height(rs.lines.get(line_key(rs, pos)), row_h, line_h));
+                        body.heterogeneous_rows(heights, add_row);
+                    } else {
+                        body.rows(row_h, total_rows, add_row);
+                    }
                 });
     });
+    out.toggle_multiline |= toggle_multiline;
+    if multiline {
+        let mut changed = false;
+        for (row, n) in measured {
+            changed |= rs.lines.set(row, n);
+        }
+        if changed {
+            ui.ctx().request_repaint();
+        }
+    }
+
+    if shown.len() == rs.columns.len() {
+        rs.widths.shown = shown;
+    }
+    if let Some(cols) = fit {
+        let cols = match cols {
+            Some(c) => c..c + 1,
+            None => 0..rs.columns.len(),
+        };
+        auto_fit(rs, cols, char_w);
+        ui.ctx().request_repaint();
+    }
 
     if let Some(c) = clicked_sort
         && rs.complete
@@ -1082,11 +1408,249 @@ mod tests {
         });
         let h = egui_kittest::Harness::new_ui_state(
             |ui, run: &mut Run| {
-                results_ui(ui, run, Err("test".into()));
+                results_ui(ui, run, Err("test".into()), false);
             },
             run,
         );
         h.get_by_label("Result 1 (2+)");
+    }
+
+    #[test]
+    fn tooltips_are_capped() {
+        assert_eq!(tooltip_text("a\nb"), "a\nb");
+        let long = tooltip_text(&"x".repeat(5000));
+        assert!(long.starts_with(&"x".repeat(TOOLTIP_CHARS)));
+        assert!(long.contains("View value"), "{long}");
+        let many = tooltip_text(&"l\n".repeat(100));
+        assert_eq!(
+            many.lines().filter(|l| l.starts_with('l')).count(),
+            TOOLTIP_LINES
+        );
+    }
+
+    /// A finished run with one result of text columns.
+    fn text_run(names: &[&str], rows: Vec<Vec<serde_json::Value>>) -> Run {
+        use sqail_client::proto::{Column, LogicalType, QueryEvent};
+        let mut run = Run::new(1, "q".into());
+        run.apply(QueryEvent::ResultStart {
+            index: 0,
+            columns: names
+                .iter()
+                .map(|n| Column {
+                    name: (*n).into(),
+                    type_name: "text".into(),
+                    logical: LogicalType::Text,
+                })
+                .collect(),
+        });
+        let n = rows.len() as u64;
+        run.apply(QueryEvent::Rows { index: 0, rows });
+        run.apply(QueryEvent::ResultEnd {
+            index: 0,
+            row_count: n,
+            truncated: false,
+        });
+        run.apply(QueryEvent::Done {
+            elapsed_ms: 1,
+            cancelled: false,
+            in_transaction: None,
+        });
+        run
+    }
+
+    #[test]
+    fn widths_are_measured_once_and_grow_with_later_rows() {
+        let rows = |n: usize, long_at: usize| -> Vec<Vec<serde_json::Value>> {
+            (0..n)
+                .map(|i| {
+                    vec![
+                        if i == long_at {
+                            "y".repeat(60)
+                        } else {
+                            "s".into()
+                        }
+                        .into(),
+                    ]
+                })
+                .collect()
+        };
+        let mut run = text_run(&["c"], rows(10, usize::MAX));
+        let rs = &mut run.results[0];
+        update_widths(rs, 8.0);
+        assert_eq!(rs.widths.sampled, 10);
+        assert_eq!(rs.widths.chars, [header_chars(&rs.columns[0])]);
+        assert!(!rs.widths.reset, "nothing shown yet, nothing to reset");
+
+        // A long value far beyond the old 50-row sample still counts.
+        let mut run = text_run(&["c"], rows(900, 800));
+        let rs = &mut run.results[0];
+        update_widths(rs, 8.0);
+        assert_eq!(rs.widths.chars, [60]);
+        // Measured once: nothing new to read.
+        rs.widths.chars = vec![1];
+        update_widths(rs, 8.0);
+        assert_eq!(rs.widths.chars, [1]);
+    }
+
+    fn harness(run: Run, step_dt: f32) -> egui_kittest::Harness<'static, Run> {
+        egui_kittest::Harness::builder()
+            .with_size([900.0, 500.0])
+            .with_step_dt(step_dt)
+            .build_ui_state(
+                |ui, run: &mut Run| {
+                    ui.style_mut().interaction.tooltip_delay = 0.0;
+                    results_ui(ui, run, Err("test".into()), false);
+                },
+                run,
+            )
+    }
+
+    /// Long values: the starting width reaches past the first 50 rows, the
+    /// cut-off text shows on hover, and auto-fit widens the column.
+    #[test]
+    fn long_values_widen_show_on_hover_and_auto_fit() {
+        use egui_kittest::kittest::Queryable;
+
+        let mut rows: Vec<Vec<serde_json::Value>> = (0..3000)
+            .map(|i| vec![format!("k{i}").into(), "short".into()])
+            .collect();
+        rows[0][1] = "first line\nsecond line".into();
+        rows[300][1] = "m".repeat(70).into();
+        rows[2500][1] = "w".repeat(200).into();
+        let mut h = harness(text_run(&["key", "body"], rows), 0.25);
+        h.run();
+        let char_w = 7.0; // monospace digits are wider than this
+        let start = h.state().results[0].widths.shown.clone();
+        assert_eq!(start.len(), 2);
+        assert!(
+            start[1] > 70.0 * char_w,
+            "row 300 widens the column: {start:?}"
+        );
+        assert!(start[1] < 200.0 * char_w, "row 2500 is past the sample");
+
+        // Hovering a cut-off cell shows the whole value.
+        h.get_by_label("first line…").hover();
+        h.run();
+        h.get_by_label("first line\nsecond line");
+
+        // Header menu → Auto-fit column.
+        h.get_by_label("body").click_secondary();
+        h.run();
+        h.get_by_label("Auto-fit column").click();
+        h.run();
+        let fitted = h.state().results[0].widths.shown.clone();
+        assert!(fitted[1] > 200.0 * char_w, "{fitted:?}");
+        assert!(
+            (fitted[0] - start[0]).abs() < 1.0,
+            "other column kept: {start:?} → {fitted:?}"
+        );
+    }
+
+    #[test]
+    fn row_heights_grow_by_lines() {
+        assert_eq!(row_height(0, 20.0, 14.0), 20.0);
+        assert_eq!(row_height(1, 20.0, 14.0), 20.0);
+        assert_eq!(row_height(3, 20.0, 14.0), 48.0);
+    }
+
+    /// Multi-line rows: off, a value with line breaks is one cut-off line;
+    /// on (from the cell menu), its row grows to show every line.
+    #[test]
+    fn multi_line_rows_grow_with_the_toggle() {
+        use egui_kittest::kittest::Queryable;
+
+        struct S {
+            run: Run,
+            multiline: bool,
+        }
+        let mut rows: Vec<Vec<serde_json::Value>> =
+            (0..5000).map(|i| vec![format!("v{i}").into()]).collect();
+        rows[0][0] = "one\ntwo\nthree".into();
+        rows[2][0] = (1..=30)
+            .map(|i| format!("l{i}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .into();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size([900.0, 500.0])
+            .build_ui_state(
+                |ui, s: &mut S| {
+                    let out = results_ui(ui, &mut s.run, Err("test".into()), s.multiline);
+                    if out.toggle_multiline {
+                        s.multiline = !s.multiline;
+                    }
+                },
+                S {
+                    run: text_run(&["c"], rows),
+                    multiline: false,
+                },
+            );
+        h.run();
+        let gap = |h: &egui_kittest::Harness<'_, S>, a: &str, b: &str| {
+            h.get_by_label(b).rect().top() - h.get_by_label(a).rect().top()
+        };
+        let single = gap(&h, "1", "2");
+        h.get_by_label("one…");
+
+        h.get_by_label("one…").click_secondary();
+        h.run();
+        h.get_by_label("Multi-line rows").click();
+        h.run();
+        assert!(h.state().multiline);
+        h.get_by_label("one\ntwo\nthree");
+        let tall = gap(&h, "1", "2");
+        assert!(tall > single * 1.8, "{single} → {tall}");
+        // Capped at MAX_LINES, with an ellipsis.
+        let capped = gap(&h, "3", "4");
+        assert!(capped > tall * 2.0, "{capped}");
+        assert!(
+            capped < single * (MAX_LINES as f32 + 1.0),
+            "at most {MAX_LINES} lines: {capped}"
+        );
+        let r = &h.state().run.results[0];
+        assert_eq!(r.lines.get(2), MAX_LINES as u8);
+        assert_eq!(r.lines.get(1), 1);
+
+        // Off again: back to one line per row.
+        h.get_by_label("one\ntwo\nthree").click_secondary();
+        h.run();
+        h.get_by_label("Multi-line rows").click();
+        h.run();
+        assert!(!h.state().multiline);
+        h.get_by_label("one…");
+        assert!((gap(&h, "1", "2") - single).abs() < 0.5);
+    }
+
+    /// Double-clicking the border right of a column fits that column.
+    #[test]
+    fn double_click_on_the_border_fits_the_column() {
+        use egui_kittest::kittest::Queryable;
+
+        let mut rows: Vec<Vec<serde_json::Value>> =
+            (0..3000).map(|i| vec![format!("k{i}").into()]).collect();
+        rows[2600][0] = "z".repeat(120).into();
+        // Short frames, so two clicks in a row make a double-click.
+        let mut h = harness(text_run(&["key"], rows), 0.05);
+        h.run();
+        let char_w = 7.0;
+        assert!(h.state().results[0].widths.shown[0] < 120.0 * char_w);
+        let arrow = h.get_all_by_label("▲▼").next().expect("sort arrow").rect();
+        let border = egui::pos2(arrow.right() + 4.0, arrow.center().y);
+        h.event(egui::Event::PointerMoved(border));
+        h.step();
+        for _ in 0..2 {
+            for pressed in [true, false] {
+                h.event(egui::Event::PointerButton {
+                    pos: border,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                });
+            }
+        }
+        h.run();
+        let fitted = h.state().results[0].widths.shown.clone();
+        assert!(fitted[0] > 120.0 * char_w, "{fitted:?}");
     }
 
     fn clipboard_text(h: &egui_kittest::Harness<'_, Run>) -> Vec<String> {
@@ -1144,7 +1708,7 @@ mod tests {
             .with_size([900.0, 500.0])
             .build_ui_state(
                 |ui, run: &mut Run| {
-                    results_ui(ui, run, Err("test".into()));
+                    results_ui(ui, run, Err("test".into()), false);
                 },
                 run,
             );

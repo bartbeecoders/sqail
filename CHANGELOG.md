@@ -22,6 +22,14 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
 - **Script definition explains failures.** When the service can't script a
   view, procedure or function, the tab that opens shows its explanation as
   SQL comments instead of a status-bar notice that fades away.
+- **Long values in the result grid.** Columns start wider: up to about
+  80 characters (was 48), measured over the first 1 000 rows (was 50) and
+  again as rows stream in. A cut-off value shows in full on hover. Double-click
+  a column's right border, or right-click its name → *Auto-fit column* /
+  *Auto-fit all columns*, to fit the column to its values. New **Multi-line
+  rows** option (grid right-click menu or Settings → Queries, off by
+  default) wraps values and shows their line breaks, with rows up to 10
+  lines tall (#48).
 
 ### sqail-service
 

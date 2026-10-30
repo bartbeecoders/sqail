@@ -7,6 +7,12 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
 
 ## Unreleased
 
+### Packaging
+
+- The Arch `PKGBUILD` builds again: it downloads the source from GitHub,
+  unpacks it into the right folder and replaces `sqail2`. Each GitHub release
+  now carries a copy with the source tarball's checksum filled in.
+
 ## 1.3.0 — 2026-10-10
 
 ### sqail

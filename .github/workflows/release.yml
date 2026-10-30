@@ -1,7 +1,8 @@
 name: release
 
 # Tag v<version> (matching `version` in Cargo.toml) to release:
-#   ci.yml checks → Linux tarball + Windows zip/MSI → GitHub release,
+#   ci.yml checks → Linux tarball + Windows zip/MSI + pinned Arch PKGBUILD
+#   → GitHub release,
 #   upload to the download server (+ current.json) → portal redeploy.
 # "Run workflow" (workflow_dispatch) only builds the packages and attaches
 # them to the run as artifacts.
@@ -36,6 +37,11 @@ jobs:
             echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $VERSION"
             exit 1
           fi
+          PKGVER=$(sed -n 's/^pkgver=//p' packaging/arch/PKGBUILD)
+          if [[ "$PKGVER" != "$VERSION" ]]; then
+            echo "::error::packaging/arch/PKGBUILD pkgver $PKGVER does not match Cargo.toml version $VERSION"
+            exit 1
+          fi
 
   package:
     needs: [ci, version]
@@ -67,9 +73,39 @@ jobs:
             dist/*.sha256
           if-no-files-found: error
 
+  arch:
+    # Checks that the PKGBUILD downloads, extracts and prepares the tag's
+    # tarball, and pins the tarball's checksum in the copy attached to the
+    # release (the PKGBUILD in the repository cannot know it in advance).
+    if: github.ref_type == 'tag'
+    needs: [version]
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin the checksum and run makepkg up to prepare()
+        shell: bash
+        run: |
+          pacman -Syu --noconfirm --needed rust clang cmake
+          useradd -m builder
+          mkdir -p /tmp/arch out
+          cp packaging/arch/PKGBUILD /tmp/arch/
+          chown -R builder /tmp/arch
+          source /tmp/arch/PKGBUILD
+          SUM=$(curl -fsSL "$url/archive/v$pkgver.tar.gz" | sha256sum | cut -d' ' -f1)
+          sed -i "s/^sha256sums=('SKIP')/sha256sums=('$SUM')/" /tmp/arch/PKGBUILD
+          grep -q "^sha256sums=('$SUM')" /tmp/arch/PKGBUILD
+          (cd /tmp/arch && su builder -c "makepkg --nobuild --nodeps")
+          cp /tmp/arch/PKGBUILD out/PKGBUILD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arch-pkgbuild
+          path: out/PKGBUILD
+          if-no-files-found: error
+
   github-release:
     if: github.ref_type == 'tag'
-    needs: [version, package]
+    needs: [version, package, arch]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -103,6 +139,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: upload
+          pattern: sqail-*
           merge-multiple: true
       - name: Write current.json for the portal
         run: |

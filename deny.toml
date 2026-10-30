@@ -7,7 +7,15 @@ all-features = false
 # Every exception needs a reason and should be revisited on upgrades.
 # (cargo-audit additionally ignores RUSTSEC-2026-0097, see .cargo/audit.toml:
 # rand 0.7 via tiberius' Windows-only `winauth`; not reachable from sqail.)
-ignore = []
+ignore = [
+    # zvariant, zvariant_derive and zbus_names are flagged unmaintained with no
+    # successor yet. They come in through keyring → secret-service → zbus, the
+    # Linux Secret Service backend for the UI's API token. Revisit when zbus
+    # moves off them or keyring offers another D-Bus backend.
+    { id = "RUSTSEC-2026-0370", reason = "zvariant unmaintained; via keyring/zbus, no successor yet" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names unmaintained; via keyring/zbus, no successor yet" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive unmaintained; via keyring/zbus, no successor yet" },
+]
 
 [licenses]
 # Permissive licences only (the app ships as a single binary).

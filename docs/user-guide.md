@@ -203,7 +203,11 @@ columns and functions of the current connection. After `alias.` it lists
 that alias's columns: tables (`FROM orders o`), CTEs (`WITH x AS (…)`) and
 subqueries (`FROM (SELECT …) s`), with the innermost subquery winning when
 an alias is reused. A column name shared by several tables in the query is
-offered qualified (`o.id`, `c.id`).
+offered qualified (`o.id`, `c.id`). Where only a table fits it offers
+tables, schemas and CTEs instead of columns: after `FROM`, `JOIN`,
+`CROSS`/`OUTER APPLY`, `UPDATE`, `INTO`, `MERGE … USING`, a comma in the
+`FROM` list (also after an alias or a table hint such as
+`WITH (NOLOCK)`), and on SQL Server after `INSERT`, `DELETE` and `MERGE`.
 
 **Transactions:** every tab has its own server session. `BEGIN … COMMIT`
 spans runs, and the status bar shows **in transaction** while one is open.

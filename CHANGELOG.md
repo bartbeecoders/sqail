@@ -14,6 +14,11 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
   the tab menu or Settings → Tabs, stay at the front of the one row). They
   are tinted and marked ⚑, have no close button, and are remembered with the
   workspace.
+- **Fix:** completion offers tables, not columns, where only a table fits:
+  after a comma in the `FROM` list following an alias or a table hint
+  (`FROM orders AS o, …`, `FROM t WITH (NOLOCK), …`), after
+  `CROSS`/`OUTER APPLY` and `MERGE … USING`, and after T-SQL `INSERT`,
+  `DELETE` and `MERGE` without `INTO`/`FROM` (#1).
 
 ## 1.4.0 — 2026-10-30
 

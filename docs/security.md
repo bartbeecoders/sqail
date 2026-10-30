@@ -108,5 +108,6 @@ sqail ──TLS 1.3 + bearer token (+ optional client cert)──▶ sqail-servi
 
 ## Reporting a vulnerability
 
-Please report privately to the maintainer (see the repository's contact
-details) rather than opening a public issue.
+Please report privately through
+[GitHub's private vulnerability reporting](https://github.com/bartbeecoders/sqail/security/advisories/new)
+rather than opening a public issue; see [SECURITY.md](../SECURITY.md).

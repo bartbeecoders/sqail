@@ -11,7 +11,9 @@ can run on your own machine (the default) or on a server your team shares.
 `./install.sh`. Both binaries go to `~/.local/bin`, and a launcher entry and
 icon are added. `./install.sh --prefix /usr` installs system-wide (as root),
 and `./install.sh --uninstall` removes everything again. On Arch/Omarchy you
-can also build the package from `packaging/arch/PKGBUILD`.
+can also build the package with the `PKGBUILD` attached to each GitHub release
+(it pins the source tarball's checksum): put it in an empty folder and run
+`makepkg -si`.
 
 **Windows:** run the MSI, or unzip the portable
 `sqail-<version>-windows-x64.zip` anywhere and start `sqail.exe`.

@@ -250,8 +250,10 @@ This installs `sqail` and `sqail-service`, a launcher entry, and
 sqail-service as a **systemd user unit**, which it starts. It then prints a
 sign-in link for the admin page. Add `--no-service` to skip the unit.
 
-**Arch / Omarchy:** build the package from this repository with
-`cd packaging/arch && makepkg -si`.
+**Arch / Omarchy:** download the `PKGBUILD` attached to the GitHub release
+into an empty folder and run `makepkg -si`. It pins the source tarball's
+checksum. `cd packaging/arch && makepkg -si` from a checkout works too, without
+the checksum.
 
 ### Just me
 

@@ -12,7 +12,8 @@ use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use futures::StreamExt;
 use sqail_proto::{
-    CreateSession, NDJSON, QUERY_ID_HEADER, QueryEvent, QueryRequest, Scope, SessionInfo,
+    ConnectionParams, CreateSession, NDJSON, QUERY_ID_HEADER, QueryEvent, QueryRequest, Scope,
+    SessionInfo,
 };
 use tokio::sync::{OwnedMutexGuard, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
@@ -21,11 +22,11 @@ use uuid::Uuid;
 
 use super::pool_for;
 use crate::auth::Principal;
-use crate::engine::{Conn, DbError, EventSink, ExecRequest, Pooled};
+use crate::engine::{Conn, DbError, EventSink, ExecRequest, Pooled, pg_guard};
 use crate::error::{ApiError, ApiResult};
 use crate::sessions::Session;
 use crate::state::{AppState, RunningQuery};
-use crate::store::AuditEvent;
+use crate::store::{AuditEvent, StoredConnection};
 
 /// Grace period for a cancelled query to stop before its connection is dropped.
 const CANCEL_GRACE: Duration = Duration::from_secs(5);
@@ -51,7 +52,8 @@ pub async fn run(
     headers: HeaderMap,
     Json(req): Json<QueryRequest>,
 ) -> ApiResult<Response> {
-    let (_, pool) = pool_for(&state, &p, id)?;
+    let (stored, pool) = pool_for(&state, &p, id)?;
+    check_read_only(&stored, &req.sql)?;
     let query_id = query_id(&headers)?;
     // Connect before answering so connection errors are a proper HTTP error.
     let conn = pool.get().await?;
@@ -73,6 +75,20 @@ pub async fn cancel(
             Ok(StatusCode::ACCEPTED)
         }
         _ => Err(ApiError::not_found("running query")),
+    }
+}
+
+/// Refuse SQL that would switch a read-only PostgreSQL profile to
+/// read-write. A second line of defence; see `engine::pg_guard`.
+pub(crate) fn check_read_only(stored: &StoredConnection, sql: &str) -> ApiResult<()> {
+    if !stored.info.read_only || !matches!(stored.info.params, ConnectionParams::Postgres(_)) {
+        return Ok(());
+    }
+    match pg_guard::read_only_violation(sql) {
+        None => Ok(()),
+        Some(what) => Err(ApiError::forbidden(format!(
+            "{what} is not allowed on a read-only connection"
+        ))),
     }
 }
 
@@ -129,6 +145,7 @@ fn start(
         sql: req.sql,
         params: req.params,
         max_rows,
+        single_statement: req.single_statement,
     };
     tokio::spawn(drive(
         state,
@@ -208,7 +225,7 @@ async fn drive(
     }
 
     let session_in_tx = match &mut target {
-        Target::Pooled(c) => {
+        Target::Pooled(_) => {
             if in_tx == Some(true) {
                 let _ = sink
                     .send(QueryEvent::Message {
@@ -219,9 +236,6 @@ async fn drive(
                     })
                     .await;
                 broken = true;
-            }
-            if broken {
-                c.mark_broken();
             }
             None
         }
@@ -267,6 +281,18 @@ async fn drive(
         duration_ms: Some(elapsed_ms as i64),
         success: result.is_ok(),
     });
+    // End the response before the reset: the client has everything.
+    drop(sink);
+
+    if let Target::Pooled(c) = target {
+        if broken {
+            c.discard();
+        } else {
+            // The script may have changed session state (search_path, role,
+            // temp tables, ...) that must not reach the next borrower.
+            c.reset_and_release().await;
+        }
+    }
 }
 
 /// Execute with cancellation and timeout. Returns the result and whether the
@@ -409,7 +435,8 @@ pub async fn session_run(
 ) -> ApiResult<Response> {
     let session = owned_session(&state, &p, id)?;
     // Re-check the profile: it may have been made writable/deleted meanwhile.
-    pool_for(&state, &p, session.connection_id)?;
+    let (stored, _) = pool_for(&state, &p, session.connection_id)?;
+    check_read_only(&stored, &req.sql)?;
     let guard = session
         .conn
         .clone()

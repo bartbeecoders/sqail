@@ -34,8 +34,9 @@ async fn logs_contain_no_secrets_or_row_values() {
         .init();
 
     let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("service")).unwrap();
     let mut cfg = sqail_service::Config {
-        data_dir: dir.path().to_path_buf(),
+        data_dir: dir.path().join("service"),
         bind: "127.0.0.1:0".parse().unwrap(),
         docs_ui: false,
         ..Default::default()

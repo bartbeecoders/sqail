@@ -560,6 +560,7 @@ impl SqailApp {
             params: Vec::new(),
             max_rows: Some(self.settings.max_rows),
             timeout_ms: None,
+            single_statement: false,
         };
         self.worker.spawn(move |sink| async move {
             let fail = |error: String| Msg::QueryFailed {
@@ -1155,8 +1156,39 @@ impl SqailApp {
                 .map(|f| f.path().to_path_buf())
         };
         if whole {
-            let (Some(client), sql) = (self.service.client.clone(), run.sql.clone()) else {
+            // Re-run only the statement behind the shown result, on the tab's
+            // session (temp tables, settings, uncommitted rows), and only if
+            // it just reads.
+            let crate::results::Pane::Result(i) = run.pane else {
+                self.notify("Show a result set to export it.", true);
                 return;
+            };
+            if run.running {
+                self.notify("Wait for the query to finish, then export.", true);
+                return;
+            }
+            let Some(client) = self.service.client.clone() else {
+                return;
+            };
+            let finished = !(run.failed || run.cancelled);
+            let sql = match crate::transfer::statement_for_result(
+                &run.sql,
+                engine,
+                i,
+                run.results.len(),
+                finished,
+            ) {
+                Ok(sql) => sql,
+                Err(e) => return self.notify(e, true),
+            };
+            let columns: Vec<String> = run.results[i]
+                .columns
+                .iter()
+                .map(|c| c.name.clone())
+                .collect();
+            let on = match tab.session.filter(|(c, _)| *c == conn) {
+                Some((_, s)) => On::Session(s),
+                None => On::Connection(conn),
             };
             self.worker.spawn(move |sink| async move {
                 let Some(path) = pick().await else { return };
@@ -1170,7 +1202,9 @@ impl SqailApp {
                         });
                     }
                 };
-                let res = export_query(&client, conn, engine, &sql, &path, format, progress).await;
+                let cols = Some(columns.as_slice());
+                let res =
+                    export_query(&client, on, engine, &sql, cols, &path, format, progress).await;
                 sink.send(match res {
                     Ok(n) => Msg::Notice {
                         text: format!("Exported {n} rows to {}", path.display()),

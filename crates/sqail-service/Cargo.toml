@@ -48,7 +48,7 @@ hex = "0.4"
 tokio-postgres = { version = "0.7.18", features = ["with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
 tokio-postgres-rustls = "0.14"
 tiberius = { version = "0.13", default-features = false, features = ["tds80", "rustls", "chrono", "sql-browser-tokio"] }
-rusqlite = { version = "0.40", features = ["bundled", "column_decltype"] }
+rusqlite = { version = "0.40", features = ["bundled", "column_decltype", "hooks"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 

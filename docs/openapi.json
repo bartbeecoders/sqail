@@ -1529,6 +1529,10 @@
             },
             "type": "array"
           },
+          "single_statement": {
+            "description": "Refuse the request unless `sql` is exactly one statement (no `GO`\neither). Checked by the engine where it can (Postgres parses it as a\nprepared statement, SQLite checks the prepared statement's tail);\nSQL Server is best effort: one batch, one `;`-separated statement and\nno statement keyword (transaction control, DDL, control flow) after\nthe first word.",
+            "type": "boolean"
+          },
           "sql": {
             "description": "One or more statements. SQL Server scripts may use `GO` separators.\nWith `params`, exactly one statement is allowed; placeholders are the\nengine's native ones (`$1` Postgres, `@P1` SQL Server, `?1` SQLite).",
             "type": "string"

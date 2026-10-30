@@ -1,7 +1,6 @@
 //! Connection pools per profile, rebuilt when a profile changes.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
@@ -10,7 +9,7 @@ use uuid::Uuid;
 
 use super::mssql::MssqlDriver;
 use super::pg::PgDriver;
-use super::sqlite::SqliteDriver;
+use super::sqlite::{PathPolicy, SqliteDriver};
 use super::{Driver, Pool, Result};
 
 /// Everything needed to open connections for one profile.
@@ -20,7 +19,7 @@ pub struct DriverSpec<'a> {
     /// PEM private key for a PostgreSQL client certificate.
     pub ssl_client_key: Option<&'a str>,
     pub read_only: bool,
-    pub sqlite_dirs: &'a [PathBuf],
+    pub sqlite: PathPolicy<'a>,
 }
 
 pub fn build_driver(spec: &DriverSpec<'_>) -> Result<Arc<dyn Driver>> {
@@ -32,9 +31,7 @@ pub fn build_driver(spec: &DriverSpec<'_>) -> Result<Arc<dyn Driver>> {
             spec.read_only,
         )?),
         ConnectionParams::Mssql(p) => Arc::new(MssqlDriver::new(p, spec.password, spec.read_only)?),
-        ConnectionParams::Sqlite(p) => {
-            Arc::new(SqliteDriver::new(p, spec.read_only, spec.sqlite_dirs)?)
-        }
+        ConnectionParams::Sqlite(p) => Arc::new(SqliteDriver::new(p, spec.read_only, spec.sqlite)?),
     })
 }
 

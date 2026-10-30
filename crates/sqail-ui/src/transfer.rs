@@ -334,6 +334,7 @@ pub async fn export_query(
         // As many as the service allows.
         max_rows: Some(u64::MAX),
         timeout_ms: None,
+        single_statement: false,
     };
     let mut stream = client.query(on, &req).await?;
     let mut exporter: Option<Exporter> = None;
@@ -520,6 +521,7 @@ async fn exec(client: &Client, session: Uuid, sql: String, params: Vec<Param>) -
                 params,
                 max_rows: Some(1),
                 timeout_ms: None,
+                single_statement: false,
             },
         )
         .await?;

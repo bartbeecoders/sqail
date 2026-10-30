@@ -188,6 +188,24 @@ pub struct ResultSet {
     /// Sorted view: `order[i]` is the row shown at position `i`.
     pub order: Option<Vec<u32>>,
     pub sort: Option<(usize, bool)>,
+    /// Column widths for the grid, measured once per result set.
+    pub widths: ColumnWidths,
+}
+
+/// The grid's column widths for one result set. The grid measures the first
+/// rows once (and again only while they are still arriving), not every frame.
+#[derive(Debug, Default)]
+pub struct ColumnWidths {
+    /// Rows measured so far.
+    pub sampled: usize,
+    /// Natural width of each column, in characters.
+    pub chars: Vec<usize>,
+    /// Width of each column as shown in the last frame, in points.
+    pub shown: Vec<f32>,
+    /// Widths (points) to start from instead of `chars`, after an auto-fit.
+    pub initial: Option<Vec<f32>>,
+    /// Drop the table's remembered widths next frame and use `initial`.
+    pub reset: bool,
 }
 
 impl ResultSet {
@@ -210,6 +228,7 @@ impl ResultSet {
             truncated: false,
             order: None,
             sort: None,
+            widths: ColumnWidths::default(),
         }
     }
 

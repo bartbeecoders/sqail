@@ -238,6 +238,13 @@ transaction that is **always rolled back**, so it is safe for `UPDATE` and
 * Click the **▲▼** on a column header to sort (ascending, then descending,
   then back to the original order). Sorting waits until the result has
   finished loading.
+* Column widths start from the column name and the first 1 000 rows, up to
+  about 80 characters. Drag a column's right border to resize it, or
+  double-click the border to fit the column to its values (the first
+  20 000 rows). Right-click a column name for *Auto-fit column* or
+  *Auto-fit all columns*.
+* A value that is cut off (too wide, or more than one line) shows in full
+  when you hover over it, up to 2 000 characters and 40 lines.
 * Double-click a cell to see its full value (long text, JSON, binary as hex).
 * **Export** saves the rows in the grid, or re-runs the query and streams
   every row straight to a file, as CSV, JSON, Excel (.xlsx) or SQL `INSERT`s.

@@ -14,6 +14,11 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
   the tab menu or Settings → Tabs, stay at the front of the one row). They
   are tinted and marked ⚑, have no close button, and are remembered with the
   workspace.
+- **Long values in the result grid.** Columns start wider: up to about
+  80 characters (was 48), measured over the first 1 000 rows (was 50) and
+  again as rows stream in. A cut-off value shows in full on hover. Double-click
+  a column's right border, or right-click its name → *Auto-fit column* /
+  *Auto-fit all columns*, to fit the column to its values (#48).
 
 ## 1.4.0 — 2026-10-30
 

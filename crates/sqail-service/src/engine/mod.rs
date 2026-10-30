@@ -113,6 +113,8 @@ pub struct ExecRequest {
     pub sql: String,
     pub params: Vec<Param>,
     pub max_rows: u64,
+    /// Refuse anything but exactly one statement ([`sqail_proto::QueryRequest::single_statement`]).
+    pub single_statement: bool,
 }
 
 /// Builds the result-set events for a driver: numbering, batching, truncation.
@@ -285,6 +287,7 @@ pub async fn fetch_results(
         sql: sql.to_string(),
         params: Vec::new(),
         max_rows: u64::MAX,
+        single_statement: false,
     };
     conn.execute(&req, &sink).await?;
     let EventSink::Collect(buf) = sink else {
@@ -324,6 +327,7 @@ pub async fn fetch_rows(
         sql: sql.to_string(),
         params,
         max_rows: u64::MAX,
+        single_statement: false,
     };
     conn.execute(&req, &sink).await?;
     let EventSink::Collect(buf) = sink else {
@@ -636,6 +640,7 @@ mod tests {
             sql: "x".into(),
             params: vec![],
             max_rows: 1,
+            single_statement: false,
         };
         let sink = EventSink::Collect(Mutex::new(Vec::new()));
         let run = tokio::time::timeout(Duration::from_millis(10), c.conn().execute(&req, &sink));

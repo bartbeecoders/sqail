@@ -134,6 +134,8 @@ pub struct Shape {
     pub statements: usize,
     /// Mentions `OUTPUT` (DML that returns rows).
     pub has_output: bool,
+    /// Every word outside strings, names and comments, uppercased.
+    pub words: Vec<String>,
 }
 
 impl Shape {
@@ -181,7 +183,78 @@ pub fn shape(sql: &str) -> Shape {
         leading: words.first().cloned(),
         statements,
         has_output: words.iter().any(|w| w == "OUTPUT"),
+        words,
     }
+}
+
+/// T-SQL reserved words that begin a statement of their own and cannot
+/// appear inside another one. Being reserved, they are never a bare name.
+const STATEMENT_WORDS: &[&str] = &[
+    "BACKUP",
+    "BEGIN",
+    "BREAK",
+    "CHECKPOINT",
+    "CLOSE",
+    "COMMIT",
+    "CONTINUE",
+    "CREATE",
+    "DBCC",
+    "DEALLOCATE",
+    "DECLARE",
+    "DENY",
+    "DROP",
+    "EXEC",
+    "EXECUTE",
+    "GOTO",
+    "GRANT",
+    "IF",
+    "KILL",
+    "OPEN",
+    "PRINT",
+    "RAISERROR",
+    "READTEXT",
+    "RECONFIGURE",
+    "RESTORE",
+    "RETURN",
+    "REVERT",
+    "REVOKE",
+    "ROLLBACK",
+    "SAVE",
+    "SETUSER",
+    "SHUTDOWN",
+    "TRUNCATE",
+    "UPDATETEXT",
+    "USE",
+    "WAITFOR",
+    "WHILE",
+    "WRITETEXT",
+];
+
+/// Best-effort check that `sql` is one T-SQL statement: one batch (no `GO`),
+/// no `;` between statements, and no statement-only keyword after the first
+/// word. T-SQL needs no separator between statements, so this cannot be
+/// exact (`SELECT 1 SELECT 2` passes); it stops a second statement that
+/// controls the transaction, changes the schema or runs code.
+pub fn check_single_statement(sql: &str) -> Result<(), String> {
+    let batches = split_go(sql);
+    if batches.len() > 1 || batches.iter().any(|b| b.repeat > 1) {
+        return Err("expected a single statement, got several batches (GO)".into());
+    }
+    let sh = shape(sql);
+    if sh.statements > 1 {
+        return Err("expected a single statement, got several".into());
+    }
+    if let Some(w) = sh
+        .words
+        .iter()
+        .skip(1)
+        .find(|w| STATEMENT_WORDS.contains(&w.as_str()))
+    {
+        return Err(format!(
+            "expected a single statement; {w} would start another one"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -258,5 +331,34 @@ mod tests {
         assert!(!shape("UPDATE t SET a = 1 OUTPUT inserted.a").is_single_dml());
         assert!(!shape("SELECT 1").is_single_dml());
         assert_eq!(shape("SELECT 1; SELECT 2;").statements, 2);
+    }
+
+    #[test]
+    fn single_statement_check() {
+        for ok in [
+            "SELECT 1",
+            "SELECT 1;",
+            "UPDATE t SET a = 1 WHERE b = 'x; COMMIT'",
+            "BEGIN TRANSACTION",
+            "SELECT [commit] FROM t -- ROLLBACK",
+            "WITH c AS (SELECT 1 AS a) SELECT a FROM c UNION SELECT 2",
+        ] {
+            assert_eq!(check_single_statement(ok), Ok(()), "{ok}");
+        }
+        for bad in [
+            "SELECT 1; SELECT 2",
+            "SELECT 1\nGO\nSELECT 2",
+            "SELECT 1\nGO 2",
+            "SELECT 1 COMMIT",
+            "SELECT 1 ROLLBACK TRANSACTION",
+            "SELECT 1 BEGIN TRAN",
+            "SELECT 1 DROP TABLE t",
+            "SELECT 1 EXEC sp_who",
+            "SELECT 1 IF 1 = 1 PRINT 'x'",
+            "SELECT 'a''' COMMIT",
+            "SELECT 1 /* /* */ */ COMMIT",
+        ] {
+            assert!(check_single_statement(bad).is_err(), "{bad}");
+        }
     }
 }

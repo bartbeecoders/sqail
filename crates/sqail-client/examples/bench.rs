@@ -43,6 +43,7 @@ async fn stream(client: &Client, conn: uuid::Uuid, sql: &str) -> anyhow::Result<
         params: vec![],
         max_rows: Some(u64::MAX),
         timeout_ms: None,
+        single_statement: false,
     };
     let base = rss_mb();
     let mut peak = base;

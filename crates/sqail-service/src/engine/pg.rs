@@ -271,6 +271,13 @@ impl Conn for PgConn {
     async fn execute(&mut self, req: &ExecRequest, sink: &EventSink) -> Result<()> {
         let mut out = ResultWriter::new(sink, req.max_rows);
         let res = if req.params.is_empty() {
+            if req.single_statement {
+                // A prepared statement holds exactly one command: Postgres
+                // rejects anything more at parse time, before running any.
+                // Run it with the simple protocol afterwards so values keep
+                // their text form, exactly as for any other query.
+                self.client.prepare(&req.sql).await.map_err(db_err)?;
+            }
             self.run_simple(&req.sql, &mut out).await
         } else {
             self.run_prepared(&req.sql, &req.params, &mut out).await

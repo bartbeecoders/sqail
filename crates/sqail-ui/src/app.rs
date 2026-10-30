@@ -560,6 +560,7 @@ impl SqailApp {
             params: Vec::new(),
             max_rows: Some(self.settings.max_rows),
             timeout_ms: None,
+            single_statement: false,
         };
         self.worker.spawn(move |sink| async move {
             let fail = |error: String| Msg::QueryFailed {

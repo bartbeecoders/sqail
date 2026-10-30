@@ -237,10 +237,18 @@ impl Conn for SqliteConn {
         let sql = req.sql.clone();
         let params = req.params.clone();
         let max_rows = req.max_rows;
+        let single = req.single_statement;
         let db = self.db.clone();
         let worker = tokio::task::spawn_blocking(move || {
             let db = db.lock().unwrap_or_else(|e| e.into_inner());
-            run(&db, &sql, &params, max_rows, &EventSink::Channel(tx))
+            run(
+                &db,
+                &sql,
+                &params,
+                single,
+                max_rows,
+                &EventSink::Channel(tx),
+            )
         });
         let mut forward_err = None;
         while let Some(ev) = rx.recv().await {
@@ -290,16 +298,19 @@ fn run(
     db: &rusqlite::Connection,
     sql: &str,
     params: &[Param],
+    single_statement: bool,
     max_rows: u64,
     sink: &EventSink,
 ) -> Result<()> {
     let mut index = 0u32;
-    if params.is_empty() {
+    if params.is_empty() && !single_statement {
         let mut batch = Batch::new(db, sql);
         while let Some(mut stmt) = batch.next().map_err(db_err)? {
             run_stmt(db, &mut stmt, &[], max_rows, &mut index, sink)?;
         }
     } else {
+        // `prepare` refuses SQL with anything but comments and `;` after the
+        // first statement (`Error::MultipleStatement`).
         let mut stmt = db.prepare(sql).map_err(db_err)?;
         run_stmt(db, &mut stmt, params, max_rows, &mut index, sink)?;
     }

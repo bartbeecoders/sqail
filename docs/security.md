@@ -55,7 +55,7 @@ sqail ──TLS 1.3 + bearer token (+ optional client cert)──▶ sqail-servi
 | Crashes on hostile input | Lexers, splitters, completer, formatter and the NDJSON decoder are fuzzed | `cargo run --profile fuzz -p sqail-fuzz -- <secs>` (10 min: 13.2M inputs, 0 crashes; one real bug found and fixed; 2 min on every CI run) |
 | Abandoned transactions holding locks | A transaction left open outside a session is rolled back and reported; idle sessions close (rollback); the UI asks before closing a tab or quitting with one open | `open_transaction_outside_session_is_rolled_back`, UI test |
 | EXPLAIN ANALYZE changing data | Runs inside a transaction that is always rolled back | engine matrix (`sum(price)` unchanged) |
-| The AI assistant changing data, or doing more than read | The CLI runs with no built-in tools (Claude Code `--tools ""` + `--strict-mcp-config`; Grok `--tools search_tool,use_tool` + `--permission-mode dontAsk` + an allow list of sqail's tools, which also denies the user's other MCP servers). `run_query` accepts one `SELECT`/`WITH`/`VALUES` statement without writing keywords or side-effect functions, and runs it in a transaction that is always rolled back (`BEGIN READ ONLY` on Postgres). The service token reaches `sqail mcp` through the environment, never arguments or files | `assistant::guard` tests, `mcp_tools_on_sql_server` (a forced `INSERT` is rolled back), `postgres_assistant_transactions_are_read_only`, `assistant_panel_streams_an_answer_and_inserts_sql` |
+| The AI assistant changing data, or doing more than read | The CLI runs with no built-in tools (Claude Code `--tools ""` + `--strict-mcp-config`; Grok `--tools search_tool,use_tool` + `--permission-mode dontAsk` + an allow list of sqail's tools, which also denies the user's other MCP servers). `run_query` accepts one `SELECT`/`WITH`/`VALUES` statement without writing, transaction-control, DDL or admin keywords, side-effect functions or unterminated strings/comments; the service then refuses anything but a single statement (`single_statement`: Postgres parses it as a prepared statement, SQLite checks the prepared statement's tail, SQL Server is best effort); and it runs in a transaction that is always rolled back (`BEGIN READ ONLY` on Postgres). The service token reaches `sqail mcp` through the environment, never arguments or files | `assistant::guard` tests (adversarial inputs per engine), `adversarial_queries_on_*_change_nothing`, `single_statement_check`, `mcp_tools_on_sql_server` (a forced `INSERT` is rolled back), `postgres_assistant_transactions_are_read_only`, `assistant_panel_streams_an_answer_and_inserts_sql` |
 | Vulnerable or non-permissive dependencies | `cargo audit` and `cargo deny` (advisories, licences, sources) in the gate | `scripts/check.sh` |
 
 ## Known limitations (accepted for 1.0)
@@ -66,6 +66,12 @@ sqail ──TLS 1.3 + bearer token (+ optional client cert)──▶ sqail-servi
   user's service token, so it sees exactly what the user may see. On SQL
   Server a rolled-back transaction undoes writes but can't stop every side
   effect of a procedure; the statement check refuses `EXEC` for that reason.
+  The statement check and the rollback are defence in depth, not a
+  permission system: give the connection the assistant uses a **low-privilege
+  login** that can only read (Postgres: a role with `SELECT` grants only, or
+  `default_transaction_read_only`; SQL Server: `db_datareader` and nothing
+  else; SQLite: a read-only profile). SQL Server's single-statement check is
+  best effort, because T-SQL needs no separator between statements.
 
 * **SQL Server read-only profiles** use `ApplicationIntent=ReadOnly`, which is
   only enforced on availability-group secondaries. Use a login with read-only

@@ -145,6 +145,7 @@ fn start(
         sql: req.sql,
         params: req.params,
         max_rows,
+        single_statement: req.single_statement,
     };
     tokio::spawn(drive(
         state,

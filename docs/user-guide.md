@@ -341,10 +341,14 @@ result.
 
 **What it can't do:** change anything. `run_query` accepts only a single
 `SELECT` / `WITH` / `VALUES` statement: writes, DDL, `EXEC`, `SELECT … INTO`,
-`FOR UPDATE`, multiple statements and functions with side effects are
-refused. Every assistant query also runs in its own transaction that is always
-rolled back (read-only on PostgreSQL), so even something that slipped through
-would be undone. The CLI gets no other tools: no shell, no files, no web.
+`FOR UPDATE`, transaction control (`COMMIT`, `ROLLBACK`, …), session and
+admin commands, multiple statements, unfinished strings or comments and
+functions with side effects are refused. The service also refuses anything
+but a single statement for the assistant. Every assistant query also runs in
+its own transaction that is always rolled back (read-only on PostgreSQL), so
+even something that slipped through would be undone. For the strongest
+guarantee, point the assistant at a connection whose login can only read
+(see [security](security.md)). The CLI gets no other tools: no shell, no files, no web.
 When you ask for changes, it writes the SQL for you to review and run
 yourself.
 

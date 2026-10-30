@@ -19,7 +19,7 @@ use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
 use super::entra::Entra;
-use super::split::{shape, split_go};
+use super::split::{check_single_statement, shape, split_go};
 use super::value::{bytes, float, int, text};
 use super::{
     Cancel, Canceller, Conn, DbError, Driver, EventSink, ExecRequest, Result, ResultWriter,
@@ -308,6 +308,9 @@ impl Conn for MssqlConn {
     async fn execute(&mut self, req: &ExecRequest, sink: &EventSink) -> Result<()> {
         let mut out = ResultWriter::new(sink, req.max_rows);
         let res = async {
+            if req.single_statement {
+                check_single_statement(&req.sql).map_err(DbError::Invalid)?;
+            }
             if !req.params.is_empty() {
                 return self.run_batch(&req.sql, &req.params, &mut out).await;
             }
@@ -362,6 +365,16 @@ impl Conn for MssqlConn {
         Ok(row
             .and_then(|r| r.get::<&str, _>(0).map(str::to_string))
             .unwrap_or_default())
+    }
+
+    async fn reset(&mut self) -> Result<()> {
+        // tiberius has no sp_reset_connection, and a script can change far
+        // more than can be checked (USE, SET LANGUAGE/DATEFORMAT/ROWCOUNT,
+        // SHOWPLAN, #temp tables, EXECUTE AS ...). Connections that ran user
+        // SQL are closed; only catalog calls reuse pooled connections.
+        Err(DbError::Unsupported(
+            "SQL Server connections are not reused after user SQL".into(),
+        ))
     }
 
     fn engine(&self) -> Engine {

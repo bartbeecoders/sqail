@@ -9,11 +9,31 @@ use sqail_client::{Client, On};
 use uuid::Uuid;
 
 use crate::results::{Cell, ResultSet};
-use crate::sql::lex::{Kind, tokenize};
+use crate::sql::lex::{Kind, Token, tokenize};
 use crate::sql::quote_ident;
 
+/// One item of a `SELECT` list, as far as editing cares.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectItem {
+    /// `*` or `alias.*`: every table column, in table order.
+    Star,
+    /// A bare table column (`col`, `alias.col`) without `AS`, so the result
+    /// column really is that table column.
+    Column(String),
+    /// Anything else (`x AS id`, literals, expressions): read-only.
+    Other,
+}
+
+/// What an editable `SELECT` reads: its single table and its select list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Source {
+    pub schema: Option<String>,
+    pub table: String,
+    pub items: Vec<SelectItem>,
+}
+
 /// The single table a `SELECT` reads from, if it is simple enough to edit.
-pub fn source_table(sql: &str, engine: Engine) -> Option<(Option<String>, String)> {
+pub fn source_table(sql: &str, engine: Engine) -> Option<Source> {
     let toks: Vec<_> = tokenize(sql, Some(engine))
         .into_iter()
         .filter(|t| !matches!(t.kind, Kind::Space | Kind::Comment))
@@ -41,6 +61,9 @@ pub fn source_table(sql: &str, engine: Engine) -> Option<(Option<String>, String
         "HAVING",
         "INTO",
         "OVER",
+        "APPLY",
+        "PIVOT",
+        "UNPIVOT",
     ];
     if count("SELECT") != 1 || count("FROM") != 1 || blockers.iter().any(|b| count(b) > 0) {
         return None;
@@ -77,7 +100,115 @@ pub fn source_table(sql: &str, engine: Engine) -> Option<(Option<String>, String
         }
         i += 1;
     }
-    Some((schema, table))
+    let items = select_items(sql, &toks[1..from]);
+    Some(Source {
+        schema,
+        table,
+        items,
+    })
+}
+
+/// Split the tokens between `SELECT` and `FROM` into items.
+fn select_items(sql: &str, toks: &[Token]) -> Vec<SelectItem> {
+    let is_word =
+        |t: &Token, w: &str| t.kind == Kind::Word && sql[t.range.clone()].eq_ignore_ascii_case(w);
+    // Skip `ALL` and T-SQL `TOP n | TOP (n) [PERCENT] [WITH TIES]`.
+    let mut i = 0;
+    if toks.first().is_some_and(|t| is_word(t, "ALL")) {
+        i += 1;
+    }
+    if toks.get(i).is_some_and(|t| is_word(t, "TOP")) {
+        i += 1;
+        if toks.get(i).is_some_and(|t| t.kind == Kind::Open) {
+            let mut depth = 0;
+            while let Some(t) = toks.get(i) {
+                i += 1;
+                match t.kind {
+                    Kind::Open => depth += 1,
+                    Kind::Close => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        } else {
+            i += 1;
+        }
+        if toks.get(i).is_some_and(|t| is_word(t, "PERCENT")) {
+            i += 1;
+        }
+        if toks.get(i).is_some_and(|t| is_word(t, "WITH"))
+            && toks.get(i + 1).is_some_and(|t| is_word(t, "TIES"))
+        {
+            i += 2;
+        }
+    }
+    let mut items = Vec::new();
+    let mut depth = 0i32;
+    let mut item: Vec<&Token> = Vec::new();
+    for t in toks.get(i..).unwrap_or_default() {
+        match t.kind {
+            Kind::Open => depth += 1,
+            Kind::Close => depth -= 1,
+            Kind::Punct if depth == 0 && &sql[t.range.clone()] == "," => {
+                items.push(classify(sql, &item));
+                item.clear();
+                continue;
+            }
+            _ => {}
+        }
+        item.push(t);
+    }
+    items.push(classify(sql, &item));
+    items
+}
+
+/// `name`, `q.name`, `s.q.name` → a column; the same ending in `*` → star;
+/// anything else (aliases, literals, expressions) → other.
+fn classify(sql: &str, item: &[&Token]) -> SelectItem {
+    let text = |t: &Token| &sql[t.range.clone()];
+    let is_name = |t: &Token| match t.kind {
+        Kind::QuotedIdent => true,
+        // Keywords that look like names but are values.
+        Kind::Word => !matches!(
+            text(t).to_ascii_uppercase().as_str(),
+            "NULL"
+                | "TRUE"
+                | "FALSE"
+                | "DEFAULT"
+                | "CURRENT_DATE"
+                | "CURRENT_TIME"
+                | "CURRENT_TIMESTAMP"
+                | "CURRENT_USER"
+                | "SESSION_USER"
+                | "USER"
+                | "LOCALTIME"
+                | "LOCALTIMESTAMP"
+        ),
+        _ => false,
+    };
+    if item.len().is_multiple_of(2) || item.len() > 5 {
+        return SelectItem::Other;
+    }
+    let dots_ok = item
+        .iter()
+        .skip(1)
+        .step_by(2)
+        .all(|t| t.kind == Kind::Punct && text(t) == ".");
+    let parts: Vec<&Token> = item.iter().step_by(2).copied().collect();
+    let (last, quals) = parts.split_last().expect("odd length, so not empty");
+    if !dots_ok || !quals.iter().all(|q| is_name(q)) {
+        SelectItem::Other
+    } else if last.kind == Kind::Punct && text(last) == "*" {
+        SelectItem::Star
+    } else if is_name(last) {
+        SelectItem::Column(unquote(text(last)))
+    } else {
+        SelectItem::Other
+    }
 }
 
 fn unquote(s: &str) -> String {
@@ -90,6 +221,44 @@ fn unquote(s: &str) -> String {
         }
         _ => t.to_string(),
     }
+}
+
+/// The table column behind each result column, following the select list.
+/// `None` when the result doesn't line up with the select list.
+fn map_columns(
+    items: &[SelectItem],
+    result_columns: &[sqail_client::proto::Column],
+    table_columns: &[ColumnInfo],
+) -> Option<Vec<Option<ColumnInfo>>> {
+    let mut ordered: Vec<&ColumnInfo> = table_columns.iter().collect();
+    ordered.sort_by_key(|c| c.ordinal);
+    let mut out = Vec::with_capacity(result_columns.len());
+    let mut rcols = result_columns.iter();
+    for item in items {
+        match item {
+            SelectItem::Star => {
+                for t in &ordered {
+                    // `*` must expand to the table's columns, in order.
+                    if !rcols.next()?.name.eq_ignore_ascii_case(&t.name) {
+                        return None;
+                    }
+                    out.push(Some((*t).clone()));
+                }
+            }
+            SelectItem::Column(name) => {
+                let r = rcols.next()?;
+                let t = table_columns.iter().find(|t| {
+                    t.name.eq_ignore_ascii_case(name) && t.name.eq_ignore_ascii_case(&r.name)
+                });
+                out.push(t.cloned());
+            }
+            SelectItem::Other => {
+                rcols.next()?;
+                out.push(None);
+            }
+        }
+    }
+    rcols.next().is_none().then_some(out)
 }
 
 /// A new value for a cell: `None` = NULL.
@@ -117,39 +286,55 @@ pub struct EditState {
 }
 
 impl EditState {
-    /// Match result columns to the table. Fails unless the whole primary key
-    /// is in the result.
+    /// Match result columns to the table through the select list. Only bare
+    /// columns and `*` are editable; aliased columns, literals and
+    /// expressions are read-only. Fails unless the whole primary key is in
+    /// the result exactly once.
     pub fn new(
         engine: Engine,
-        schema: Option<String>,
-        table: String,
+        source: Source,
         result_columns: &[sqail_client::proto::Column],
         table_columns: &[ColumnInfo],
     ) -> Result<Self> {
-        let target: Vec<Option<ColumnInfo>> = result_columns
-            .iter()
-            .map(|c| {
-                table_columns
-                    .iter()
-                    .find(|t| t.name.eq_ignore_ascii_case(&c.name))
-                    .cloned()
-            })
-            .collect();
+        let Source {
+            schema,
+            table,
+            items,
+        } = source;
+        let Some(mut target) = map_columns(&items, result_columns, table_columns) else {
+            bail!("the result columns don't line up with the query's select list");
+        };
         let pk_cols: Vec<&ColumnInfo> = table_columns.iter().filter(|c| c.primary_key).collect();
         if pk_cols.is_empty() {
             bail!("{table} has no primary key, so rows cannot be identified");
         }
         let mut pk = Vec::new();
         for p in &pk_cols {
-            match target
+            let mut hits = target
                 .iter()
-                .position(|t| t.as_ref().is_some_and(|t| t.name == p.name))
-            {
-                Some(i) => pk.push(i),
-                None => bail!(
-                    "include the primary key column {} in the query to edit",
+                .enumerate()
+                .filter(|(_, t)| t.as_ref().is_some_and(|t| t.name == p.name))
+                .map(|(i, _)| i);
+            match (hits.next(), hits.next()) {
+                (Some(i), None) => pk.push(i),
+                (Some(_), Some(_)) => bail!(
+                    "the primary key column {} is selected more than once",
                     p.name
                 ),
+                (None, _) => bail!(
+                    "include the primary key column {} in the query, without an alias, to edit",
+                    p.name
+                ),
+            }
+        }
+        // A column selected twice: only the first copy is editable, so two
+        // cells never write the same column.
+        let mut seen = BTreeSet::new();
+        for t in &mut target {
+            if let Some(c) = t
+                && !seen.insert(c.name.clone())
+            {
+                *t = None;
             }
         }
         Ok(Self {
@@ -348,6 +533,7 @@ pub async fn apply(
                     params,
                     max_rows: Some(1),
                     timeout_ms: None,
+                    single_statement: false,
                 },
             )
             .await?;
@@ -399,7 +585,7 @@ mod tests {
 
     #[test]
     fn simple_selects_are_editable() {
-        let src = |s| source_table(s, Engine::Postgres);
+        let src = |s| source_table(s, Engine::Postgres).map(|s| (s.schema, s.table));
         assert_eq!(
             src("SELECT * FROM sales.products WHERE id < 10 ORDER BY id"),
             Some((Some("sales".into()), "products".into()))
@@ -415,8 +601,144 @@ mod tests {
         assert_eq!(src("UPDATE a SET x = 1"), None);
         assert_eq!(
             source_table("SELECT TOP (10) * FROM [sales].[products]", Engine::Mssql),
-            Some((Some("sales".into()), "products".into()))
+            Some(Source {
+                schema: Some("sales".into()),
+                table: "products".into(),
+                items: vec![SelectItem::Star],
+            })
         );
+        let mssql = |s| source_table(s, Engine::Mssql).map(|s| (s.schema, s.table));
+        assert_eq!(mssql("SELECT * FROM a CROSS APPLY f(a.id)"), None);
+        assert_eq!(mssql("SELECT * FROM a OUTER APPLY f(a.id)"), None);
+        assert_eq!(
+            mssql("SELECT * FROM a PIVOT (sum(x) FOR y IN ([1])) p"),
+            None
+        );
+        assert_eq!(mssql("SELECT * FROM a UNPIVOT (x FOR y IN (b, c)) u"), None);
+    }
+
+    #[test]
+    fn select_list_items() {
+        use SelectItem::{Column as C, Other as O, Star as S};
+        let items = |s, e| source_table(s, e).unwrap().items;
+        let pg = Engine::Postgres;
+        assert_eq!(
+            items(
+                "SELECT p.*, id, p.name, \"Mixed\", other_id AS id, other_id id, 'x' AS status, \
+                 a + b, coalesce(a, b), NULL, 42 FROM s.t p",
+                pg
+            ),
+            vec![
+                S,
+                C("id".into()),
+                C("name".into()),
+                C("Mixed".into()),
+                O,
+                O,
+                O,
+                O,
+                O,
+                O,
+                O
+            ]
+        );
+        assert_eq!(items("SELECT s.t.id FROM s.t", pg), vec![C("id".into())]);
+        let ms = Engine::Mssql;
+        assert_eq!(
+            items("SELECT TOP 5 PERCENT WITH TIES [id], x = id FROM t", ms),
+            vec![C("id".into()), O]
+        );
+        assert_eq!(items("SELECT ALL id FROM t", ms), vec![C("id".into())]);
+    }
+
+    fn info(name: &str, ordinal: i64, pk: bool) -> ColumnInfo {
+        ColumnInfo {
+            name: name.into(),
+            ordinal,
+            data_type: "int".into(),
+            nullable: !pk,
+            default: None,
+            primary_key: pk,
+        }
+    }
+
+    fn rcol(name: &str) -> Column {
+        Column {
+            name: name.into(),
+            type_name: "int4".into(),
+            logical: LogicalType::Int,
+        }
+    }
+
+    /// Build an edit state for `sql` against table t(id pk, other_id, status, name).
+    fn edit_for(sql: &str, result: &[&str]) -> Result<EditState> {
+        let tcols = [
+            info("id", 1, true),
+            info("other_id", 2, false),
+            info("status", 3, false),
+            info("name", 4, false),
+        ];
+        let rcols: Vec<Column> = result.iter().map(|n| rcol(n)).collect();
+        let source = source_table(sql, Engine::Postgres).expect("editable query");
+        EditState::new(Engine::Postgres, source, &rcols, &tcols)
+    }
+
+    #[test]
+    fn aliased_column_is_not_the_primary_key() {
+        // Mapping by result name would use other_id as the key (#67).
+        let err = edit_for("SELECT other_id AS id, name FROM t", &["id", "name"])
+            .err()
+            .expect("must refuse");
+        assert!(err.to_string().contains("primary key"), "{err}");
+        // Aliasing the key itself is refused as well.
+        assert!(edit_for("SELECT id AS key, name FROM t", &["key", "name"]).is_err());
+        // An alias that happens to be a table column name stays read-only.
+        let e = edit_for("SELECT id, other_id AS name FROM t", &["id", "name"]).unwrap();
+        assert!(e.editable(0));
+        assert!(!e.editable(1));
+    }
+
+    #[test]
+    fn literals_are_read_only() {
+        let e = edit_for("SELECT 'x' AS status, id FROM t", &["status", "id"]).unwrap();
+        assert!(!e.editable(0));
+        assert_eq!(e.pk, vec![1]);
+        let e = edit_for("SELECT NULL AS name, id FROM t", &["name", "id"]).unwrap();
+        assert!(!e.editable(0));
+    }
+
+    #[test]
+    fn duplicate_columns() {
+        let err = edit_for("SELECT id, id FROM t", &["id", "id"])
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("more than once"), "{err}");
+        // A duplicated non-key column: only the first copy is editable.
+        let e = edit_for("SELECT id, name, name FROM t", &["id", "name", "name"]).unwrap();
+        assert!(e.editable(1));
+        assert!(!e.editable(2));
+        // `*` plus the key again duplicates the key.
+        let all = ["id", "other_id", "status", "name"];
+        assert!(edit_for("SELECT *, id FROM t", &[&all[..], &["id"]].concat()).is_err());
+    }
+
+    #[test]
+    fn star_expands_in_table_order() {
+        let all = ["id", "other_id", "status", "name"];
+        let e = edit_for("SELECT * FROM t", &all).unwrap();
+        assert!((0..4).all(|c| e.editable(c)));
+        assert_eq!(e.pk, vec![0]);
+        let e = edit_for(
+            "SELECT 1 AS n, t.* FROM t",
+            &[&["n"][..], &all[..]].concat(),
+        )
+        .unwrap();
+        assert!(!e.editable(0));
+        assert_eq!(e.pk, vec![1]);
+        assert_eq!(e.target[4].as_ref().unwrap().name, "name");
+        // A result that doesn't line up (stale table info) is refused.
+        assert!(edit_for("SELECT * FROM t", &["id", "name"]).is_err());
+        assert!(edit_for("SELECT * FROM t", &["other_id", "id", "status", "name"]).is_err());
     }
 
     fn setup(engine: Engine) -> (EditState, ResultSet) {
@@ -449,14 +771,8 @@ mod tests {
             col("id", "integer", true),
             col("price", "numeric(10,2)", false),
         ];
-        let e = EditState::new(
-            engine,
-            Some("sales".into()),
-            "products".into(),
-            &rcols,
-            &tcols,
-        )
-        .unwrap();
+        let source = source_table("SELECT id, price, label FROM sales.products", engine).unwrap();
+        let e = EditState::new(engine, source, &rcols, &tcols).unwrap();
         let rs = ResultSet::for_test(
             rcols,
             vec![vec![
@@ -486,7 +802,8 @@ mod tests {
             default: None,
             primary_key: true,
         }];
-        let err = EditState::new(Engine::Postgres, None, "t".into(), &rcols, &tcols)
+        let source = source_table("SELECT price FROM t", Engine::Postgres).unwrap();
+        let err = EditState::new(Engine::Postgres, source, &rcols, &tcols)
             .err()
             .unwrap();
         assert!(err.to_string().contains("primary key"));

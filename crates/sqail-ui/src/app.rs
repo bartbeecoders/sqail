@@ -560,6 +560,7 @@ impl SqailApp {
             params: Vec::new(),
             max_rows: Some(self.settings.max_rows),
             timeout_ms: None,
+            single_statement: false,
         };
         self.worker.spawn(move |sink| async move {
             let fail = |error: String| Msg::QueryFailed {
@@ -1070,16 +1071,19 @@ impl SqailApp {
         let Some(engine) = self.service.connection(conn).map(|c| c.engine) else {
             return;
         };
-        let Some((schema, table)) = crate::editing::source_table(&run.sql, engine) else {
+        let Some(source) = crate::editing::source_table(&run.sql, engine) else {
             return;
         };
         run.edit_status = Some("Loading table information…".into());
         let columns = run.results[0].columns.clone();
         let (tab_id, run_id) = (tab.id, run.id);
         self.worker.run(async move {
-            let state = match client.columns(conn, schema.as_deref(), &table).await {
-                Ok(cols) if cols.is_empty() => Err(format!("table {table} not found")),
-                Ok(cols) => crate::editing::EditState::new(engine, schema, table, &columns, &cols)
+            let state = match client
+                .columns(conn, source.schema.as_deref(), &source.table)
+                .await
+            {
+                Ok(cols) if cols.is_empty() => Err(format!("table {} not found", source.table)),
+                Ok(cols) => crate::editing::EditState::new(engine, source, &columns, &cols)
                     .map(Box::new)
                     .map_err(|e| e.to_string()),
                 Err(e) => Err(e.to_string()),
@@ -1155,8 +1159,39 @@ impl SqailApp {
                 .map(|f| f.path().to_path_buf())
         };
         if whole {
-            let (Some(client), sql) = (self.service.client.clone(), run.sql.clone()) else {
+            // Re-run only the statement behind the shown result, on the tab's
+            // session (temp tables, settings, uncommitted rows), and only if
+            // it just reads.
+            let crate::results::Pane::Result(i) = run.pane else {
+                self.notify("Show a result set to export it.", true);
                 return;
+            };
+            if run.running {
+                self.notify("Wait for the query to finish, then export.", true);
+                return;
+            }
+            let Some(client) = self.service.client.clone() else {
+                return;
+            };
+            let finished = !(run.failed || run.cancelled);
+            let sql = match crate::transfer::statement_for_result(
+                &run.sql,
+                engine,
+                i,
+                run.results.len(),
+                finished,
+            ) {
+                Ok(sql) => sql,
+                Err(e) => return self.notify(e, true),
+            };
+            let columns: Vec<String> = run.results[i]
+                .columns
+                .iter()
+                .map(|c| c.name.clone())
+                .collect();
+            let on = match tab.session.filter(|(c, _)| *c == conn) {
+                Some((_, s)) => On::Session(s),
+                None => On::Connection(conn),
             };
             self.worker.spawn(move |sink| async move {
                 let Some(path) = pick().await else { return };
@@ -1170,7 +1205,9 @@ impl SqailApp {
                         });
                     }
                 };
-                let res = export_query(&client, conn, engine, &sql, &path, format, progress).await;
+                let cols = Some(columns.as_slice());
+                let res =
+                    export_query(&client, on, engine, &sql, cols, &path, format, progress).await;
                 sink.send(match res {
                     Ok(n) => Msg::Notice {
                         text: format!("Exported {n} rows to {}", path.display()),
@@ -1350,6 +1387,16 @@ impl SqailApp {
                 if let Some(t) = self.tabs.get_mut(idx) {
                     t.find.open = true;
                     t.find.focus = true;
+                }
+            }
+            Command::FindNext | Command::FindPrevious => {
+                if let Some(t) = self.tabs.get_mut(idx) {
+                    t.find.open = true;
+                    if t.find.query.is_empty() {
+                        t.find.focus = true;
+                    } else {
+                        t.find.step = Some(cmd == Command::FindPrevious);
+                    }
                 }
             }
             Command::Format => self.format_tab(idx),
@@ -1554,6 +1601,8 @@ impl SqailApp {
             ui.menu_button("Edit", |ui| {
                 for c in [
                     Command::Find,
+                    Command::FindNext,
+                    Command::FindPrevious,
                     Command::Format,
                     Command::SaveSnippet,
                     Command::CommandPalette,

@@ -250,8 +250,10 @@ This installs `sqail` and `sqail-service`, a launcher entry, and
 sqail-service as a **systemd user unit**, which it starts. It then prints a
 sign-in link for the admin page. Add `--no-service` to skip the unit.
 
-**Arch / Omarchy:** build the package from this repository with
-`cd packaging/arch && makepkg -si`.
+**Arch / Omarchy:** download the `PKGBUILD` attached to the GitHub release
+into an empty folder and run `makepkg -si`. It pins the source tarball's
+checksum. `cd packaging/arch && makepkg -si` from a checkout works too, without
+the checksum.
 
 ### Just me
 
@@ -415,7 +417,10 @@ curl -sk -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
    regenerate `docs/openapi.json`
    (`SQAIL_BLESS=1 cargo test -p sqail-service --test it openapi`).
 2. `scripts/check.sh --it` and `scripts/smoke.sh`.
-3. Tag `v<version>` and push it. `release.yml` runs every check from
+3. Merge that as a pull request (main only accepts pull requests whose checks
+   passed), then tag the merge commit `v<version>` and push the tag. Release
+   tags must be on main and cannot be moved or deleted afterwards; a broken
+   release is fixed with a new patch version. `release.yml` runs every check from
    `ci.yml`, attaches the Linux tarball and the Windows zip/MSI to a GitHub
    release, uploads them to the download server, and redeploys the portal.
 

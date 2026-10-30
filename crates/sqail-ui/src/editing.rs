@@ -533,6 +533,7 @@ pub async fn apply(
                     params,
                     max_rows: Some(1),
                     timeout_ms: None,
+                    single_statement: false,
                 },
             )
             .await?;

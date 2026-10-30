@@ -15,8 +15,11 @@ struct Env {
 
 async fn env() -> Env {
     let dir = tempfile::tempdir().unwrap();
+    // SQLite may not open files in the service's data dir.
+    let data_dir = dir.path().join("service");
+    std::fs::create_dir(&data_dir).unwrap();
     let mut cfg = sqail_service::Config {
-        data_dir: dir.path().to_path_buf(),
+        data_dir,
         bind: "127.0.0.1:0".parse().unwrap(),
         docs_ui: false,
         ..Default::default()

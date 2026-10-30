@@ -152,6 +152,18 @@ impl Default for Limits {
     }
 }
 
+impl Limits {
+    /// Deadline and cancel grace for the database work of a non-streaming
+    /// request (catalog, explain). Both together end before
+    /// `request_timeout_secs`, so the query is cancelled and the connection
+    /// handled properly instead of the request being cut off mid-query.
+    pub fn call_deadline(&self) -> (std::time::Duration, std::time::Duration) {
+        let total = std::time::Duration::from_secs(self.request_timeout_secs);
+        let grace = (total / 5).min(std::time::Duration::from_secs(5));
+        (total * 3 / 4, grace)
+    }
+}
+
 impl Default for SessionConfig {
     fn default() -> Self {
         Self {
@@ -333,6 +345,14 @@ impl Config {
 
     pub fn db_path(&self) -> PathBuf {
         self.data_dir.join("service.db")
+    }
+
+    /// Where SQLite profiles (and SQL they run) may open files.
+    pub fn sqlite_paths(&self) -> crate::engine::sqlite::PathPolicy<'_> {
+        crate::engine::sqlite::PathPolicy {
+            allowed_dirs: &self.sqlite.allowed_dirs,
+            data_dir: &self.data_dir,
+        }
     }
 }
 

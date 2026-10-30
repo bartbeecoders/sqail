@@ -24,6 +24,8 @@ pub enum Command {
     Save,
     SaveAs,
     Find,
+    FindNext,
+    FindPrevious,
     Format,
     SaveSnippet,
     CommandPalette,
@@ -44,7 +46,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Command; 33] = [
+    pub const ALL: [Command; 35] = [
         Command::RunCurrent,
         Command::RunScript,
         Command::Cancel,
@@ -61,6 +63,8 @@ impl Command {
         Command::Save,
         Command::SaveAs,
         Command::Find,
+        Command::FindNext,
+        Command::FindPrevious,
         Command::Format,
         Command::SaveSnippet,
         Command::CommandPalette,
@@ -99,6 +103,8 @@ impl Command {
             Command::Save => "file.save",
             Command::SaveAs => "file.save_as",
             Command::Find => "edit.find",
+            Command::FindNext => "edit.find_next",
+            Command::FindPrevious => "edit.find_previous",
             Command::Format => "edit.format",
             Command::SaveSnippet => "edit.save_snippet",
             Command::CommandPalette => "view.command_palette",
@@ -137,6 +143,8 @@ impl Command {
             Command::Save => "Save",
             Command::SaveAs => "Save as…",
             Command::Find => "Find / replace",
+            Command::FindNext => "Find next",
+            Command::FindPrevious => "Find previous",
             Command::Format => "Format SQL",
             Command::SaveSnippet => "Save as snippet…",
             Command::CommandPalette => "Command palette",
@@ -171,6 +179,8 @@ impl Command {
             Command::Save => &["Ctrl+S"],
             Command::SaveAs => &["Ctrl+Shift+S"],
             Command::Find => &["Ctrl+F"],
+            Command::FindNext => &["F3"],
+            Command::FindPrevious => &["Shift+F3"],
             Command::Format => &["Ctrl+Shift+F"],
             Command::CommandPalette => &["Ctrl+Shift+P"],
             Command::QuickOpen => &["Ctrl+P"],

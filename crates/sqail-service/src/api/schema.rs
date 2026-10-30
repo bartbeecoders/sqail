@@ -11,8 +11,8 @@ use uuid::Uuid;
 
 use super::pool_for;
 use crate::auth::Principal;
-use crate::engine::{DbError, Pooled, introspect};
-use crate::error::{ApiError, ApiResult};
+use crate::engine::{DbError, Pooled, introspect, with_deadline};
+use crate::error::ApiResult;
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize, IntoParams)]
@@ -39,17 +39,30 @@ async fn conn(state: &AppState, p: &Principal, id: Uuid) -> ApiResult<Pooled> {
     Ok(pool.get().await?)
 }
 
-/// Map a catalog result; a lost connection is not returned to the pool.
-fn finish<T>(c: &mut Pooled, r: crate::engine::Result<T>) -> ApiResult<Json<T>> {
-    match r {
-        Ok(v) => Ok(Json(v)),
-        Err(e) => {
-            if matches!(e, DbError::Connect(_)) {
-                c.mark_broken();
-            }
-            Err(ApiError::from(e))
-        }
+/// Map a catalog result and hand the connection back. Catalog SQL leaves no
+/// session state, so it goes back as it is unless it was lost or cut off.
+fn finish<T>(c: Pooled, (r, broken): (crate::engine::Result<T>, bool)) -> ApiResult<Json<T>> {
+    if broken || matches!(r, Err(DbError::Connect(_) | DbError::Timeout)) {
+        c.discard();
+    } else {
+        c.release();
     }
+    Ok(Json(r?))
+}
+
+/// Borrow a pooled connection, run one catalog call on it (`$c`) within the
+/// call deadline, and hand the connection back.
+macro_rules! catalog {
+    ($s:expr, $p:expr, $id:expr, |$c:ident| $call:block) => {{
+        let mut pooled = conn(&$s, &$p, $id).await?;
+        let (limit, grace) = $s.config.limits.call_deadline();
+        let canceller = pooled.conn().canceller();
+        let r = {
+            let $c = pooled.conn();
+            with_deadline(canceller, limit, grace, $call).await
+        };
+        finish(pooled, r)
+    }};
 }
 
 #[utoipa::path(get, path = "/v1/connections/{id}/schema/databases", tag = "schema",
@@ -59,11 +72,7 @@ pub async fn databases(
     p: Principal,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Vec<NamedItem>>> {
-    {
-        let mut c = conn(&s, &p, id).await?;
-        let r = introspect::databases(c.conn()).await;
-        finish(&mut c, r)
-    }
+    catalog!(s, p, id, |c| { introspect::databases(c) })
 }
 
 #[utoipa::path(get, path = "/v1/connections/{id}/schema/schemas", tag = "schema",
@@ -73,11 +82,7 @@ pub async fn schemas(
     p: Principal,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Vec<NamedItem>>> {
-    {
-        let mut c = conn(&s, &p, id).await?;
-        let r = introspect::schemas(c.conn()).await;
-        finish(&mut c, r)
-    }
+    catalog!(s, p, id, |c| { introspect::schemas(c) })
 }
 
 #[utoipa::path(get, path = "/v1/connections/{id}/schema/tables", tag = "schema",
@@ -88,11 +93,7 @@ pub async fn tables(
     Path(id): Path<Uuid>,
     Query(q): Query<SchemaFilter>,
 ) -> ApiResult<Json<Vec<TableInfo>>> {
-    {
-        let mut c = conn(&s, &p, id).await?;
-        let r = introspect::tables(c.conn(), q.schema.as_deref()).await;
-        finish(&mut c, r)
-    }
+    catalog!(s, p, id, |c| { introspect::tables(c, q.schema.as_deref()) })
 }
 
 #[utoipa::path(get, path = "/v1/connections/{id}/schema/columns", tag = "schema",
@@ -103,11 +104,9 @@ pub async fn columns(
     Path(id): Path<Uuid>,
     Query(q): Query<ObjectRef>,
 ) -> ApiResult<Json<Vec<ColumnInfo>>> {
-    {
-        let mut c = conn(&s, &p, id).await?;
-        let r = introspect::columns(c.conn(), q.schema.as_deref(), &q.name).await;
-        finish(&mut c, r)
-    }
+    catalog!(s, p, id, |c| {
+        introspect::columns(c, q.schema.as_deref(), &q.name)
+    })
 }
 
 #[utoipa::path(get, path = "/v1/connections/{id}/schema/indexes", tag = "schema",
@@ -118,11 +117,9 @@ pub async fn indexes(
     Path(id): Path<Uuid>,
     Query(q): Query<ObjectRef>,
 ) -> ApiResult<Json<Vec<IndexInfo>>> {
-    {
-        let mut c = conn(&s, &p, id).await?;
-        let r = introspect::indexes(c.conn(), q.schema.as_deref(), &q.name).await;
-        finish(&mut c, r)
-    }
+    catalog!(s, p, id, |c| {
+        introspect::indexes(c, q.schema.as_deref(), &q.name)
+    })
 }
 
 #[utoipa::path(get, path = "/v1/connections/{id}/schema/foreign-keys", tag = "schema",
@@ -133,11 +130,9 @@ pub async fn foreign_keys(
     Path(id): Path<Uuid>,
     Query(q): Query<ObjectRef>,
 ) -> ApiResult<Json<Vec<ForeignKeyInfo>>> {
-    {
-        let mut c = conn(&s, &p, id).await?;
-        let r = introspect::foreign_keys(c.conn(), q.schema.as_deref(), &q.name).await;
-        finish(&mut c, r)
-    }
+    catalog!(s, p, id, |c| {
+        introspect::foreign_keys(c, q.schema.as_deref(), &q.name)
+    })
 }
 
 /// Grants on a table, and the roles and users that could receive them.
@@ -149,11 +144,9 @@ pub async fn privileges(
     Path(id): Path<Uuid>,
     Query(q): Query<ObjectRef>,
 ) -> ApiResult<Json<TablePrivileges>> {
-    {
-        let mut c = conn(&s, &p, id).await?;
-        let r = introspect::privileges(c.conn(), q.schema.as_deref(), &q.name).await;
-        finish(&mut c, r)
-    }
+    catalog!(s, p, id, |c| {
+        introspect::privileges(c, q.schema.as_deref(), &q.name)
+    })
 }
 
 #[utoipa::path(get, path = "/v1/connections/{id}/schema/routines", tag = "schema",
@@ -164,11 +157,9 @@ pub async fn routines(
     Path(id): Path<Uuid>,
     Query(q): Query<SchemaFilter>,
 ) -> ApiResult<Json<Vec<RoutineInfo>>> {
-    {
-        let mut c = conn(&s, &p, id).await?;
-        let r = introspect::routines(c.conn(), q.schema.as_deref()).await;
-        finish(&mut c, r)
-    }
+    catalog!(s, p, id, |c| {
+        introspect::routines(c, q.schema.as_deref())
+    })
 }
 
 /// Best-effort CREATE script for a table, view or routine.
@@ -180,9 +171,7 @@ pub async fn ddl(
     Path(id): Path<Uuid>,
     Query(q): Query<ObjectRef>,
 ) -> ApiResult<Json<Ddl>> {
-    {
-        let mut c = conn(&s, &p, id).await?;
-        let r = introspect::ddl(c.conn(), q.schema.as_deref(), &q.name).await;
-        finish(&mut c, r)
-    }
+    catalog!(s, p, id, |c| {
+        introspect::ddl(c, q.schema.as_deref(), &q.name)
+    })
 }

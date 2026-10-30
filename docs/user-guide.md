@@ -245,6 +245,12 @@ transaction that is **always rolled back**, so it is safe for `UPDATE` and
   *Auto-fit all columns*.
 * A value that is cut off (too wide, or more than one line) shows in full
   when you hover over it, up to 2 000 characters and 40 lines.
+* **Multi-line rows** (right-click a cell or a column name, or Settings →
+  Queries; off by default): values wrap to the column width and line breaks
+  in them start a new line. Each row grows to fit, up to 10 lines; a value
+  that needs more ends in `…`, and hovering or *View value* shows the rest.
+  Rows are measured as they come into view, so the scrollbar can adjust
+  slightly while you scroll through a large result.
 * Double-click a cell to see its full value (long text, JSON, binary as hex).
 * **Export** saves the rows in the grid, or re-runs the query and streams
   every row straight to a file, as CSV, JSON, Excel (.xlsx) or SQL `INSERT`s.

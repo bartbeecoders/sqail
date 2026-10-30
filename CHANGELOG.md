@@ -18,7 +18,10 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
   80 characters (was 48), measured over the first 1 000 rows (was 50) and
   again as rows stream in. A cut-off value shows in full on hover. Double-click
   a column's right border, or right-click its name → *Auto-fit column* /
-  *Auto-fit all columns*, to fit the column to its values (#48).
+  *Auto-fit all columns*, to fit the column to its values. New **Multi-line
+  rows** option (grid right-click menu or Settings → Queries, off by
+  default) wraps values and shows their line breaks, with rows up to 10
+  lines tall (#48).
 
 ## 1.4.0 — 2026-10-30
 

@@ -190,6 +190,60 @@ pub struct ResultSet {
     pub sort: Option<(usize, bool)>,
     /// Column widths for the grid, measured once per result set.
     pub widths: ColumnWidths,
+    /// Text lines per row with multi-line rows on, measured as rows are shown.
+    pub lines: RowLines,
+}
+
+/// How many text lines each row of the grid needs with multi-line rows on.
+/// Rows are measured when they are drawn (only the visible ones), so a
+/// million-row result is never laid out as a whole; rows not measured yet
+/// count as one line.
+#[derive(Debug, Default)]
+pub struct RowLines {
+    /// Lines per row: original rows by their index in the result, new rows
+    /// (while editing) after them. 0 = not measured.
+    lines: Vec<u8>,
+    /// Measured rows taller than one line. While there are none the grid
+    /// keeps its fixed row height.
+    tall: usize,
+    /// What the measurements are for: column widths and the font.
+    key: Vec<f32>,
+}
+
+impl RowLines {
+    pub fn get(&self, row: usize) -> u8 {
+        self.lines.get(row).copied().unwrap_or(0).max(1)
+    }
+
+    /// Record a measurement; true if it changed.
+    pub fn set(&mut self, row: usize, n: u8) -> bool {
+        if row >= self.lines.len() {
+            if n <= 1 {
+                return false;
+            }
+            self.lines.resize(row + 1, 0);
+        }
+        let old = std::mem::replace(&mut self.lines[row], n);
+        self.tall = self.tall + usize::from(n > 1) - usize::from(old > 1);
+        old.max(1) != n.max(1)
+    }
+
+    /// Whether any measured row is taller than one line.
+    pub fn any_tall(&self) -> bool {
+        self.tall > 0
+    }
+
+    /// Forget the measurements when the column widths or the font change.
+    /// Returns true if they were dropped.
+    pub fn invalidate_unless(&mut self, key: &[f32]) -> bool {
+        if self.key == key {
+            return false;
+        }
+        self.key = key.to_vec();
+        self.lines.clear();
+        self.tall = 0;
+        true
+    }
 }
 
 /// The grid's column widths for one result set. The grid measures the first
@@ -229,6 +283,7 @@ impl ResultSet {
             order: None,
             sort: None,
             widths: ColumnWidths::default(),
+            lines: RowLines::default(),
         }
     }
 
@@ -636,6 +691,36 @@ pub fn selection_tsv_capped(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn row_lines_cache_counts_tall_rows_and_invalidates() {
+        let mut l = RowLines::default();
+        assert!(l.invalidate_unless(&[100.0, 8.0]));
+        assert_eq!(l.get(5), 1, "unmeasured rows are one line");
+        assert!(!l.set(1_000_000, 1), "one-line rows need no storage");
+        assert!(l.lines.is_empty());
+        assert!(!l.any_tall());
+
+        assert!(l.set(5, 3));
+        assert_eq!(l.get(5), 3);
+        assert!(l.any_tall());
+        assert!(!l.set(5, 3), "unchanged");
+        assert!(l.set(7, 2));
+        assert!(l.set(5, 1));
+        assert!(l.any_tall(), "row 7 is still tall");
+        assert!(l.set(7, 1));
+        assert!(!l.any_tall());
+
+        l.set(2, 4);
+        assert!(!l.invalidate_unless(&[100.0, 8.0]), "same widths keep it");
+        assert_eq!(l.get(2), 4);
+        assert!(
+            l.invalidate_unless(&[120.0, 8.0]),
+            "a resized column drops it"
+        );
+        assert_eq!(l.get(2), 1);
+        assert!(!l.any_tall());
+    }
     use serde_json::json;
 
     fn col(name: &str, logical: LogicalType) -> Column {

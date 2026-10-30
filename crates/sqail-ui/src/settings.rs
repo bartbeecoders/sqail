@@ -24,6 +24,9 @@ pub struct Settings {
     pub pinned_tabs_row: bool,
     /// Row cap per result set requested from the service.
     pub max_rows: u64,
+    /// Result grid: wrap values and show their line breaks, rows growing to
+    /// fit (up to 10 lines).
+    pub multiline_rows: bool,
     /// Open completions while typing (Ctrl+Space always works).
     pub autocomplete: bool,
     pub format_uppercase: bool,
@@ -113,6 +116,7 @@ impl Default for Settings {
             confirm_close_tab: true,
             pinned_tabs_row: true,
             max_rows: 100_000,
+            multiline_rows: false,
             autocomplete: true,
             format_uppercase: true,
             format_indent: 2,

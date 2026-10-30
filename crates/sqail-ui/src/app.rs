@@ -2104,6 +2104,7 @@ impl SqailApp {
         let has_run = self.tabs.get(idx).is_some_and(|t| t.run.is_some());
         let mut grid_out = crate::grid::GridOutput::default();
         let editable = self.editability(idx);
+        let multiline = self.settings.multiline_rows;
         if has_run {
             egui::Panel::bottom(egui::Id::new(("results", self.tabs[idx].id)))
                 .resizable(true)
@@ -2111,7 +2112,7 @@ impl SqailApp {
                 .size_range(80.0..=ui.available_height() - 80.0)
                 .show(ui, |ui| {
                     if let Some(run) = self.tabs[idx].run.as_mut() {
-                        grid_out = crate::grid::results_ui(ui, run, editable.clone());
+                        grid_out = crate::grid::results_ui(ui, run, editable.clone(), multiline);
                     }
                 });
         }
@@ -2132,6 +2133,10 @@ impl SqailApp {
         }
         if let Some(note) = grid_out.copy_note {
             self.notify(note, false);
+        }
+        if grid_out.toggle_multiline {
+            self.settings.multiline_rows = !self.settings.multiline_rows;
+            self.settings.save();
         }
         let mut zoom = 0.0;
         egui::CentralPanel::default()

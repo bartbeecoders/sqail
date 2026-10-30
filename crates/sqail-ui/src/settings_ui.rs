@@ -223,6 +223,15 @@ fn section(ui: &mut egui::Ui, section: Section, s: &mut Settings) {
                         .labelled_by(label);
                 },
             );
+            row(
+                ui,
+                "Result rows",
+                "On: values wrap to the column width and keep their line breaks; rows \
+                 grow to fit, up to 10 lines. Also in the result grid's right-click menu.",
+                |ui, _| {
+                    ui.checkbox(&mut s.multiline_rows, "Multi-line rows");
+                },
+            );
         }
         Section::Service => {
             row(

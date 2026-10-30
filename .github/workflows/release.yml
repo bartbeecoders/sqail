@@ -147,6 +147,7 @@ jobs:
     if: github.ref_type == 'tag'
     needs: [version, package]
     runs-on: ubuntu-24.04
+    environment: production
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -168,6 +169,7 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          fingerprint: ${{ secrets.VPS_SSH_FINGERPRINT }}
           source: "upload/*"
           target: /opt/sqail-releases
           strip_components: 1
@@ -179,4 +181,12 @@ jobs:
     uses: ./.github/workflows/portal.yml
     with:
       version: ${{ needs.version.outputs.version }}
-    secrets: inherit
+    # Only what the portal job needs. Once these live in the `production`
+    # environment, the portal job reads them from there instead.
+    secrets:
+      ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+      ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+      VPS_HOST: ${{ secrets.VPS_HOST }}
+      VPS_USER: ${{ secrets.VPS_USER }}
+      VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+      VPS_SSH_FINGERPRINT: ${{ secrets.VPS_SSH_FINGERPRINT }}

@@ -9,6 +9,7 @@ pub mod explain;
 pub mod introspect;
 pub mod mssql;
 pub mod pg;
+pub mod pg_guard;
 pub mod registry;
 pub mod split;
 pub mod sqlite;
@@ -241,7 +242,32 @@ pub trait Conn: Send {
     async fn ping(&mut self) -> Result<()>;
     /// Human-readable server version.
     async fn server_version(&mut self) -> Result<String>;
+    /// Undo session state that user SQL may have changed (settings, role,
+    /// temp tables, prepared statements, ...), so that the connection can be
+    /// pooled for the next borrower. An error means "do not reuse".
+    async fn reset(&mut self) -> Result<()>;
     fn engine(&self) -> Engine;
+}
+
+/// Run `work`, a query on a connection whose canceller is `canceller`, for at
+/// most `limit`. Past it the query is cancelled and gets `grace` to stop.
+/// Returns the result (`Timeout` when cut off) and whether the connection
+/// must be discarded because the query may still be running.
+pub async fn with_deadline<T>(
+    canceller: Canceller,
+    limit: Duration,
+    grace: Duration,
+    work: impl Future<Output = Result<T>>,
+) -> (Result<T>, bool) {
+    tokio::pin!(work);
+    if let Ok(r) = tokio::time::timeout(limit, &mut work).await {
+        return (r, false);
+    }
+    if !canceller.cancel().await {
+        return (Err(DbError::Timeout), true);
+    }
+    let stopped = tokio::time::timeout(grace, &mut work).await.is_ok();
+    (Err(DbError::Timeout), !stopped)
 }
 
 /// Opens connections for one connection profile.
@@ -379,12 +405,23 @@ impl Pool {
     }
 }
 
-/// A checked-out connection. Returned to the pool on drop unless marked broken.
+/// How long a reset may take before the connection is given up.
+const RESET_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long an abandoned connection's cancel request may take.
+const ABANDON_CANCEL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A checked-out connection.
+///
+/// It goes back to the pool only through [`Pooled::release`] or
+/// [`Pooled::reset_and_release`]. Dropped any other way (the request future
+/// was dropped by the request timeout, an early return, a panic) after it
+/// was used, it is closed, and whatever may still run on it is cancelled
+/// first. Unused, it goes back as it was.
 pub struct Pooled {
     conn: Option<Box<dyn Conn>>,
     pool: Arc<Pool>,
-    _permit: OwnedSemaphorePermit,
-    broken: bool,
+    permit: Option<OwnedSemaphorePermit>,
+    used: bool,
 }
 
 impl Pooled {
@@ -392,27 +429,259 @@ impl Pooled {
         Self {
             conn: Some(conn),
             pool,
-            _permit: permit,
-            broken: false,
+            permit: Some(permit),
+            used: false,
         }
     }
 
-    /// Discard instead of returning to the pool.
-    pub fn mark_broken(&mut self) {
-        self.broken = true;
+    pub fn conn(&mut self) -> &mut dyn Conn {
+        self.used = true;
+        self.conn
+            .as_deref_mut()
+            .expect("conn present until released")
     }
 
-    pub fn conn(&mut self) -> &mut dyn Conn {
-        self.conn.as_deref_mut().expect("conn present until drop")
+    /// Return the connection as it is. Only for connections that ran nothing
+    /// but the service's own catalog SQL, which leaves no session state.
+    pub fn release(mut self) {
+        if let Some(conn) = self.conn.take() {
+            self.pool.put_back(conn);
+        }
+    }
+
+    /// Reset the session state user SQL may have left, then return the
+    /// connection; close it if the reset fails.
+    pub async fn reset_and_release(mut self) {
+        let Some(mut conn) = self.conn.take() else {
+            return;
+        };
+        match tokio::time::timeout(RESET_TIMEOUT, conn.reset()).await {
+            Ok(Ok(())) => self.pool.put_back(conn),
+            Ok(Err(e)) => tracing::debug!(error = %e, "connection not reusable; closing it"),
+            Err(_) => tracing::debug!("connection reset timed out; closing it"),
+        }
+    }
+
+    /// Close instead of returning to the pool.
+    pub fn discard(mut self) {
+        self.conn.take();
     }
 }
 
 impl Drop for Pooled {
     fn drop(&mut self) {
-        if let Some(conn) = self.conn.take()
-            && !self.broken
-        {
+        let Some(conn) = self.conn.take() else {
+            return;
+        };
+        if !self.used {
             self.pool.put_back(conn);
+            return;
         }
+        // Abandoned mid-use: a query may still be running. Cancel it while
+        // the connection is still open (a SQL Server KILL must not hit a
+        // session id that has been handed to someone else), then close it.
+        // The permit is held until then so the pool does not overcommit.
+        let permit = self.permit.take();
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(async move {
+                let canceller = conn.canceller();
+                let _ = tokio::time::timeout(ABANDON_CANCEL_TIMEOUT, canceller.cancel()).await;
+                drop(conn);
+                drop(permit);
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct Counts {
+        connects: AtomicUsize,
+        resets: AtomicUsize,
+        cancels: AtomicUsize,
+        closed: AtomicUsize,
+    }
+
+    struct FakeDriver {
+        counts: Arc<Counts>,
+        reset_ok: bool,
+    }
+
+    struct FakeConn {
+        counts: Arc<Counts>,
+        reset_ok: bool,
+    }
+
+    struct FakeCancel(Arc<Counts>);
+
+    #[async_trait]
+    impl Cancel for FakeCancel {
+        async fn cancel(&self) -> bool {
+            self.0.cancels.fetch_add(1, Ordering::SeqCst);
+            true
+        }
+    }
+
+    impl Drop for FakeConn {
+        fn drop(&mut self) {
+            self.counts.closed.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl Conn for FakeConn {
+        async fn execute(&mut self, _: &ExecRequest, _: &EventSink) -> Result<()> {
+            std::future::pending().await
+        }
+        fn canceller(&self) -> Canceller {
+            Arc::new(FakeCancel(self.counts.clone()))
+        }
+        async fn in_transaction(&mut self) -> Result<bool> {
+            Ok(false)
+        }
+        async fn ping(&mut self) -> Result<()> {
+            Ok(())
+        }
+        async fn server_version(&mut self) -> Result<String> {
+            Ok("fake".into())
+        }
+        async fn reset(&mut self) -> Result<()> {
+            self.counts.resets.fetch_add(1, Ordering::SeqCst);
+            if self.reset_ok {
+                Ok(())
+            } else {
+                Err(DbError::Unsupported("no".into()))
+            }
+        }
+        fn engine(&self) -> Engine {
+            Engine::Sqlite
+        }
+    }
+
+    #[async_trait]
+    impl Driver for FakeDriver {
+        async fn connect(&self) -> Result<Box<dyn Conn>> {
+            self.counts.connects.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(FakeConn {
+                counts: self.counts.clone(),
+                reset_ok: self.reset_ok,
+            }))
+        }
+        fn engine(&self) -> Engine {
+            Engine::Sqlite
+        }
+    }
+
+    fn pool(reset_ok: bool) -> (Arc<Pool>, Arc<Counts>) {
+        let counts = Arc::new(Counts::default());
+        let driver = Arc::new(FakeDriver {
+            counts: counts.clone(),
+            reset_ok,
+        });
+        (Pool::new(driver, 1), counts)
+    }
+
+    fn idle(p: &Pool) -> usize {
+        p.idle.lock().unwrap().len()
+    }
+
+    fn n(a: &AtomicUsize) -> usize {
+        a.load(Ordering::SeqCst)
+    }
+
+    #[tokio::test]
+    async fn released_connections_are_reused() {
+        let (p, counts) = pool(true);
+        let mut c = p.get().await.unwrap();
+        c.conn();
+        c.release();
+        assert_eq!(idle(&p), 1);
+        let mut c = p.get().await.unwrap();
+        c.conn();
+        c.reset_and_release().await;
+        assert_eq!(idle(&p), 1);
+        assert_eq!(n(&counts.connects), 1);
+        assert_eq!(n(&counts.resets), 1);
+        assert_eq!(n(&counts.cancels), 0);
+    }
+
+    #[tokio::test]
+    async fn failed_resets_and_discards_close_the_connection() {
+        let (p, counts) = pool(false);
+        let c = p.get().await.unwrap();
+        c.reset_and_release().await;
+        assert_eq!(idle(&p), 0);
+        let c = p.get().await.unwrap();
+        c.discard();
+        assert_eq!(idle(&p), 0);
+        assert_eq!(n(&counts.connects), 2);
+        assert_eq!(n(&counts.closed), 2);
+    }
+
+    #[tokio::test]
+    async fn unused_connections_go_back_on_drop() {
+        let (p, counts) = pool(true);
+        drop(p.get().await.unwrap());
+        assert_eq!(idle(&p), 1);
+        assert_eq!(n(&counts.closed), 0);
+    }
+
+    #[tokio::test]
+    async fn abandoned_connections_are_cancelled_and_closed() {
+        let (p, counts) = pool(true);
+        let mut c = p.get().await.unwrap();
+        // A request future dropped mid-query, as the request timeout does.
+        let req = ExecRequest {
+            sql: "x".into(),
+            params: vec![],
+            max_rows: 1,
+        };
+        let sink = EventSink::Collect(Mutex::new(Vec::new()));
+        let run = tokio::time::timeout(Duration::from_millis(10), c.conn().execute(&req, &sink));
+        assert!(run.await.is_err());
+        drop(c);
+        // The pool's only permit comes back once the cancel has gone out.
+        let mut c = p.get().await.unwrap();
+        assert_eq!(n(&counts.cancels), 1);
+        assert_eq!(n(&counts.closed), 1);
+        assert_eq!(n(&counts.connects), 2);
+        assert_eq!(idle(&p), 0);
+        c.conn();
+        c.release();
+    }
+
+    #[tokio::test]
+    async fn deadlines_cancel_and_report_whether_the_query_stopped() {
+        let (p, counts) = pool(true);
+        let mut c = p.get().await.unwrap();
+        let canceller = c.conn().canceller();
+        let ms = Duration::from_millis(20);
+        // Still running after the cancel and the grace period: discard.
+        let (r, broken) = with_deadline(
+            canceller.clone(),
+            ms,
+            ms,
+            std::future::pending::<Result<()>>(),
+        )
+        .await;
+        assert!(matches!(r, Err(DbError::Timeout)) && broken);
+        // Stops within the grace period: keep.
+        let work = async {
+            tokio::time::sleep(ms * 2).await;
+            Ok(())
+        };
+        let (r, broken) = with_deadline(canceller.clone(), ms, ms * 5, work).await;
+        assert!(matches!(r, Err(DbError::Timeout)) && !broken);
+        // In time.
+        let (r, broken) = with_deadline(canceller, ms, ms, async { Ok(1) }).await;
+        assert_eq!(r.unwrap(), 1);
+        assert!(!broken);
+        assert_eq!(n(&counts.cancels), 2);
+        c.release();
     }
 }

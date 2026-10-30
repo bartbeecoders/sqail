@@ -20,22 +20,52 @@ pub struct SqliteDriver {
     path: PathBuf,
     read_only: bool,
     create: bool,
+    /// Owned copy of the path policy, for the per-connection authorizer.
+    policy: Arc<OwnedPolicy>,
+}
+
+/// Where SQLite files may live: inside one of `allowed_dirs`, and never
+/// inside the service's own `data_dir` (`service.db`, `master.key`, TLS keys).
+#[derive(Clone, Copy, Debug)]
+pub struct PathPolicy<'a> {
+    pub allowed_dirs: &'a [PathBuf],
+    pub data_dir: &'a Path,
+}
+
+#[derive(Debug)]
+struct OwnedPolicy {
+    allowed_dirs: Vec<PathBuf>,
+    data_dir: PathBuf,
+}
+
+impl OwnedPolicy {
+    fn borrow(&self) -> PathPolicy<'_> {
+        PathPolicy {
+            allowed_dirs: &self.allowed_dirs,
+            data_dir: &self.data_dir,
+        }
+    }
 }
 
 impl SqliteDriver {
-    pub fn new(p: &SqliteParams, read_only: bool, allowed_dirs: &[PathBuf]) -> Result<Self> {
-        let path = check_path(Path::new(&p.path), allowed_dirs)?;
+    pub fn new(p: &SqliteParams, read_only: bool, policy: PathPolicy<'_>) -> Result<Self> {
+        let path = check_path(Path::new(&p.path), policy)?;
         Ok(Self {
             path,
             read_only,
             create: p.create,
+            policy: Arc::new(OwnedPolicy {
+                allowed_dirs: policy.allowed_dirs.to_vec(),
+                data_dir: policy.data_dir.to_path_buf(),
+            }),
         })
     }
 }
 
-/// Resolve `path` and require it to be inside one of `allowed`.
-pub fn check_path(path: &Path, allowed: &[PathBuf]) -> Result<PathBuf> {
-    if allowed.is_empty() {
+/// Resolve `path` and require it to be inside one of the allowed directories
+/// and outside the service's data directory.
+pub fn check_path(path: &Path, policy: PathPolicy<'_>) -> Result<PathBuf> {
+    if policy.allowed_dirs.is_empty() {
         return Err(DbError::Invalid(
             "SQLite is disabled on this service (no sqlite.allowed_dirs configured)".into(),
         ));
@@ -56,26 +86,89 @@ pub fn check_path(path: &Path, allowed: &[PathBuf]) -> Result<PathBuf> {
         })?;
     let resolved = parent.join(file_name);
     let resolved = resolved.canonicalize().unwrap_or(resolved);
-    let ok = allowed
+    let ok = policy
+        .allowed_dirs
         .iter()
         .filter_map(|d| d.canonicalize().ok())
         .any(|d| resolved.starts_with(&d));
-    if ok {
-        Ok(resolved)
-    } else {
-        Err(DbError::Invalid(format!(
+    if !ok {
+        return Err(DbError::Invalid(format!(
             "{} is outside the service's allowed SQLite directories",
             path.display()
-        )))
+        )));
     }
+    // A data dir that does not exist (yet) holds nothing to protect.
+    if let Ok(data) = policy.data_dir.canonicalize()
+        && resolved.starts_with(&data)
+    {
+        return Err(DbError::Invalid(format!(
+            "{} is inside the service's data directory",
+            path.display()
+        )));
+    }
+    Ok(resolved)
+}
+
+/// Whether SQL on a profile's connection may open `filename` as an extra
+/// database. `ATTACH` and `VACUUM INTO` both arrive here: SQLite runs
+/// `VACUUM INTO` as an internal `ATTACH` of the target. `None` is a
+/// non-literal target (an expression or a bound parameter), which cannot be
+/// checked and is refused.
+fn attach_allowed(filename: Option<&str>, read_only: bool, policy: PathPolicy<'_>) -> bool {
+    match filename {
+        // Plain VACUUM attaches a temporary database ''. ':memory:' is
+        // private to the connection. Neither names a file.
+        Some("" | ":memory:") => true,
+        None => false,
+        // A read-only profile must not write anywhere, and VACUUM INTO would.
+        Some(_) if read_only => false,
+        // The bundled SQLite is built with SQLITE_USE_URI, so `file:` names
+        // are URIs whose options (vfs, mode, ...) the path check cannot see.
+        Some(f) if f.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("file:")) => false,
+        Some(f) => check_path(Path::new(f), policy).is_ok(),
+    }
+}
+
+/// Install the authorizer that keeps SQL inside the path policy.
+fn install_authorizer(
+    db: &rusqlite::Connection,
+    read_only: bool,
+    policy: Arc<OwnedPolicy>,
+) -> Result<()> {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    db.authorizer(Some(move |ctx: AuthContext<'_>| match ctx.action {
+        AuthAction::Attach { filename } => {
+            if attach_allowed(Some(filename), read_only, policy.borrow()) {
+                Authorization::Allow
+            } else {
+                Authorization::Deny
+            }
+        }
+        // ATTACH with a NULL file name: a non-literal target.
+        AuthAction::Unknown {
+            code: rusqlite::ffi::SQLITE_ATTACH,
+            ..
+        } => Authorization::Deny,
+        // These move where SQLite puts its files, process-wide.
+        AuthAction::Pragma { pragma_name, .. }
+            if pragma_name.eq_ignore_ascii_case("temp_store_directory")
+                || pragma_name.eq_ignore_ascii_case("data_store_directory") =>
+        {
+            Authorization::Deny
+        }
+        _ => Authorization::Allow,
+    }))
+    .map_err(db_err)
 }
 
 #[async_trait]
 impl Driver for SqliteDriver {
     async fn connect(&self) -> Result<Box<dyn Conn>> {
         let (path, read_only, create) = (self.path.clone(), self.read_only, self.create);
+        let policy = self.policy.clone();
         tokio::task::spawn_blocking(move || {
-            let mut flags = OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+            // No SQLITE_OPEN_URI: the profile path is a plain file name.
+            let mut flags = OpenFlags::SQLITE_OPEN_NO_MUTEX;
             flags |= if read_only {
                 OpenFlags::SQLITE_OPEN_READ_ONLY
             } else if create {
@@ -89,6 +182,7 @@ impl Driver for SqliteDriver {
                 .map_err(db_err)?;
             db.pragma_update(None, "foreign_keys", "ON")
                 .map_err(db_err)?;
+            install_authorizer(&db, read_only, policy)?;
             let interrupt = Arc::new(SqliteCancel(db.get_interrupt_handle()));
             Ok(Box::new(SqliteConn {
                 db: Arc::new(Mutex::new(db)),
@@ -187,6 +281,11 @@ impl Conn for SqliteConn {
 
     async fn server_version(&mut self) -> Result<String> {
         Ok(format!("SQLite {}", rusqlite::version()))
+    }
+
+    async fn reset(&mut self) -> Result<()> {
+        // A file database has no server-side session worth resetting.
+        Ok(())
     }
 
     fn engine(&self) -> Engine {
@@ -372,14 +471,166 @@ fn db_err(e: rusqlite::Error) -> DbError {
 mod tests {
     use super::*;
 
+    fn policy<'a>(allowed: &'a [PathBuf], data_dir: &'a Path) -> PathPolicy<'a> {
+        PathPolicy {
+            allowed_dirs: allowed,
+            data_dir,
+        }
+    }
+
     #[test]
     fn path_must_be_inside_allowed_dirs() {
         let dir = tempfile::tempdir().unwrap();
         let allowed = vec![dir.path().to_path_buf()];
-        assert!(check_path(&dir.path().join("a.db"), &allowed).is_ok());
-        assert!(check_path(&dir.path().join("../escape.db"), &allowed).is_err());
-        assert!(check_path(Path::new("relative.db"), &allowed).is_err());
-        assert!(check_path(&dir.path().join("a.db"), &[]).is_err());
+        let pol = policy(&allowed, Path::new(""));
+        assert!(check_path(&dir.path().join("a.db"), pol).is_ok());
+        assert!(check_path(&dir.path().join("../escape.db"), pol).is_err());
+        assert!(check_path(Path::new("relative.db"), pol).is_err());
+        assert!(check_path(&dir.path().join("a.db"), policy(&[], Path::new(""))).is_err());
+    }
+
+    #[test]
+    fn path_must_be_outside_the_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("service");
+        std::fs::create_dir(&data).unwrap();
+        let allowed = vec![dir.path().to_path_buf()];
+        let pol = policy(&allowed, &data);
+        assert!(check_path(&dir.path().join("a.db"), pol).is_ok());
+        assert!(check_path(&data.join("service.db"), pol).is_err());
+        assert!(check_path(&data.join("master.key"), pol).is_err());
+        assert!(check_path(&dir.path().join("service/../service/service.db"), pol).is_err());
+        #[cfg(unix)]
+        {
+            // A symlink inside the allowed dir that points into the data dir.
+            std::fs::write(data.join("service.db"), b"").unwrap();
+            let link = dir.path().join("link.db");
+            std::os::unix::fs::symlink(data.join("service.db"), &link).unwrap();
+            assert!(check_path(&link, pol).is_err());
+        }
+    }
+
+    #[test]
+    fn attach_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("service");
+        std::fs::create_dir(&data).unwrap();
+        let allowed = vec![dir.path().to_path_buf()];
+        let pol = policy(&allowed, &data);
+        let inside = dir.path().join("other.db");
+        let inside = inside.to_str().unwrap();
+        for ro in [false, true] {
+            assert!(attach_allowed(Some(""), ro, pol));
+            assert!(attach_allowed(Some(":memory:"), ro, pol));
+            assert!(!attach_allowed(None, ro, pol));
+            assert!(!attach_allowed(Some("/etc/x.db"), ro, pol));
+            assert!(!attach_allowed(Some("relative.db"), ro, pol));
+            assert!(!attach_allowed(
+                Some(data.join("service.db").to_str().unwrap()),
+                ro,
+                pol
+            ));
+            assert!(!attach_allowed(Some(&format!("file:{inside}")), ro, pol));
+            assert!(!attach_allowed(Some(&format!("FILE:{inside}")), ro, pol));
+        }
+        assert!(attach_allowed(Some(inside), false, pol));
+        assert!(!attach_allowed(Some(inside), true, pol));
+    }
+
+    async fn sql(conn: &mut dyn Conn, sql: &str) -> Result<Vec<Vec<Value>>> {
+        super::super::fetch_rows(conn, sql, vec![]).await
+    }
+
+    #[tokio::test]
+    async fn attach_and_vacuum_into_stay_inside_the_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let allowed_dir = dir.path().join("allowed");
+        let outside = dir.path().join("outside");
+        let data = dir.path().join("data");
+        for d in [&allowed_dir, &outside, &data] {
+            std::fs::create_dir(d).unwrap();
+        }
+        let allowed = vec![allowed_dir.clone()];
+        let pol = policy(&allowed, &data);
+        let main = allowed_dir.join("main.db");
+        let p = SqliteParams {
+            path: main.to_string_lossy().into(),
+            create: true,
+        };
+        let rw = SqliteDriver::new(&p, false, pol).unwrap();
+        let mut conn = rw.connect().await.unwrap();
+        sql(
+            conn.as_mut(),
+            "CREATE TABLE t (x); INSERT INTO t VALUES (1)",
+        )
+        .await
+        .unwrap();
+
+        let out = outside.join("o.db").display().to_string();
+        let svc = data.join("service.db").display().to_string();
+        let ok = allowed_dir.join("copy.db").display().to_string();
+        for target in [&out, &svc] {
+            let e = sql(conn.as_mut(), &format!("ATTACH '{target}' AS x")).await;
+            assert!(e.is_err(), "ATTACH {target} was allowed");
+            let e = sql(conn.as_mut(), &format!("VACUUM INTO '{target}'")).await;
+            assert!(e.is_err(), "VACUUM INTO {target} was allowed");
+        }
+        assert!(
+            sql(conn.as_mut(), &format!("ATTACH 'file:{out}' AS x"))
+                .await
+                .is_err()
+        );
+        // A computed or bound name cannot be checked.
+        assert!(
+            sql(conn.as_mut(), &format!("ATTACH '{out}' || '' AS x"))
+                .await
+                .is_err()
+        );
+        assert!(
+            super::super::fetch_rows(
+                conn.as_mut(),
+                "ATTACH ?1 AS x",
+                vec![Param::Text(out.clone())]
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            sql(conn.as_mut(), "PRAGMA temp_store_directory = '/tmp'")
+                .await
+                .is_err()
+        );
+        assert!(!outside.join("o.db").exists());
+        assert!(!data.join("service.db").exists());
+
+        // Inside the allowed dir, and the no-file forms, keep working.
+        sql(conn.as_mut(), "VACUUM").await.unwrap();
+        sql(conn.as_mut(), "ATTACH ':memory:' AS m; DETACH m")
+            .await
+            .unwrap();
+        sql(conn.as_mut(), &format!("VACUUM INTO '{ok}'"))
+            .await
+            .unwrap();
+        sql(conn.as_mut(), &format!("ATTACH '{ok}' AS c; DETACH c"))
+            .await
+            .unwrap();
+        drop(conn);
+
+        // Read-only: no extra files at all.
+        let ro = SqliteDriver::new(&p, true, pol).unwrap();
+        let mut conn = ro.connect().await.unwrap();
+        let copy2 = allowed_dir.join("copy2.db").display().to_string();
+        for target in [&out, &svc, &ok, &copy2] {
+            let e = sql(conn.as_mut(), &format!("ATTACH '{target}' AS x")).await;
+            assert!(e.is_err(), "read-only ATTACH {target} was allowed");
+            let e = sql(conn.as_mut(), &format!("VACUUM INTO '{target}'")).await;
+            assert!(e.is_err(), "read-only VACUUM INTO {target} was allowed");
+        }
+        assert!(!allowed_dir.join("copy2.db").exists());
+        assert_eq!(
+            sql(conn.as_mut(), "SELECT x FROM t").await.unwrap(),
+            vec![vec![serde_json::json!(1)]]
+        );
     }
 
     #[tokio::test]
@@ -389,7 +640,8 @@ mod tests {
             path: dir.path().join("t.db").to_string_lossy().into(),
             create: true,
         };
-        let driver = SqliteDriver::new(&p, false, &[dir.path().to_path_buf()]).unwrap();
+        let allowed = [dir.path().to_path_buf()];
+        let driver = SqliteDriver::new(&p, false, policy(&allowed, Path::new(""))).unwrap();
         let mut conn = driver.connect().await.unwrap();
         let rows = super::super::fetch_rows(
             conn.as_mut(),

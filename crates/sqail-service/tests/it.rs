@@ -1418,7 +1418,6 @@ async fn postgres_pooled_connections_are_reset() {
 async fn mssql_connections_that_ran_scripts_are_not_reused() {
     let h = single_connection_harness(60).await;
     let c = profile(&h, &mssql(), false).await;
-    let spid = one(&h.query(c, "SELECT @@SPID").await);
     let ev = h
         .query(
             c,
@@ -1431,14 +1430,16 @@ async fn mssql_connections_that_ran_scripts_are_not_reused() {
     let ev = h
         .query(
             c,
-            "SELECT @@SPID, DB_NAME(), @@LANGUAGE, CASE WHEN OBJECT_ID('tempdb..#it_leak') IS NULL THEN 1 ELSE 0 END",
+            "SELECT DB_NAME(), @@LANGUAGE, CASE WHEN OBJECT_ID('tempdb..#it_leak') IS NULL THEN 1 ELSE 0 END",
         )
         .await;
-    let row = &rows(&ev, 0)[0];
-    assert_ne!(row[0], spid, "the script's connection was reused");
+    // Not @@SPID: SQL Server hands a closed session's id to the next login,
+    // so a fresh connection can get the same one. None of the script's
+    // state survives, which is what reuse would have kept.
     assert_eq!(
-        row[1..],
-        [json!("sqail_test"), json!("us_english"), json!(1)]
+        rows(&ev, 0)[0],
+        [json!("sqail_test"), json!("us_english"), json!(1)],
+        "the script's connection was reused"
     );
     let ev = h.query(c, "SELECT TOP 3 id FROM sales.customers").await;
     assert_eq!(rows(&ev, 0).len(), 3);

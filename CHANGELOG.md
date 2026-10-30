@@ -7,6 +7,12 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
 
 ## Unreleased
 
+- **Find bar fixes:** Enter in the find field goes to the next match and
+  keeps the focus there (a second Enter no longer replaces the match);
+  F3 / Shift+F3 (and Shift+Enter) find next / previous; Esc in the editor
+  no longer closes the bar; case-insensitive search works in text whose
+  lowercase has a different length (#66).
+
 ## 1.3.0 — 2026-10-10
 
 ### sqail

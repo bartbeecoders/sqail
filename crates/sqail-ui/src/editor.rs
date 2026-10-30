@@ -11,6 +11,7 @@ use egui::{
 use sqail_client::proto::Engine;
 use uuid::Uuid;
 
+use crate::find;
 use crate::results::Run;
 use crate::sql::complete::{Candidate, Catalog};
 use crate::sql::format::Style;
@@ -33,6 +34,12 @@ pub struct FindBar {
     pub replace: String,
     pub match_case: bool,
     pub status: String,
+    /// Find next (`false`) or previous (`true`) on the next frame (F3).
+    pub step: Option<bool>,
+    /// The match last found, highlighted while the editor has no focus.
+    pub hit: Option<std::ops::Range<usize>>,
+    /// Scroll the editor to `hit` on the next frame.
+    pub scroll: bool,
 }
 
 /// An open completion popup.
@@ -82,6 +89,8 @@ pub struct Tab {
     pub cursor: CCursorRange,
     /// Selection to apply on the next frame (find results).
     pending_select: Option<CCursorRange>,
+    /// Like `pending_select`, but leaves keyboard focus where it is.
+    quiet_select: Option<CCursorRange>,
     bracket_cache: BracketCache,
     /// From the last laid-out frame: line count and (line, col) of the cursor.
     lines: usize,
@@ -113,6 +122,7 @@ impl Tab {
             find: FindBar::default(),
             cursor: CCursorRange::default(),
             pending_select: None,
+            quiet_select: None,
             bracket_cache: None,
             lines: 1,
             line_col: (1, 1),
@@ -232,6 +242,15 @@ impl Tab {
 
     pub fn editor_id(&self) -> Id {
         Id::new(("sql_editor", self.id))
+    }
+
+    /// The selection as a byte range (start, end); empty at the cursor.
+    fn selection_bytes(&self) -> (usize, usize) {
+        let (a, b) = (self.cursor.primary.index.0, self.cursor.secondary.index.0);
+        (
+            char_to_byte(&self.text, a.min(b)),
+            char_to_byte(&self.text, a.max(b)),
+        )
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -455,7 +474,12 @@ pub fn editor_ui(ui: &mut egui::Ui, tab: &mut Tab, env: &EditorEnv<'_>) {
                 state.cursor.set_char_range(Some(sel));
                 state.store(ui.ctx(), tab.editor_id());
                 ui.ctx().memory_mut(|m| m.request_focus(tab.editor_id()));
+            } else if let Some(sel) = tab.quiet_select.take() {
+                let mut state = egui::TextEdit::load_state(ui.ctx(), tab.editor_id()).unwrap_or_default();
+                state.cursor.set_char_range(Some(sel));
+                state.store(ui.ctx(), tab.editor_id());
             }
+            let hit_slot = ui.painter().add(Shape::Noop);
 
             let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _wrap: f32| {
                 let job = highlight::highlight(
@@ -608,6 +632,25 @@ pub fn editor_ui(ui: &mut egui::Ui, tab: &mut Tab, env: &EditorEnv<'_>) {
             let cursor_rect = galley.pos_from_cursor(tab.cursor.primary);
             tab.cursor_screen = Some(output.galley_pos + cursor_rect.left_bottom().to_vec2());
             let has_focus = output.response.response.has_focus();
+            // The find match: the editor only paints its selection while it
+            // has focus, so mark it (and scroll to it) while the find field
+            // has the keyboard.
+            if has_focus || changed {
+                tab.find.hit = None;
+            }
+            if let Some(hit) = tab.find.hit.clone()
+                && tab.text.is_char_boundary(hit.start)
+                && tab.text.is_char_boundary(hit.end)
+            {
+                let a = galley.pos_from_cursor(CCursor::new(byte_to_char(&tab.text, hit.start)));
+                let b = galley.pos_from_cursor(CCursor::new(byte_to_char(&tab.text, hit.end)));
+                let r = Rect::from_min_max(a.min, pos2(b.max.x.max(a.min.x + 2.0), b.max.y))
+                    .translate(output.galley_pos.to_vec2());
+                painter.set(hit_slot, Shape::rect_filled(r, 2.0, visuals.selection.bg_fill));
+                if std::mem::take(&mut tab.find.scroll) {
+                    ui.scroll_to_rect(r.expand(row_height), None);
+                }
+            }
             if has_focus {
                 let y = output.galley_pos.y + cursor_rect.min.y;
                 painter.set(
@@ -712,12 +755,14 @@ fn completion_popup(ui: &mut egui::Ui, tab: &mut Tab, font_size: f32) {
 }
 
 fn find_bar(ui: &mut egui::Ui, tab: &mut Tab) {
-    let mut find_next = false;
+    let mut step: Option<bool> = tab.find.step.take();
     let mut replace_one = false;
     let mut replace_all = false;
+    let mut field_focused = false;
     ui.horizontal(|ui| {
         let resp = ui.add(
             TextEdit::singleline(&mut tab.find.query)
+                .id(find_field_id(tab.id))
                 .hint_text("Find")
                 .desired_width(220.0),
         );
@@ -725,94 +770,117 @@ fn find_bar(ui: &mut egui::Ui, tab: &mut Tab) {
             resp.request_focus();
             tab.find.focus = false;
         }
-        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            find_next = true;
+        // A single-line field gives up focus on Enter and Esc; look at both.
+        let in_find = resp.has_focus() || resp.lost_focus();
+        let (enter, shift) = ui.input(|i| (i.key_pressed(Key::Enter), i.modifiers.shift));
+        if in_find && enter {
+            // Enter / Shift+Enter: next / previous, and stay in the field so
+            // the next Enter doesn't land in the editor.
+            step = Some(shift);
+            resp.request_focus();
         }
-        ui.add(
+        if resp.changed() {
+            tab.find.hit = None;
+        }
+        let replace = ui.add(
             TextEdit::singleline(&mut tab.find.replace)
                 .hint_text("Replace")
                 .desired_width(180.0),
         );
-        ui.checkbox(&mut tab.find.match_case, "Aa")
-            .on_hover_text("Match case");
-        find_next |= ui.button("Next").clicked();
+        if ui
+            .checkbox(&mut tab.find.match_case, "Aa")
+            .on_hover_text("Match case")
+            .changed()
+        {
+            tab.find.hit = None;
+        }
+        if ui
+            .button("↑")
+            .on_hover_text("Previous (Shift+F3)")
+            .clicked()
+        {
+            step = Some(true);
+        }
+        if ui.button("↓").on_hover_text("Next (F3)").clicked() {
+            step = Some(false);
+        }
         replace_one = ui.button("Replace").clicked();
         replace_all = ui.button("All").on_hover_text("Replace all").clicked();
         ui.label(RichText::new(&tab.find.status).weak());
-        if ui.small_button("×").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        // Esc closes the bar only when it was pressed in the bar, not to
+        // dismiss a completion popup in the editor.
+        let in_bar = in_find || replace.has_focus() || replace.lost_focus();
+        let esc = in_bar && ui.input(|i| i.key_pressed(Key::Escape));
+        if ui.small_button("×").clicked() || esc {
             tab.find.open = false;
+            tab.find.hit = None;
+            ui.memory_mut(|m| m.request_focus(tab.editor_id()));
         }
+        field_focused = resp.has_focus() || in_find;
     });
-    if tab.find.query.is_empty() {
+    if tab.find.query.is_empty() || !tab.find.open {
         return;
     }
-    let (hay, needle) = if tab.find.match_case {
-        (tab.text.clone(), tab.find.query.clone())
-    } else {
-        (tab.text.to_lowercase(), tab.find.query.to_lowercase())
-    };
-    // Lowercasing can change byte lengths for some scripts; only trust
-    // positions when it did not.
-    let same_len = hay.len() == tab.text.len();
+    // The buffer is only searched when an action fires, never per frame.
+    let query = tab.find.query.clone();
+    let case = tab.find.match_case;
 
-    if replace_all && same_len {
-        let mut out = String::with_capacity(tab.text.len());
-        let mut last = 0;
-        let mut n = 0;
-        for (pos, _) in hay.match_indices(&needle) {
-            out.push_str(&tab.text[last..pos]);
-            out.push_str(&tab.find.replace);
-            last = pos + needle.len();
-            n += 1;
+    if replace_all {
+        let (out, n) = find::replace_all(&tab.text, &query, &tab.find.replace, case);
+        if n > 0 {
+            tab.text = out;
+            let end = byte_to_char(&tab.text, tab.text.len()).min(tab.cursor.primary.index.0);
+            tab.cursor = CCursorRange::one(CCursor::new(end));
         }
-        out.push_str(&tab.text[last..]);
-        tab.text = out;
+        tab.find.hit = None;
         tab.find.status = format!("Replaced {n}");
         return;
     }
 
-    let sel_start = char_to_byte(
-        &tab.text,
-        tab.cursor.primary.index.0.min(tab.cursor.secondary.index.0),
-    );
-    let sel_end = char_to_byte(
-        &tab.text,
-        tab.cursor.primary.index.0.max(tab.cursor.secondary.index.0),
-    );
-    if replace_one && same_len && sel_end > sel_start && hay[sel_start..sel_end] == needle {
-        tab.text
-            .replace_range(sel_start..sel_end, &tab.find.replace);
-        let after = sel_start + tab.find.replace.len();
-        tab.cursor = CCursorRange::one(CCursor::new(byte_to_char(&tab.text, after)));
-        find_next = true;
+    let (sel_start, sel_end) = tab.selection_bytes();
+    if replace_one {
+        if find::is_match(&tab.text, &(sel_start..sel_end), &query, case) {
+            tab.text
+                .replace_range(sel_start..sel_end, &tab.find.replace);
+            let after = sel_start + tab.find.replace.len();
+            tab.cursor = CCursorRange::one(CCursor::new(byte_to_char(&tab.text, after)));
+        }
+        step = Some(false);
     }
-    if find_next && same_len {
-        let from = char_to_byte(
-            &tab.text,
-            tab.cursor.primary.index.0.max(tab.cursor.secondary.index.0),
-        );
-        let hay = if tab.find.match_case {
-            tab.text.clone()
-        } else {
-            tab.text.to_lowercase()
-        };
-        let found = hay[from..]
-            .find(&needle)
-            .map(|p| p + from)
-            .or_else(|| hay.find(&needle));
-        match found {
-            Some(p) => {
-                let a = byte_to_char(&tab.text, p);
-                let b = byte_to_char(&tab.text, p + needle.len());
-                let range = CCursorRange::two(CCursor::new(a), CCursor::new(b));
-                tab.cursor = range;
+    let Some(backwards) = step else { return };
+    let (sel_start, sel_end) = tab.selection_bytes();
+    let from = if backwards { sel_start } else { sel_end };
+    let opts = find::Opts {
+        match_case: case,
+        backwards,
+    };
+    match find::find(&tab.text, &query, from, opts) {
+        Some(m) => {
+            let a = byte_to_char(&tab.text, m.start);
+            let b = byte_to_char(&tab.text, m.end);
+            let range = CCursorRange::two(CCursor::new(a), CCursor::new(b));
+            tab.cursor = range;
+            if field_focused {
+                // Select without taking focus from the find field.
+                tab.quiet_select = Some(range);
+            } else {
                 tab.pending_select = Some(range);
-                let total = hay.matches(&needle).count();
-                tab.find.status = format!("{total} match{}", if total == 1 { "" } else { "es" });
             }
-            None => tab.find.status = "No matches".into(),
+            tab.find.hit = Some(m);
+            tab.find.scroll = true;
+            let total = find::matches(&tab.text, &query, case).count();
+            tab.find.status = format!("{total} match{}", if total == 1 { "" } else { "es" });
+        }
+        None => {
+            tab.find.hit = None;
+            tab.find.status = "No matches".into();
         }
     }
+}
+
+/// The find bar's search field.
+pub fn find_field_id(tab: u64) -> Id {
+    Id::new(("find_field", tab))
 }
 
 #[cfg(test)]

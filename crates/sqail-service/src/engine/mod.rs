@@ -640,6 +640,7 @@ mod tests {
             sql: "x".into(),
             params: vec![],
             max_rows: 1,
+            single_statement: false,
         };
         let sink = EventSink::Collect(Mutex::new(Vec::new()));
         let run = tokio::time::timeout(Duration::from_millis(10), c.conn().execute(&req, &sink));

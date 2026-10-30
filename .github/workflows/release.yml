@@ -24,10 +24,11 @@ jobs:
 
   version:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
       version: ${{ steps.v.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
       - name: Tag is on main
@@ -61,10 +62,13 @@ jobs:
       matrix:
         os: [ubuntu-24.04, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Linux tarball
         if: runner.os == 'Linux'
         run: ./scripts/package-linux.sh
@@ -75,7 +79,7 @@ jobs:
           # WiX 5: v6+ requires accepting the OSMF EULA.
           dotnet tool install --global wix --version 5.0.2
           ./scripts/package-windows.ps1
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sqail-${{ runner.os }}
           path: |
@@ -92,9 +96,10 @@ jobs:
     if: github.ref_type == 'tag'
     needs: [version]
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     container: archlinux:base-devel
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Pin the checksum and run makepkg up to prepare()
         shell: bash
         run: |
@@ -109,7 +114,7 @@ jobs:
           grep -q "^sha256sums=('$SUM')" /tmp/arch/PKGBUILD
           (cd /tmp/arch && su builder -c "makepkg --nobuild --nodeps")
           cp /tmp/arch/PKGBUILD out/PKGBUILD
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: arch-pkgbuild
           path: out/PKGBUILD
@@ -119,11 +124,12 @@ jobs:
     if: github.ref_type == 'tag'
     needs: [version, package, arch]
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           merge-multiple: true
@@ -135,7 +141,7 @@ jobs:
             echo "::error::CHANGELOG.md has no '## ${{ needs.version.outputs.version }}' section"
             exit 1
           fi
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           name: sqail ${{ needs.version.outputs.version }}
           body_path: notes.md
@@ -147,9 +153,10 @@ jobs:
     if: github.ref_type == 'tag'
     needs: [version, package]
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     environment: production
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: upload
           pattern: sqail-*
@@ -164,7 +171,7 @@ jobs:
             > current.json
           cat current.json
       - name: Upload to VPS
-        uses: appleboy/scp-action@v0.1.7
+        uses: appleboy/scp-action@917f8b81dfc1ccd331fef9e2d61bdc6c8be94634 # v0.1.7
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}

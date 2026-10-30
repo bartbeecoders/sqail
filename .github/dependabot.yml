@@ -1,0 +1,32 @@
+# Weekly dependency updates, grouped so they arrive as one pull request per
+# ecosystem. Security updates come separately as soon as an advisory lands.
+# sqail-legacy/ (the frozen Tauri app) is deliberately not listed.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: deps
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
+  - package-ecosystem: npm
+    directory: /sqail.portal
+    schedule:
+      interval: weekly
+    groups:
+      portal:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: portal

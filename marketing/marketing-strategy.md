@@ -23,7 +23,7 @@ Strategic foundation for promoting sqail — the why, who, and how we position t
 | **Data analysts (non-engineer)** | Intimidated by SQL syntax; need help writing queries | Natural-language-to-SQL, query explanation, schema-aware autocomplete |
 | **Backend / full-stack engineers** | Switching between psql, MySQL Workbench, and web clients is friction | Multi-driver single UI, split editor, SSH tunnels, query history |
 | **Students & self-taught learners** | Paid tools are out of reach; existing free tools feel dated | Modern UX, AI query explanation acts as a tutor |
-| **Open-source enthusiasts / Linux users** | Want tools that aren't Electron bloatware or closed source | Tauri-based (native, small), MIT/Apache licensed, Codeberg + GitHub hosted |
+| **Open-source enthusiasts / Linux users** | Want tools that aren't Electron bloatware or closed source | Tauri-based (native, small), MIT/Apache licensed, hosted on GitHub |
 
 ### Secondary segments
 
@@ -48,7 +48,7 @@ Strategic foundation for promoting sqail — the why, who, and how we position t
 1. **Size and speed** — Sub-20 MB binary, sub-second startup. No Electron, no Chromium bundle.
 2. **AI-native, not AI-bolted-on** — NL-to-SQL, query explanation, optimization, and docs generation with schema context injection. Bring-your-own-key for Claude, OpenAI, Minimax, or any OpenAI-compatible endpoint.
 3. **Privacy-first** — No telemetry. Credentials stored locally in encrypted SurrealDB. AI providers only contacted when the user configures them.
-4. **Truly open source** — Source on Codeberg + GitHub mirror. Binaries downloaded from sqail.io. No freemium trap.
+4. **Truly open source** — Source on GitHub. Binaries downloaded from sqail.io. No freemium trap.
 5. **Modern editing** — Monaco editor (same as VS Code): multi-cursor, bracket matching, split editor, snippets.
 
 ### Messaging pillars
@@ -57,7 +57,7 @@ Strategic foundation for promoting sqail — the why, who, and how we position t
 |---|---|---|
 | **Fast** | "Opens before your terminal." | <20 MB, sub-second launch, native Tauri webview |
 | **Smart** | "AI that actually knows your schema." | Schema-aware autocomplete, schema context injection, streaming NL-to-SQL |
-| **Free** | "Open source. Forever." | Codeberg + GitHub, permissive license, no account required |
+| **Free** | "Open source. Forever." | GitHub, permissive license, no account required |
 | **Private** | "Your queries stay on your machine." | No telemetry, local encrypted storage, bring-your-own-AI-key |
 | **Universal** | "Postgres, MySQL, SQLite — one editor." | tauri-plugin-sql, extensible driver model |
 
@@ -83,7 +83,7 @@ Strategic foundation for promoting sqail — the why, who, and how we position t
 - **Voice** — Short sentences. Concrete verbs. No marketing fluff. Developer-first.
 - **Visual identity** — Clean, modern, minimal. Dark-mode-first screenshots. Accent color across brand (defined in portal).
 - **Domain** — sqail.io (portal + downloads)
-- **Code home** — Codeberg (canonical) + GitHub mirror at github.com/bartbeecoders/sqail
+- **Code home** — GitHub at github.com/bartbeecoders/sqail
 
 ## 7. Distribution & Channels
 
@@ -98,7 +98,7 @@ Strategic foundation for promoting sqail — the why, who, and how we position t
 - **YouTube** — short demos, feature walkthroughs
 - **Awesome lists** — awesome-tauri, awesome-rust, awesome-sql, awesome-selfhosted
 - **ProductHunt** — one-time launch moment
-- **Codeberg Explore / GitHub Trending** — organic discovery via repo metadata and README quality
+- **GitHub Trending / Explore** — organic discovery via repo metadata and README quality
 
 ### Content types
 
@@ -116,7 +116,7 @@ Strategic foundation for promoting sqail — the why, who, and how we position t
 ### Supporting metrics
 
 - Portal traffic (sessions, downloads per platform)
-- Codeberg + GitHub stars, forks, issues
+- GitHub stars, forks, issues
 - Release download counts (per version, per platform)
 - AI feature adoption (self-reported via optional survey)
 - Community: Discord/Matrix members, GitHub discussions activity

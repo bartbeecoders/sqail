@@ -95,7 +95,7 @@ Every public artifact should map to at least one of these five. If it doesn't, i
 |---|---|---|
 | **Fast** | "Opens before your terminal." | Under 20 MB, sub-second launch, native Tauri webview. |
 | **Smart** | "AI that actually knows your schema." | Schema-aware autocomplete, schema context injection, streaming NL-to-SQL. |
-| **Free** | "Open source. Forever." | MIT license, Codeberg + GitHub, no account required. |
+| **Free** | "Open source. Forever." | MIT license, on GitHub, no account required. |
 | **Private** | "Your queries stay on your machine." | No telemetry, local encrypted storage, bring-your-own-AI-key. |
 | **Universal** | "Postgres, MySQL, SQLite — one editor." | tauri-plugin-sql + tiberius, extensible driver model. |
 

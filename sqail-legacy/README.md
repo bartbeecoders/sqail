@@ -12,7 +12,7 @@ sqail (pronounced *"snail"*) is a lightweight cross-platform desktop SQL client 
 
 It speaks PostgreSQL, MySQL, SQLite, and Microsoft SQL Server today. It uses the same Monaco editor that powers VS Code, stores credentials locally in encrypted on-disk files, and lets you bring your own API key for Claude, OpenAI, Minimax, Z.ai, LM Studio, or any OpenAI-compatible endpoint. Everything else is up to you.
 
-[**Download for your OS →**](https://sqail.io) &nbsp;·&nbsp; [Codeberg](https://codeberg.org/bartbeecoders/sqail) &nbsp;·&nbsp; [GitHub mirror](https://github.com/bartbeecoders/sqail)
+[**Download for your OS →**](https://sqail.io) &nbsp;·&nbsp; [GitHub](https://github.com/bartbeecoders/sqail)
 
 ## Why sqail
 

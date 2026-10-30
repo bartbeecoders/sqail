@@ -13,8 +13,7 @@ Verifiable claims — everything here is checkable against the repo, releases, o
 | Supported databases: PostgreSQL, MySQL, SQLite, Microsoft SQL Server | `src-tauri/src/` drivers |
 | Target binary size: under 20 MB | Confirmed in release artifacts |
 | License: MIT | `LICENSE` at repo root |
-| Canonical repo: Codeberg | `codeberg.org/bartbeecoders/sqail` |
-| Mirror: GitHub | `github.com/bartbeecoders/sqail` |
+| Repository: GitHub | `github.com/bartbeecoders/sqail` |
 
 ## AI providers supported
 

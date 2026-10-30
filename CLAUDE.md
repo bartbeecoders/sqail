@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Version 1.0 shipped as **sqail2** from a `sqail2/` subfolder. It has since been renamed to sqail and moved to the repository root. `sqail-legacy/` holds the frozen 0.x Tauri/React app, which has its own `CLAUDE.md`. Don't change it unless asked.
 
-Canonical repo is [Codeberg](https://codeberg.org/bartbeecoders/sqail); GitHub is a mirror, and it runs CI.
+The repository is on [GitHub](https://github.com/bartbeecoders/sqail), which also runs CI.
 
 ## Commands
 

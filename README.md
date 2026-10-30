@@ -5,7 +5,7 @@ sqail (pronounced *"snail"*) is a fast, native SQL editor for **PostgreSQL**,
 of rows without blinking, and it keeps database passwords off your desktop.
 
 [**Download →**](https://sqail.io) · [GitHub releases](https://github.com/bartbeecoders/sqail/releases) ·
-[Codeberg](https://codeberg.org/bartbeecoders/sqail) · [GitHub mirror](https://github.com/bartbeecoders/sqail)
+[Source on GitHub](https://github.com/bartbeecoders/sqail)
 
 > Version 1.0 was released under the name **sqail2**. The earlier Tauri app
 > (0.x, with AI features and MySQL) is kept in [`sqail-legacy/`](sqail-legacy/)

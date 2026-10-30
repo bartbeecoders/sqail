@@ -10,10 +10,9 @@ This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md). By particip
 
 ## Where things live
 
-- **Canonical source** — [Codeberg](https://codeberg.org/bartbeecoders/sqail)
-- **Mirror** — [GitHub](https://github.com/bartbeecoders/sqail)
+- **Source** — [GitHub](https://github.com/bartbeecoders/sqail)
 - **Website** — [sqail.io](https://sqail.io)
-- **Issues** — file them on GitHub (primary) or Codeberg — both are watched
+- **Issues** — file them on GitHub
 - **Discussions** — GitHub Discussions for questions, ideas, and show-and-tell
 
 If in doubt, open an issue on GitHub. We'll mirror or move it if needed.
@@ -53,7 +52,7 @@ See the [Prerequisites section of the README](README.md#prerequisites) for platf
 ### First-time setup
 
 ```bash
-git clone https://codeberg.org/bartbeecoders/sqail.git
+git clone https://github.com/bartbeecoders/sqail.git
 cd sqail
 pnpm install
 pnpm tauri dev

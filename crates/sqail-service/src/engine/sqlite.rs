@@ -275,6 +275,11 @@ impl Conn for SqliteConn {
         Ok(format!("SQLite {}", rusqlite::version()))
     }
 
+    async fn reset(&mut self) -> Result<()> {
+        // A file database has no server-side session worth resetting.
+        Ok(())
+    }
+
     fn engine(&self) -> Engine {
         Engine::Sqlite
     }

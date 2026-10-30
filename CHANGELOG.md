@@ -9,6 +9,22 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
 
 ### sqail-service
 
+- **Pooled connections start clean.** After a query, PostgreSQL connections
+  are reset (settings, role, temp tables, prepared statements, advisory
+  locks) before the next request uses them, so a `SET search_path` or
+  `SET ROLE` no longer leaks into other requests or catalog browsing. SQL
+  Server connections that ran a script or an explain are closed instead of
+  reused, because they cannot be reset.
+- **Timeouts no longer return busy connections to the pool.** Catalog and
+  explain calls cancel their query shortly before the request timeout, and a
+  connection abandoned mid-query is cancelled and closed. A slow
+  `EXPLAIN ANALYZE` no longer leaves a transaction or SHOWPLAN switched on
+  for the next user.
+- **PostgreSQL read-only profiles stay read-only.** Statements that would
+  switch the session or transaction to read-write (`SET … transaction_read_only`,
+  `BEGIN … READ WRITE`, `SET SESSION CHARACTERISTICS`, `RESET ALL`,
+  `set_config()`, `DO` blocks) are refused with 403, and the setting is now
+  part of the connection's startup parameters.
 - **SQLite stays inside its folders.** `ATTACH DATABASE` and `VACUUM INTO`
   may only name files inside `sqlite.allowed_dirs`, and on read-only
   profiles no files at all. `file:` URIs and computed file names are

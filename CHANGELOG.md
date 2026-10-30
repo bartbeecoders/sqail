@@ -14,6 +14,18 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
   the tab menu or Settings → Tabs, stay at the front of the one row). They
   are tinted and marked ⚑, have no close button, and are remembered with the
   workspace.
+- **Script definition explains failures.** When the service can't script a
+  view, procedure or function, the tab that opens shows its explanation as
+  SQL comments instead of a status-bar notice that fades away.
+
+### sqail-service
+
+- **SQL Server: say why a definition is missing** (#44). Scripting a view,
+  procedure, function or trigger with a login that may execute or read it
+  but lacks `VIEW DEFINITION` used to fail with "no definition available
+  (encrypted?)". The error now names the database user and the exact
+  `GRANT VIEW DEFINITION ON SCHEMA::… TO …;` to run, and only mentions
+  encryption for modules that really are `WITH ENCRYPTION`.
 
 ## 1.4.0 — 2026-10-30
 

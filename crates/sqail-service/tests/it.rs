@@ -1378,6 +1378,143 @@ async fn mssql_scripts_split_on_go_and_return_multiple_results() {
     assert_eq!(msgs, 2, "PRINT batch ran twice: {ev:?}");
 }
 
+/// A profile for `user` on the test SQL Server (all dev logins share a
+/// password).
+async fn mssql_as(h: &Harness, user: &str) -> Uuid {
+    let mut params = mssql().profile;
+    params["auth"]["user"] = json!(user);
+    h.create_connection(json!({
+        "name": format!("mssql as {user}"),
+        "params": params,
+        "password": password("mssql"),
+    }))
+    .await
+}
+
+/// GET .../ddl: the script, or the problem's detail.
+async fn ddl_of(h: &Harness, c: Uuid, schema: &str, name: &str) -> Result<String, String> {
+    let res = h
+        .get(&format!(
+            "/v1/connections/{c}/ddl?schema={schema}&name={name}"
+        ))
+        .await;
+    let ok = res.status().is_success();
+    let body: Value = res.json().await.unwrap();
+    if ok {
+        Ok(body["ddl"].as_str().unwrap().to_string())
+    } else {
+        Err(body["detail"].as_str().unwrap_or_default().to_string())
+    }
+}
+
+const MSSQL_LEAST: &str = "sqail_it_least";
+
+/// Routines, a view and a trigger in schema `it_ddl`, plus a login that can
+/// read and execute them but has no VIEW DEFINITION. Idempotent.
+async fn mssql_ddl_fixture(h: &Harness) {
+    let sa = mssql_as(h, "sa").await;
+    let ev = h
+        .query(
+            sa,
+            &format!(
+                "IF SCHEMA_ID('it_ddl') IS NULL EXEC('CREATE SCHEMA it_ddl')
+GO
+IF OBJECT_ID('it_ddl.t') IS NULL CREATE TABLE it_ddl.t (id int)
+GO
+CREATE OR ALTER PROCEDURE it_ddl.p AS SELECT 1 AS one
+GO
+CREATE OR ALTER FUNCTION it_ddl.f (@x int) RETURNS int AS BEGIN RETURN @x + 1 END
+GO
+CREATE OR ALTER VIEW it_ddl.v AS SELECT id FROM it_ddl.t
+GO
+CREATE OR ALTER TRIGGER it_ddl.tr ON it_ddl.t AFTER INSERT AS SET NOCOUNT ON
+GO
+CREATE OR ALTER PROCEDURE it_ddl.enc WITH ENCRYPTION AS SELECT 2 AS two
+GO
+IF SUSER_ID('{MSSQL_LEAST}') IS NULL
+    CREATE LOGIN {MSSQL_LEAST} WITH PASSWORD = '{pw}', CHECK_POLICY = OFF;
+IF USER_ID('{MSSQL_LEAST}') IS NULL CREATE USER {MSSQL_LEAST} FOR LOGIN {MSSQL_LEAST};
+ALTER ROLE db_datareader ADD MEMBER {MSSQL_LEAST};
+GRANT EXECUTE ON SCHEMA::it_ddl TO {MSSQL_LEAST};
+REVOKE VIEW DEFINITION ON SCHEMA::it_ddl FROM {MSSQL_LEAST};",
+                pw = password("mssql").unwrap()
+            ),
+        )
+        .await;
+    assert!(error(&ev).is_none(), "{ev:?}");
+}
+
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn mssql_routine_definitions() {
+    let h = harness().await;
+    mssql_ddl_fixture(&h).await;
+    let owner = profile(&h, &mssql(), false).await;
+    let least = mssql_as(&h, MSSQL_LEAST).await;
+
+    // The least-privileged login sees every object…
+    let ev = h
+        .query(
+            least,
+            "SELECT count(*) FROM sys.objects WHERE schema_id = SCHEMA_ID('it_ddl') AND name IN ('p', 'f', 'v', 'tr', 'enc')",
+        )
+        .await;
+    assert_eq!(rows(&ev, 0), vec![vec![json!(5)]], "{ev:?}");
+
+    for (name, expect) in [
+        ("p", "PROCEDURE it_ddl.p"),
+        ("f", "FUNCTION it_ddl.f"),
+        ("v", "VIEW it_ddl.v"),
+        ("tr", "TRIGGER it_ddl.tr"),
+    ] {
+        // …the owner gets the source…
+        let ddl = ddl_of(&h, owner, "it_ddl", name).await;
+        assert!(
+            ddl.as_ref().is_ok_and(|d| d.contains(expect)),
+            "{name}: {ddl:?}"
+        );
+        // …and the other login is told which GRANT it lacks.
+        let err = ddl_of(&h, least, "it_ddl", name).await.unwrap_err();
+        assert!(
+            err.contains(&format!(
+                "[{MSSQL_LEAST}] lacks VIEW DEFINITION on [it_ddl].[{name}]"
+            )),
+            "{name}: {err}"
+        );
+        assert!(
+            err.ends_with(&format!(
+                "GRANT VIEW DEFINITION ON SCHEMA::[it_ddl] TO [{MSSQL_LEAST}];"
+            )),
+            "{name}: {err}"
+        );
+    }
+
+    // Encrypted modules have no source for anyone, and that is what both hear.
+    for c in [owner, least] {
+        let err = ddl_of(&h, c, "it_ddl", "enc").await.unwrap_err();
+        assert!(err.contains("WITH ENCRYPTION"), "{err}");
+        assert!(!err.contains("GRANT"), "{err}");
+    }
+
+    // The suggested GRANT is enough.
+    let sa = mssql_as(&h, "sa").await;
+    let grant = |verb: &str| {
+        format!(
+            "{verb} VIEW DEFINITION ON SCHEMA::it_ddl {} {MSSQL_LEAST}",
+            if verb == "GRANT" { "TO" } else { "FROM" }
+        )
+    };
+    let ev = h.query(sa, &grant("GRANT")).await;
+    assert!(error(&ev).is_none(), "{ev:?}");
+    let ddl = ddl_of(&h, least, "it_ddl", "p").await;
+    let ev = h.query(sa, &grant("REVOKE")).await;
+    assert!(error(&ev).is_none(), "{ev:?}");
+    assert!(
+        ddl.as_ref().is_ok_and(|d| d.contains("PROCEDURE it_ddl.p")),
+        "{ddl:?}"
+    );
+}
+
 #[tokio::test]
 #[ignore = "needs podman test databases (scripts/db.sh up)"]
 async fn postgres_types_and_notices() {

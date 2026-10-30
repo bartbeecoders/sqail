@@ -1070,16 +1070,19 @@ impl SqailApp {
         let Some(engine) = self.service.connection(conn).map(|c| c.engine) else {
             return;
         };
-        let Some((schema, table)) = crate::editing::source_table(&run.sql, engine) else {
+        let Some(source) = crate::editing::source_table(&run.sql, engine) else {
             return;
         };
         run.edit_status = Some("Loading table information…".into());
         let columns = run.results[0].columns.clone();
         let (tab_id, run_id) = (tab.id, run.id);
         self.worker.run(async move {
-            let state = match client.columns(conn, schema.as_deref(), &table).await {
-                Ok(cols) if cols.is_empty() => Err(format!("table {table} not found")),
-                Ok(cols) => crate::editing::EditState::new(engine, schema, table, &columns, &cols)
+            let state = match client
+                .columns(conn, source.schema.as_deref(), &source.table)
+                .await
+            {
+                Ok(cols) if cols.is_empty() => Err(format!("table {} not found", source.table)),
+                Ok(cols) => crate::editing::EditState::new(engine, source, &columns, &cols)
                     .map(Box::new)
                     .map_err(|e| e.to_string()),
                 Err(e) => Err(e.to_string()),

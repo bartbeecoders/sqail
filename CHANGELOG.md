@@ -7,6 +7,10 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
 
 ## Unreleased
 
+- **Fix:** *Edit data* follows the select list: an aliased column
+  (`other_id AS id`) or a literal is no longer written to the table column
+  of that name, which could update the wrong rows (#67).
+
 ## 1.3.0 — 2026-10-10
 
 ### sqail

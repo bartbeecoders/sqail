@@ -94,11 +94,14 @@ fn exercise(s: &Svc, conn: Uuid, engine: Engine, schema: Option<&str>, table: &s
     let select = format!("SELECT id, name, price FROM {qualified} ORDER BY id");
     let run = s.run(conn, &select);
     let rs = &run.results[0];
-    let (sch, tbl) = editing::source_table(&select, engine).unwrap();
+    let source = editing::source_table(&select, engine).unwrap();
     let cols =
-        s.rt.block_on(s.client.columns(conn, sch.as_deref(), &tbl))
-            .unwrap();
-    let mut e = EditState::new(engine, sch, tbl, &rs.columns, &cols).unwrap();
+        s.rt.block_on(
+            s.client
+                .columns(conn, source.schema.as_deref(), &source.table),
+        )
+        .unwrap();
+    let mut e = EditState::new(engine, source.clone(), &rs.columns, &cols).unwrap();
     e.set(0, 2, Some("12.34".into()), rs); // row id 1
     e.set(0, 1, None, rs); // name → NULL
     e.deleted.insert(1); // row id 2
@@ -125,14 +128,7 @@ fn exercise(s: &Svc, conn: Uuid, engine: Engine, schema: Option<&str>, table: &s
     assert_eq!(rows[2][1], Cell::Text("it's new".into()));
 
     // Editing a row that no longer exists fails and changes nothing.
-    let mut stale = EditState::new(
-        engine,
-        e.schema.clone(),
-        e.table.clone(),
-        &rs.columns,
-        &cols,
-    )
-    .unwrap();
+    let mut stale = EditState::new(engine, source, &rs.columns, &cols).unwrap();
     stale.set(1, 2, Some("1".into()), rs); // id 2, deleted above
     stale.set(0, 2, Some("99".into()), rs);
     let err =

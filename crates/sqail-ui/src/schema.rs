@@ -1141,7 +1141,7 @@ fn apply(app: &mut SqailApp, a: Action, ctx: &egui::Context) {
     }
 }
 
-/// The schema cache seen through the completer's [`Catalog`] trait. Lookups
+/// The schema cache seen through the completer's [`Catalog`](crate::sql::complete::Catalog) trait. Lookups
 /// that miss are recorded so the app can load them.
 pub struct TreeCatalog<'a> {
     tree: &'a SchemaTree,

@@ -10,7 +10,7 @@ NAME="sqail-$VERSION-linux-$ARCH"
 STAGE="$ROOT/dist/$NAME"
 
 info "building release binaries"
-cargo build --release -p sqail-ui -p sqail-service
+cargo build --release --locked -p sqail-ui -p sqail-service
 info "staging $NAME"
 rm -rf "$STAGE" && mkdir -p "$STAGE"
 install -Dm755 target/release/sqail "$STAGE/bin/sqail"

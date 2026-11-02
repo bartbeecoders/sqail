@@ -547,9 +547,28 @@ pub fn complete(
     cat: &dyn Catalog,
 ) -> Option<Completion> {
     let cursor = cursor.min(text.len());
+    // A name typed after an opening quote (`[Or`, `"Or`) is analysed as a
+    // plain word: the quote and a closer right after the cursor are blanked
+    // (same length, so offsets hold) and become part of the replaced range.
+    let quote = open_quote(text, cursor, engine);
+    let blanked;
+    let text = match quote {
+        Some((open, close)) => {
+            let mut s = text.to_string();
+            s.replace_range(open..open + 1, " ");
+            if let Some(c) = close {
+                s.replace_range(c..c + 1, " ");
+            }
+            blanked = s;
+            blanked.as_str()
+        }
+        None => text,
+    };
+    // Where the name starts: the blanked quote may end the statement range.
+    let anchor = quote.map_or(cursor, |(open, _)| open);
     let stmt = statements::split(text, Some(engine))
         .into_iter()
-        .find(|r| r.start <= cursor && cursor <= r.end + 1)
+        .find(|r| r.start <= anchor && anchor <= r.end + 1)
         .unwrap_or(cursor..cursor);
     let start = stmt.start.min(cursor);
     let end = stmt.end.max(cursor);
@@ -575,9 +594,11 @@ pub fn complete(
         p -= 1;
     }
     let prefix = &sql[p..rel];
-    // Qualifier: `x.` right before the prefix.
-    let qualifier = (p > 0 && bytes[p - 1] == b'.').then(|| {
-        let q_end = p - 1;
+    // The name with its opening quote, if any.
+    let name_start = if quote.is_some() { p - 1 } else { p };
+    // Qualifier: `x.` right before the name (`[dbo].[Or`, `"s"."or`).
+    let qualifier = (name_start > 0 && bytes[name_start - 1] == b'.').then(|| {
+        let q_end = name_start - 1;
         let tok = toks
             .iter()
             .rev()
@@ -699,7 +720,8 @@ pub fn complete(
         let names_match = items
             .iter()
             .any(|c| c.label.to_lowercase().contains(&prefix.to_lowercase()));
-        if !prefix.is_empty() && !(table_position && names_match) {
+        // A quoted name is never a keyword.
+        if !prefix.is_empty() && quote.is_none() && !(table_position && names_match) {
             for k in keywords() {
                 items.push(Candidate {
                     label: k.to_string(),
@@ -735,10 +757,38 @@ pub fn complete(
     scored.sort_by(|a, b| (a.0, a.1.kind, &a.1.label).cmp(&(b.0, b.1.kind, &b.1.label)));
     scored.dedup_by(|a, b| a.1.label == b.1.label && a.1.kind == b.1.kind);
     let items: Vec<Candidate> = scored.into_iter().map(|(_, c)| c).take(60).collect();
+    let end = quote.and_then(|(_, close)| close).map_or(cursor, |c| c + 1);
     (!items.is_empty()).then(|| Completion {
-        range: start + p..start + rel,
+        range: start + name_start..end,
         items,
     })
+}
+
+/// The opening `[`, `"` or `` ` `` right before the name being typed at
+/// `cursor`, and the matching closer when it directly follows the cursor
+/// (`[Or|]`). `None` when the quote closes a name (`"a"|`) or sits in a
+/// string or comment.
+fn open_quote(text: &str, cursor: usize, engine: Engine) -> Option<(usize, Option<usize>)> {
+    let b = text.as_bytes();
+    let mut p = cursor;
+    while p > 0 && (b[p - 1].is_ascii_alphanumeric() || b[p - 1] == b'_' || b[p - 1] >= 0x80) {
+        p -= 1;
+    }
+    let open = p.checked_sub(1)?;
+    let closer = match b[open] {
+        b'[' if engine != Engine::Postgres => b']',
+        q @ (b'"' | b'`') => q,
+        _ => return None,
+    };
+    let tok = tokenize(text, Some(engine))
+        .into_iter()
+        .find(|t| t.range.start == open)?;
+    if tok.kind != Kind::QuotedIdent {
+        return None;
+    }
+    // The token closes right after the cursor: `[Or]`, `"Or"`, `[]`.
+    let close = (tok.range.end == cursor + 1 && b.get(cursor) == Some(&closer)).then_some(cursor);
+    Some((open, close))
 }
 
 /// Clause keywords: the nearest one before the cursor says what is expected
@@ -1252,5 +1302,65 @@ mod tests {
             l.contains(&"customer_id".to_string()),
             "unique names stay bare: {l:?}"
         );
+    }
+
+    /// The text after taking the first candidate, and all labels.
+    fn take_first(engine: Engine, text: &str) -> (String, Vec<String>) {
+        let cursor = text.find('|').expect("cursor marker");
+        let mut t = text.replace('|', "");
+        let c = complete(&t, cursor, engine, &Fake).expect("candidates");
+        t.replace_range(c.range.clone(), &c.items[0].insert);
+        (t, c.items.into_iter().map(|i| i.label).collect())
+    }
+
+    #[test]
+    fn mssql_bracketed_names() {
+        let (t, l) = take_first(Engine::Mssql, "SELECT * FROM [sales].[or|");
+        assert_eq!(l, ["orders"]);
+        assert_eq!(t, "SELECT * FROM [sales].[orders]");
+        let (t, _) = take_first(Engine::Mssql, "SELECT * FROM [sales].[or|] o");
+        assert_eq!(
+            t, "SELECT * FROM [sales].[orders] o",
+            "the closer is replaced"
+        );
+        let (t, _) = take_first(Engine::Mssql, "SELECT * FROM sales.[or| WHERE 1 = 1");
+        assert_eq!(t, "SELECT * FROM sales.[orders] WHERE 1 = 1");
+        let (_, l) = take_first(Engine::Mssql, "SELECT * FROM [sales].[|]");
+        assert_eq!(l, ["customers", "orders"]);
+
+        let (t, l) = take_first(Engine::Mssql, "SELECT * FROM [Ord|");
+        assert_eq!(l, ["sales.orders"], "tables only, no keywords");
+        assert_eq!(t, "SELECT * FROM [sales].[orders]");
+        let (t, _) = take_first(Engine::Mssql, "SELECT * FROM [|]");
+        assert!(t.starts_with("SELECT * FROM [") && !t.contains("[["), "{t}");
+    }
+
+    #[test]
+    fn mssql_bracketed_qualifiers() {
+        let (t, l) = take_first(Engine::Mssql, "SELECT [o].[st| FROM sales.orders o");
+        assert_eq!(l, ["status", "customer_id"]);
+        assert_eq!(t, "SELECT [o].[status] FROM sales.orders o");
+        let (t, _) = take_first(Engine::Mssql, "SELECT o.[st|] FROM sales.orders o");
+        assert_eq!(t, "SELECT o.[status] FROM sales.orders o");
+        let (_, l) = take_first(Engine::Mssql, "SELECT [o].| FROM sales.orders o");
+        assert_eq!(l, ["customer_id", "id", "status"]);
+    }
+
+    #[test]
+    fn postgres_double_quoted_names() {
+        let (t, l) = take_first(Engine::Postgres, r#"SELECT * FROM "sales"."or|"#);
+        assert_eq!(l, ["orders"]);
+        assert_eq!(t, "SELECT * FROM \"sales\".orders");
+        let (t, _) = take_first(Engine::Postgres, r#"SELECT * FROM "sales"."or|" o"#);
+        assert_eq!(t, "SELECT * FROM \"sales\".orders o");
+        let (t, _) = take_first(Engine::Postgres, r#"SELECT "o"."st|" FROM sales.orders o"#);
+        assert_eq!(t, "SELECT \"o\".status FROM sales.orders o");
+        let (t, l) = take_first(Engine::Postgres, r#"SELECT * FROM "no|"#);
+        assert_eq!(l, ["notes"], "tables only, no keywords");
+        assert_eq!(t, "SELECT * FROM notes");
+        // A closing quote opens nothing: only what follows it is replaced.
+        let t = r#"SELECT "o" FROM sales.orders o"#;
+        let c = complete(t, 10, Engine::Postgres, &Fake).unwrap();
+        assert_eq!(c.range, 10..10);
     }
 }

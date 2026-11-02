@@ -14,6 +14,11 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
   the tab menu or Settings → Tabs, stay at the front of the one row). They
   are tinted and marked ⚑, have no close button, and are remembered with the
   workspace.
+- **Fix:** completing a name after an opening `[`, `"` or `` ` `` replaces
+  the quote (and a closer right after the cursor) instead of doubling it:
+  `FROM [Or` gives `[sales].[orders]`, not `[[sales].[orders]`. A quoted
+  qualifier works too: `[dbo].[Or` and `"sales"."or` offer that schema's
+  tables, `[o].[st` the alias's columns (#71).
 - **Fix:** completion offers tables, not columns, where only a table fits:
   after a comma in the `FROM` list following an alias or a table hint
   (`FROM orders AS o, …`, `FROM t WITH (NOLOCK), …`), after

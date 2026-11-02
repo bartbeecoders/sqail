@@ -24,6 +24,13 @@ published as the [`nightly` prerelease](https://github.com/bartbeecoders/sqail/r
 It has passed the full test suite but is otherwise untried; use a tagged
 release for anything that matters. Each nightly replaces the previous one.
 
+**Verify the download:** each release has a `SHA256SUMS` file and a signed
+build provenance attestation for every package. In the download folder,
+`sha256sum -c --ignore-missing SHA256SUMS` checks the hashes, and
+`gh attestation verify <file> --repo bartbeecoders/sqail` (GitHub CLI) checks
+that the file was built by sqail's release workflow. See
+[Verifying a download](security.md#verifying-a-download).
+
 ## First start
 
 sqail offers two choices:

@@ -2,11 +2,11 @@ name: release
 
 # Tag v<version> (matching `version` in Cargo.toml) to release:
 #   ci.yml checks → Linux tarball + Windows zip/MSI + pinned Arch PKGBUILD
-#   → GitHub release,
+#   → SBOMs, SHA256SUMS and build provenance attestations → GitHub release,
 #   upload to the download server (+ current.json) → portal redeploy.
 # Daily builds of main are nightly.yml's job; this is for stable versions.
-# "Run workflow" (workflow_dispatch) only builds the packages and attaches
-# them to the run as artifacts.
+# "Run workflow" (workflow_dispatch) only builds the packages (+ SBOMs and
+# SHA256SUMS, but no attestations) and attaches them to the run as artifacts.
 on:
   push:
     tags: ["v*"]
@@ -123,9 +123,64 @@ jobs:
           path: out/PKGBUILD
           if-no-files-found: error
 
+  provenance:
+    # One SHA256SUMS over everything the release ships, a CycloneDX SBOM for
+    # each of the two binaries' crates, and, for tags, a signed build
+    # provenance attestation per file (`gh attestation verify`). Only tags
+    # are attested, so an attestation always means "built from a v* tag".
+    needs: [version, package]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
+        with:
+          tool: cargo-cyclonedx@0.5.9
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          pattern: sqail-*
+          merge-multiple: true
+      - name: SBOMs
+        run: |
+          # --target all: one SBOM covers the Linux and the Windows build.
+          cargo cyclonedx --format json --spec-version 1.5 --target all
+          for c in sqail-ui sqail-service; do
+            mv "crates/$c/$c.cdx.json" "dist/sqail-$VERSION-$c.cdx.json"
+          done
+      - name: SHA256SUMS
+        run: |
+          cd dist
+          shopt -s nullglob
+          subjects=(*.tar.gz *.zip *.msi *.cdx.json)
+          sha256sum -- "${subjects[@]}" > SHA256SUMS
+          cat SHA256SUMS
+      - name: Attest build provenance
+        if: github.ref_type == 'tag'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          # sqail-*, so deploy-binaries uploads it to the server as well.
+          name: sqail-provenance
+          path: |
+            dist/SHA256SUMS
+            dist/*.cdx.json
+          if-no-files-found: error
+
   github-release:
     if: github.ref_type == 'tag'
-    needs: [version, package, arch]
+    needs: [version, package, arch, provenance]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -154,7 +209,7 @@ jobs:
 
   deploy-binaries:
     if: github.ref_type == 'tag'
-    needs: [version, package]
+    needs: [version, package, provenance]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: production
@@ -165,13 +220,21 @@ jobs:
           pattern: sqail-*
           merge-multiple: true
       - name: Write current.json for the portal
+        # `files` lists every file name; `sha256` maps each file in
+        # SHA256SUMS to its hash, so a download from the server can be
+        # checked against the GitHub release.
         run: |
           cd upload
-          ls -1 | jq -R -s \
+          files=(*)
+          jq -n \
             --arg version "${{ needs.version.outputs.version }}" \
             --arg date "$(date -u +%Y-%m-%d)" \
-            '{version: $version, date: $date, files: (split("\n") | map(select(length > 0)))}' \
-            > current.json
+            --rawfile sums SHA256SUMS \
+            '{version: $version, date: $date, files: $ARGS.positional,
+              sha256: ($sums | split("\n") | map(select(length > 0)
+                | capture("^(?<hash>[0-9a-f]{64}) [ *](?<name>.+)$")
+                | {key: .name, value: .hash}) | from_entries)}' \
+            --args "${files[@]}" > current.json
           cat current.json
       - name: Upload to VPS
         uses: appleboy/scp-action@917f8b81dfc1ccd331fef9e2d61bdc6c8be94634 # v0.1.7

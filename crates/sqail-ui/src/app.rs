@@ -2045,7 +2045,8 @@ impl SqailApp {
                 .selected_text(label)
                 .width(220.0)
                 .show_ui(ui, |ui| {
-                    for c in &connections {
+                    // Engines newer than this build can't be queried from here.
+                    for c in connections.iter().filter(|c| c.engine.is_known()) {
                         let color = c
                             .color
                             .as_deref()

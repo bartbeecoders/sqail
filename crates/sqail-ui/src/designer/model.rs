@@ -129,7 +129,7 @@ pub fn privileges(engine: Engine) -> &'static [&'static str] {
             "CONTROL",
             "VIEW DEFINITION",
         ],
-        Engine::Sqlite => &[],
+        Engine::Sqlite | Engine::Unknown => &[],
     }
 }
 
@@ -176,7 +176,7 @@ pub fn type_suggestions(engine: Engine) -> &'static [&'static str] {
             "uniqueidentifier",
             "varbinary(max)",
         ],
-        Engine::Sqlite => &["INTEGER", "REAL", "NUMERIC", "TEXT", "BLOB"],
+        Engine::Sqlite | Engine::Unknown => &["INTEGER", "REAL", "NUMERIC", "TEXT", "BLOB"],
     }
 }
 
@@ -184,7 +184,7 @@ fn default_schema(engine: Engine) -> &'static str {
     match engine {
         Engine::Postgres => "public",
         Engine::Mssql => "dbo",
-        Engine::Sqlite => "main",
+        Engine::Sqlite | Engine::Unknown => "main",
     }
 }
 
@@ -245,7 +245,7 @@ impl Design {
         let id_type = match engine {
             Engine::Postgres => "integer",
             Engine::Mssql => "int",
-            Engine::Sqlite => "INTEGER",
+            Engine::Sqlite | Engine::Unknown => "INTEGER",
         };
         let mut d = Self {
             engine,
@@ -402,7 +402,7 @@ impl Design {
         let data_type = match self.engine {
             Engine::Postgres => "text",
             Engine::Mssql => "nvarchar(255)",
-            Engine::Sqlite => "TEXT",
+            Engine::Sqlite | Engine::Unknown => "TEXT",
         };
         let n = self.table.columns.len() + 1;
         self.table.columns.push(Column {
@@ -995,7 +995,7 @@ impl Design {
                         ));
                     }
                 }
-                Engine::Sqlite => {} // changes like these rebuild the table
+                Engine::Sqlite | Engine::Unknown => {} // changes like these rebuild the table
             }
         }
         for c in &t.columns {
@@ -1258,7 +1258,7 @@ mod tests {
         let schema = match engine {
             Engine::Postgres => "sales",
             Engine::Mssql => "dbo",
-            Engine::Sqlite => "main",
+            Engine::Sqlite | Engine::Unknown => "main",
         };
         Design::from_catalog(
             engine,

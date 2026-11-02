@@ -56,6 +56,7 @@ async fn rows(conn: &mut dyn Conn, sql: &str, params: Vec<Param>) -> Result<Vec<
 
 pub async fn databases(conn: &mut dyn Conn) -> Result<Vec<NamedItem>> {
     let sql = match conn.engine() {
+        Engine::Unknown => return Err(DbError::unknown_engine()),
         Engine::Postgres => {
             "SELECT datname::text FROM pg_database WHERE NOT datistemplate AND datallowconn ORDER BY 1"
         }
@@ -69,6 +70,7 @@ pub async fn databases(conn: &mut dyn Conn) -> Result<Vec<NamedItem>> {
 
 pub async fn schemas(conn: &mut dyn Conn) -> Result<Vec<NamedItem>> {
     let sql = match conn.engine() {
+        Engine::Unknown => return Err(DbError::unknown_engine()),
         Engine::Postgres => {
             "SELECT nspname::text FROM pg_namespace
              WHERE nspname NOT LIKE 'pg\\_%' AND nspname <> 'information_schema' ORDER BY 1"
@@ -95,6 +97,7 @@ async fn names(conn: &mut dyn Conn, sql: &str, params: Vec<Param>) -> Result<Vec
 
 pub async fn tables(conn: &mut dyn Conn, schema: Option<&str>) -> Result<Vec<TableInfo>> {
     let (sql, params) = match conn.engine() {
+        Engine::Unknown => return Err(DbError::unknown_engine()),
         Engine::Postgres => (
             "SELECT n.nspname::text, c.relname::text, c.relkind::text
              FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -174,6 +177,7 @@ pub async fn columns(
     table: &str,
 ) -> Result<Vec<ColumnInfo>> {
     let (sql, params) = match conn.engine() {
+        Engine::Unknown => return Err(DbError::unknown_engine()),
         Engine::Postgres => (
             "SELECT a.attname::text, a.attnum::int8, format_type(a.atttypid, a.atttypmod)::text,
                     (NOT a.attnotnull)::bool, pg_get_expr(d.adbin, d.adrelid)::text,
@@ -247,6 +251,7 @@ pub async fn indexes(
     table: &str,
 ) -> Result<Vec<IndexInfo>> {
     let (sql, params) = match conn.engine() {
+        Engine::Unknown => return Err(DbError::unknown_engine()),
         Engine::Postgres => (
             "SELECT ic.relname::text,
                     (SELECT string_agg(pg_get_indexdef(i.indexrelid, k + 1, true), chr(31) ORDER BY k)
@@ -314,6 +319,7 @@ pub async fn foreign_keys(
     table: &str,
 ) -> Result<Vec<ForeignKeyInfo>> {
     let (sql, params) = match conn.engine() {
+        Engine::Unknown => return Err(DbError::unknown_engine()),
         Engine::Postgres => (
             "SELECT con.conname::text,
                     (SELECT string_agg(a.attname, chr(31) ORDER BY k.ord)
@@ -400,6 +406,7 @@ pub async fn foreign_keys(
 
 pub async fn routines(conn: &mut dyn Conn, schema: Option<&str>) -> Result<Vec<RoutineInfo>> {
     let (sql, params) = match conn.engine() {
+        Engine::Unknown => return Err(DbError::unknown_engine()),
         Engine::Postgres => (
             "SELECT n.nspname::text, p.proname::text, p.prokind::text
              FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -443,6 +450,7 @@ pub async fn privileges(
     table: &str,
 ) -> Result<TablePrivileges> {
     let (grants_sql, principals_sql, params) = match conn.engine() {
+        Engine::Unknown => return Err(DbError::unknown_engine()),
         Engine::Sqlite => {
             return Ok(TablePrivileges {
                 supported: false,
@@ -510,6 +518,7 @@ pub async fn privileges(
 pub async fn ddl(conn: &mut dyn Conn, schema: Option<&str>, name: &str) -> Result<Ddl> {
     let not_found = || DbError::Invalid(format!("object '{name}' not found"));
     let ddl = match conn.engine() {
+        Engine::Unknown => return Err(DbError::unknown_engine()),
         Engine::Sqlite => {
             let db = sqlite_schema(conn, schema).await?;
             let sql = format!(

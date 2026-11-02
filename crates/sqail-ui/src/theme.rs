@@ -17,6 +17,7 @@ pub fn engine_label(e: sqail_client::proto::Engine) -> &'static str {
         Engine::Postgres => "PostgreSQL",
         Engine::Mssql => "SQL Server",
         Engine::Sqlite => "SQLite",
+        Engine::Unknown => "unsupported engine",
     }
 }
 

@@ -598,7 +598,7 @@
         "type": "object"
       },
       "ConnectionParams": {
-        "description": "Engine-specific connection parameters. Secrets are *not* part of this type;\nsee [`ConnectionInput::password`].",
+        "description": "Engine-specific connection parameters. Secrets are *not* part of this type;\nsee [`ConnectionInput::password`].\n\nDeserializing never fails on an unknown `engine` tag: such parameters\nbecome [`ConnectionParams::Other`], so an older client can still list the\nconnections of a newer service. Known tags with bad fields still fail.",
         "oneOf": [
           {
             "allOf": [
@@ -724,7 +724,8 @@
         "enum": [
           "postgres",
           "mssql",
-          "sqlite"
+          "sqlite",
+          "unknown"
         ],
         "type": "string"
       },
@@ -1505,6 +1506,21 @@
             "required": [
               "elapsed_ms",
               "cancelled",
+              "event"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "An event newer than this build. Clients decode event names they do\nnot know into this (and may skip it); the service never sends it.",
+            "properties": {
+              "event": {
+                "enum": [
+                  "unknown"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
               "event"
             ],
             "type": "object"

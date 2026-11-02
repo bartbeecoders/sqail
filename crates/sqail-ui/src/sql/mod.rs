@@ -12,7 +12,8 @@ pub fn quote_ident(engine: sqail_client::proto::Engine, name: &str) -> String {
     use sqail_client::proto::Engine;
     match engine {
         Engine::Mssql => format!("[{}]", name.replace(']', "]]")),
-        Engine::Postgres | Engine::Sqlite => {
+        // Standard SQL quoting for unknown engines too.
+        Engine::Postgres | Engine::Sqlite | Engine::Unknown => {
             let plain = name
                 .chars()
                 .next()

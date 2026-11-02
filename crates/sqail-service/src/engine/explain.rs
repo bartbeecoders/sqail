@@ -13,6 +13,7 @@ pub async fn explain(conn: &mut dyn Conn, sql: &str, analyze: bool) -> Result<Pl
         return Err(DbError::Invalid("nothing to explain".into()));
     }
     match conn.engine() {
+        Engine::Unknown => Err(DbError::unknown_engine()),
         Engine::Postgres => {
             let opts = if analyze {
                 "ANALYZE, BUFFERS, FORMAT JSON"

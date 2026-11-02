@@ -622,6 +622,33 @@ async fn pg_ssl_certs_are_stored_and_the_key_is_write_only() {
 }
 
 #[tokio::test]
+async fn unknown_engines_are_rejected_with_400() {
+    let h = harness().await;
+    let body = json!({"name": "x", "params": {"engine": "oracle", "host": "db"}});
+    for path in [
+        "/v1/connections",
+        "/v1/connections/test",
+        "/v1/connections/databases",
+    ] {
+        let res = h.post(path, &body, &h.admin).await;
+        let status = res.status();
+        let text = res.text().await.unwrap();
+        assert_eq!(status, 400, "{path}: {text}");
+        assert!(
+            text.contains("engine 'oracle' is not supported by this sqail-service version"),
+            "{path}: {text}"
+        );
+    }
+    // A known engine with a bad field still gets serde's own message.
+    let body = json!({"name": "x", "params": {"engine": "postgres", "host": "db"}});
+    let res = h.post("/v1/connections", &body, &h.admin).await;
+    let status = res.status();
+    let text = res.text().await.unwrap();
+    assert!(status.is_client_error(), "{text}");
+    assert!(text.contains("database"), "{text}");
+}
+
+#[tokio::test]
 async fn sqlite_outside_allowed_dirs_is_rejected() {
     let h = harness().await;
     let res = h

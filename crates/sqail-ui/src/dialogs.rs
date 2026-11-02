@@ -405,6 +405,8 @@ impl ConnForm {
                 f.sqlite_path = p.path.clone();
                 f.sqlite_create = p.create;
             }
+            // Not offered for editing (the sidebar shows it as unsupported).
+            ConnectionParams::Other(_) => {}
         }
         f
     }
@@ -456,7 +458,7 @@ impl ConnForm {
         match &mut params {
             ConnectionParams::Postgres(p) => p.database.clear(),
             ConnectionParams::Mssql(p) => p.database = None,
-            ConnectionParams::Sqlite(_) => {}
+            ConnectionParams::Sqlite(_) | ConnectionParams::Other(_) => {}
         }
         Ok((
             format!("{params:?}|{:?}|{:?}", input.password, input.ssl_client_key),
@@ -1312,7 +1314,7 @@ fn already_added(db: &AzureDatabase, existing: &[Connection]) -> bool {
                 && p.host.eq_ignore_ascii_case(&db.host)
                 && p.database == db.database
         }
-        ConnectionParams::Sqlite(_) => false,
+        ConnectionParams::Sqlite(_) | ConnectionParams::Other(_) => false,
     })
 }
 

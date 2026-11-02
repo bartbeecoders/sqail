@@ -75,6 +75,10 @@ fn validate(state: &AppState, input: &ConnectionInput) -> ApiResult<()> {
             check_path(std::path::Path::new(&p.path), state.config.sqlite_paths())?;
             Ok(())
         }
+        ConnectionParams::Other(_) => Err(ApiError::bad_request(format!(
+            "engine '{}' is not supported by this sqail-service version",
+            input.params.engine_name()
+        ))),
         _ => Ok(()),
     }
 }

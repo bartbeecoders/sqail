@@ -60,6 +60,7 @@ pub fn default_schema(engine: Engine) -> &'static str {
         Engine::Postgres => "public",
         Engine::Mssql => "dbo",
         Engine::Sqlite => "main",
+        Engine::Unknown => "",
     }
 }
 

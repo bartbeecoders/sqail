@@ -5,7 +5,7 @@
 //! no driver-specific code.
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
 #[cfg(feature = "openapi")]
@@ -49,10 +49,21 @@ pub enum Engine {
     Postgres,
     Mssql,
     Sqlite,
+    /// An engine newer than this build. Clients decode engine names they do
+    /// not know into this, so an older client keeps working against a newer
+    /// service; the service never sends it and rejects it on input.
+    #[serde(other)]
+    Unknown,
 }
 
 impl Engine {
+    /// Every engine this build supports (without [`Engine::Unknown`]).
     pub const ALL: [Engine; 3] = [Engine::Postgres, Engine::Mssql, Engine::Sqlite];
+
+    /// Whether this build knows the engine, i.e. it is not [`Engine::Unknown`].
+    pub fn is_known(self) -> bool {
+        self != Engine::Unknown
+    }
 }
 
 /// Error body for every non-2xx response (`application/problem+json`).
@@ -138,13 +149,22 @@ pub struct CreatedToken {
 
 /// Engine-specific connection parameters. Secrets are *not* part of this type;
 /// see [`ConnectionInput::password`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Deserializing never fails on an unknown `engine` tag: such parameters
+/// become [`ConnectionParams::Other`], so an older client can still list the
+/// connections of a newer service. Known tags with bad fields still fail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(tag = "engine", rename_all = "lowercase")]
 pub enum ConnectionParams {
     Postgres(PostgresParams),
     Mssql(MssqlParams),
     Sqlite(SqliteParams),
+    /// Parameters of an engine this build does not know, kept verbatim
+    /// (including the `engine` tag). Never sent by the service; rejected on
+    /// input. Left out of the OpenAPI schema.
+    #[serde(untagged, skip_deserializing)]
+    Other(serde_json::Value),
 }
 
 impl ConnectionParams {
@@ -153,7 +173,56 @@ impl ConnectionParams {
             ConnectionParams::Postgres(_) => Engine::Postgres,
             ConnectionParams::Mssql(_) => Engine::Mssql,
             ConnectionParams::Sqlite(_) => Engine::Sqlite,
+            ConnectionParams::Other(_) => Engine::Unknown,
         }
+    }
+
+    /// The `engine` tag as sent, also for [`ConnectionParams::Other`].
+    pub fn engine_name(&self) -> &str {
+        match self {
+            ConnectionParams::Postgres(_) => "postgres",
+            ConnectionParams::Mssql(_) => "mssql",
+            ConnectionParams::Sqlite(_) => "sqlite",
+            ConnectionParams::Other(v) => v
+                .get("engine")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ConnectionParams {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+
+        /// The known variants, decoded by serde's own internally tagged
+        /// implementation (and with its error messages).
+        #[derive(Deserialize)]
+        #[serde(tag = "engine", rename_all = "lowercase")]
+        enum Known {
+            Postgres(PostgresParams),
+            Mssql(MssqlParams),
+            Sqlite(SqliteParams),
+        }
+
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let engine = match value.get("engine") {
+            Some(serde_json::Value::String(tag)) => {
+                serde_json::from_value::<Engine>(serde_json::Value::String(tag.clone()))
+                    .map_err(D::Error::custom)?
+            }
+            Some(_) => return Err(D::Error::custom("`engine` must be a string")),
+            None if value.is_object() => return Err(D::Error::missing_field("engine")),
+            None => return Err(D::Error::custom("connection params must be an object")),
+        };
+        if !engine.is_known() {
+            return Ok(ConnectionParams::Other(value));
+        }
+        Ok(match Known::deserialize(value).map_err(D::Error::custom)? {
+            Known::Postgres(p) => ConnectionParams::Postgres(p),
+            Known::Mssql(p) => ConnectionParams::Mssql(p),
+            Known::Sqlite(p) => ConnectionParams::Sqlite(p),
+        })
     }
 }
 
@@ -498,6 +567,8 @@ pub enum LogicalType {
     TimestampTz,
     Uuid,
     Json,
+    /// Anything else, including logical types newer than this build.
+    #[serde(other)]
     Other,
 }
 
@@ -559,6 +630,10 @@ pub enum QueryEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         in_transaction: Option<bool>,
     },
+    /// An event newer than this build. Clients decode event names they do
+    /// not know into this (and may skip it); the service never sends it.
+    #[serde(other)]
+    Unknown,
 }
 
 // --------------------------------------------------------------- sessions --
@@ -862,6 +937,103 @@ mod tests {
         assert_eq!(m.port, 1433);
         assert_eq!(m.encrypt, MssqlEncrypt::Required);
         assert_eq!(p.engine(), Engine::Mssql);
+    }
+
+    #[test]
+    fn unknown_engine_round_trip() {
+        let e: Engine = serde_json::from_str(r#""oracle""#).unwrap();
+        assert_eq!(e, Engine::Unknown);
+        assert!(!e.is_known());
+        assert_eq!(serde_json::to_string(&e).unwrap(), r#""unknown""#);
+        let back: Engine = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert_eq!(back, Engine::Unknown);
+        assert!(Engine::ALL.iter().all(|e| e.is_known()));
+        // A newer service's info still parses.
+        let info: ServiceInfo = serde_json::from_str(
+            r#"{"version":"9","api_version":"v1","engines":["postgres","oracle"],"scope":"read"}"#,
+        )
+        .unwrap();
+        assert_eq!(info.engines, vec![Engine::Postgres, Engine::Unknown]);
+    }
+
+    #[test]
+    fn unknown_connection_params_are_kept_verbatim() {
+        let json = r#"{"engine":"oracle","host":"db","service_name":"XE","port":1521}"#;
+        let p: ConnectionParams = serde_json::from_str(json).unwrap();
+        let ConnectionParams::Other(raw) = &p else {
+            panic!("wrong variant: {p:?}")
+        };
+        assert_eq!(raw["service_name"], "XE");
+        assert_eq!(p.engine(), Engine::Unknown);
+        assert_eq!(p.engine_name(), "oracle");
+        // Serializes back to exactly what came in.
+        let again = serde_json::to_value(&p).unwrap();
+        assert_eq!(
+            again,
+            serde_json::from_str::<serde_json::Value>(json).unwrap()
+        );
+        assert_eq!(
+            serde_json::from_value::<ConnectionParams>(again).unwrap(),
+            p
+        );
+    }
+
+    #[test]
+    fn connection_list_survives_an_unknown_engine() {
+        let at = "2026-01-01T00:00:00Z";
+        let json = format!(
+            r#"[
+              {{"id":"00000000-0000-0000-0000-000000000001","name":"new","engine":"oracle",
+                "params":{{"engine":"oracle","host":"db"}},"has_password":true,"read_only":false,
+                "color":null,"environment":null,"folder":null,"created_at":"{at}","updated_at":"{at}"}},
+              {{"id":"00000000-0000-0000-0000-000000000002","name":"old","engine":"sqlite",
+                "params":{{"engine":"sqlite","path":"/tmp/a.db"}},"has_password":false,"read_only":false,
+                "color":null,"environment":null,"folder":null,"created_at":"{at}","updated_at":"{at}"}}
+            ]"#
+        );
+        let list: Vec<Connection> = serde_json::from_str(&json).unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].engine, Engine::Unknown);
+        assert!(matches!(list[0].params, ConnectionParams::Other(_)));
+        assert_eq!(list[1].engine, Engine::Sqlite);
+        assert!(matches!(list[1].params, ConnectionParams::Sqlite(_)));
+    }
+
+    #[test]
+    fn known_connection_params_still_report_bad_fields() {
+        let err = serde_json::from_str::<ConnectionParams>(r#"{"engine":"postgres","host":"db"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("missing field `database`"), "{err}");
+        let err = serde_json::from_str::<ConnectionParams>(r#"{"host":"db"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("missing field `engine`"), "{err}");
+        assert!(serde_json::from_str::<ConnectionParams>(r#"{"engine":1}"#).is_err());
+        assert!(serde_json::from_str::<ConnectionParams>(r#""postgres""#).is_err());
+    }
+
+    #[test]
+    fn unknown_logical_type_is_other() {
+        let c: Column =
+            serde_json::from_str(r#"{"name":"g","type_name":"geometry","logical":"geometry"}"#)
+                .unwrap();
+        assert_eq!(c.logical, LogicalType::Other);
+    }
+
+    #[test]
+    fn unknown_query_event_round_trip() {
+        let ev: QueryEvent =
+            serde_json::from_str(r#"{"event":"progress","percent":50,"note":"x"}"#).unwrap();
+        assert_eq!(ev, QueryEvent::Unknown);
+        let line = serde_json::to_string(&ev).unwrap();
+        assert_eq!(line, r#"{"event":"unknown"}"#);
+        assert_eq!(
+            serde_json::from_str::<QueryEvent>(&line).unwrap(),
+            QueryEvent::Unknown
+        );
+        // Known events with bad fields still fail.
+        assert!(serde_json::from_str::<QueryEvent>(r#"{"event":"rows","index":0}"#).is_err());
     }
 
     #[test]

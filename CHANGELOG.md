@@ -30,6 +30,10 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
   rows** option (grid right-click menu or Settings → Queries, off by
   default) wraps values and shows their line breaks, with rows up to 10
   lines tall (#48).
+- **Fix:** *Run statement* (Ctrl+Enter) no longer treats the rest of the
+  file as one statement after SQLite `BEGIN IMMEDIATE|DEFERRED|EXCLUSIVE`
+  or PostgreSQL `BEGIN READ ONLY|READ WRITE`, `BEGIN ISOLATION LEVEL …` or
+  `BEGIN [NOT] DEFERRABLE` (#69).
 
 - **Nightly builds.** Each night that `main` changed, its Linux tarball and
   Windows zip are published as the `nightly` prerelease on GitHub and under

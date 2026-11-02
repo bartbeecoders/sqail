@@ -57,6 +57,46 @@ sqail ──TLS 1.3 + bearer token (+ optional client cert)──▶ sqail-servi
 | EXPLAIN ANALYZE changing data | Runs inside a transaction that is always rolled back | engine matrix (`sum(price)` unchanged) |
 | The AI assistant changing data, or doing more than read | The CLI runs with no built-in tools (Claude Code `--tools ""` + `--strict-mcp-config`; Grok `--tools search_tool,use_tool` + `--permission-mode dontAsk` + an allow list of sqail's tools, which also denies the user's other MCP servers). `run_query` accepts one `SELECT`/`WITH`/`VALUES` statement without writing, transaction-control, DDL or admin keywords, side-effect functions or unterminated strings/comments; the service then refuses anything but a single statement (`single_statement`: Postgres parses it as a prepared statement, SQLite checks the prepared statement's tail, SQL Server is best effort); and it runs in a transaction that is always rolled back (`BEGIN READ ONLY` on Postgres). The service token reaches `sqail mcp` through the environment, never arguments or files | `assistant::guard` tests (adversarial inputs per engine), `adversarial_queries_on_*_change_nothing`, `single_statement_check`, `mcp_tools_on_sql_server` (a forced `INSERT` is rolled back), `postgres_assistant_transactions_are_read_only`, `assistant_panel_streams_an_answer_and_inserts_sql` |
 | Vulnerable or non-permissive dependencies | `cargo audit` and `cargo deny` (advisories, licences, sources) in the gate | `scripts/check.sh` |
+| Tampered or swapped downloads | Every release and nightly carries one `SHA256SUMS`, a GitHub build provenance attestation per file (signed through Sigstore by the workflow that built it) and CycloneDX SBOMs; the portal's `current.json` lists the same hashes | `gh attestation verify`, `sha256sum -c SHA256SUMS` (see below) |
+
+## Verifying a download
+
+Each GitHub release (and the `nightly` prerelease) has, next to the packages:
+
+* `SHA256SUMS`: the SHA-256 of every package and SBOM. The same file is on
+  the download server, and `current.json` there (`nightly/nightly.json` for
+  nightlies) has the hashes too, under `sha256`.
+* `sqail-<version>-sqail-ui.cdx.json` and `sqail-<version>-sqail-service.cdx.json`:
+  CycloneDX SBOMs of the editor's and the service's dependencies (all
+  platforms).
+* A build provenance attestation for each of those files, recorded by GitHub
+  and signed through Sigstore. It proves the file was built by this
+  repository's `release.yml` (or `nightly.yml`) from the tag or commit it
+  names, not uploaded by hand. Release attestations are made only for `v*`
+  tags.
+
+To check a download (from GitHub or from the download server), with the
+[GitHub CLI](https://cli.github.com/):
+
+```bash
+gh attestation verify sqail-<version>-linux-x86_64.tar.gz --repo bartbeecoders/sqail
+# stricter: only accept what release.yml built from a v* tag
+gh attestation verify sqail-<version>-linux-x86_64.tar.gz --repo bartbeecoders/sqail \
+  --signer-workflow bartbeecoders/sqail/.github/workflows/release.yml \
+  --source-ref refs/tags/v<version>
+```
+
+and, in the folder with the downloads and `SHA256SUMS`:
+
+```bash
+sha256sum -c --ignore-missing SHA256SUMS
+```
+
+On Windows, compare `(Get-FileHash sqail-<version>-windows-x64.msi).Hash` with
+the line in `SHA256SUMS` (the case differs), or run `gh attestation verify`
+the same way. The per-file `.sha256` files are still there, but they come
+from the same build as the file itself, so they only catch broken downloads;
+the attestation is what catches a swapped one.
 
 ## Known limitations (accepted for 1.0)
 

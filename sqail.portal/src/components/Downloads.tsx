@@ -43,7 +43,17 @@ function PlatformCard({ icon, title, subtitle, current, children }: CardProps) {
   );
 }
 
-function FileLink({ file, label, description }: { file: string; label: string; description: string }) {
+function FileLink({
+  file,
+  label,
+  description,
+  sha256,
+}: {
+  file: string;
+  label: string;
+  description: string;
+  sha256?: string;
+}) {
   return (
     <div className="flex items-center gap-3 rounded-lg border border-border px-4 py-3 transition-colors hover:border-brand-cyan/60 hover:bg-bg-card">
       <a href={getDownloadUrl(file)} className="flex min-w-0 flex-1 items-center gap-3">
@@ -56,7 +66,7 @@ function FileLink({ file, label, description }: { file: string; label: string; d
       <a
         href={getDownloadUrl(`${file}.sha256`)}
         className="shrink-0 text-xs text-text-dim hover:text-brand-cyan"
-        title="SHA-256 checksum"
+        title={sha256 ? `SHA-256: ${sha256}` : "SHA-256 checksum"}
       >
         sha256
       </a>
@@ -96,10 +106,20 @@ export default function Downloads() {
             current={platform === "windows"}
           >
             {files.windowsMsi && (
-              <FileLink file={files.windowsMsi} label="Installer (.msi)" description="Installs to Program Files" />
+              <FileLink
+                file={files.windowsMsi}
+                sha256={release?.sha256?.[files.windowsMsi]}
+                label="Installer (.msi)"
+                description="Installs to Program Files"
+              />
             )}
             {files.windowsZip && (
-              <FileLink file={files.windowsZip} label="Portable (.zip)" description="Unzip anywhere and run sqail.exe" />
+              <FileLink
+                file={files.windowsZip}
+                sha256={release?.sha256?.[files.windowsZip]}
+                label="Portable (.zip)"
+                description="Unzip anywhere and run sqail.exe"
+              />
             )}
             <p className="text-xs text-text-dim">
               Setting up a shared service with SQL Server?{" "}
@@ -116,7 +136,12 @@ export default function Downloads() {
             current={platform === "linux"}
           >
             {files.linuxTar && (
-              <FileLink file={files.linuxTar} label="Tarball (.tar.gz)" description="Unpack and run ./install.sh" />
+              <FileLink
+                file={files.linuxTar}
+                sha256={release?.sha256?.[files.linuxTar]}
+                label="Tarball (.tar.gz)"
+                description="Unpack and run ./install.sh"
+              />
             )}
             <div className="rounded-lg border border-border px-4 py-3">
               <span className="block text-sm font-semibold text-text-primary">Arch / Omarchy</span>

@@ -9,6 +9,8 @@ export interface Release {
   version: string;
   date: string;
   files: string[];
+  /** File name → SHA-256 (hex) of each file in SHA256SUMS; absent in older files. */
+  sha256?: Record<string, string>;
 }
 
 export interface ReleaseFiles {

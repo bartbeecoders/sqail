@@ -53,6 +53,15 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
   `GRANT VIEW DEFINITION ON SCHEMA::… TO …;` to run, and only mentions
   encryption for modules that really are `WITH ENCRYPTION`.
 
+### Packaging
+
+- **Verifiable downloads.** Releases and nightlies now carry one
+  `SHA256SUMS` file, a GitHub build provenance attestation for every package
+  (`gh attestation verify <file> --repo bartbeecoders/sqail`) and CycloneDX
+  SBOMs for the editor and the service. `current.json` and `nightly.json` on
+  the download server list each file's SHA-256, and the portal shows it on
+  the *sha256* link. See *Verifying a download* in docs/security.md (#91).
+
 ## 1.4.0 — 2026-10-30
 
 ### sqail

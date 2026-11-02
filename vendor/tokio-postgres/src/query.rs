@@ -59,6 +59,34 @@ where
     })
 }
 
+/// sqail patch: `query` with a row limit on `Execute`; the portal is closed
+/// before `Sync` so a suspended one does not linger in a transaction block.
+pub async fn query_limited<P, I>(
+    client: &InnerClient,
+    statement: Statement,
+    params: I,
+    max_rows: i32,
+) -> Result<RowStream, Error>
+where
+    P: BorrowToSql,
+    I: IntoIterator<Item = P>,
+    I::IntoIter: ExactSizeIterator,
+{
+    let buf = client.with_buf(|buf| {
+        encode_bind(&statement, params, "", buf)?;
+        frontend::execute("", max_rows, buf).map_err(Error::encode)?;
+        frontend::close(b'P', "", buf).map_err(Error::encode)?;
+        frontend::sync(buf);
+        Ok(buf.split().freeze())
+    })?;
+    let responses = start(client, buf).await?;
+    Ok(RowStream {
+        statement,
+        responses,
+        rows_affected: None,
+    })
+}
+
 pub async fn query_typed<P, I>(
     client: &Arc<InnerClient>,
     query: &str,
@@ -354,7 +382,8 @@ impl Stream for RowStream {
                 Message::CommandComplete(body) => {
                     *this.rows_affected = Some(extract_row_affected(&body)?);
                 }
-                Message::EmptyQueryResponse | Message::PortalSuspended => {}
+                Message::EmptyQueryResponse | Message::PortalSuspended | Message::CloseComplete => {
+                }
                 Message::ReadyForQuery(_) => return Poll::Ready(None),
                 _ => return Poll::Ready(Some(Err(Error::unexpected_message()))),
             }

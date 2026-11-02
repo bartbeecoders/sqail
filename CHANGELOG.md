@@ -55,6 +55,16 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
   (encrypted?)". The error now names the database user and the exact
   `GRANT VIEW DEFINITION ON SCHEMA::… TO …;` to run, and only mentions
   encryption for modules that really are `WITH ENCRYPTION`.
+- **Big queries stop at the row limit** (#59). PostgreSQL and SQL Server
+  used to read and convert every row of a result past `max_rows` and then
+  drop it, so `SELECT * FROM big_table` scanned and transferred the whole
+  table while holding a pooled connection. A script that is one query now
+  stops on the server once it has the rows (PostgreSQL: a row-limited
+  portal; SQL Server: a TDS Attention, except inside a transaction with
+  `XACT_ABORT` on, which it would roll back); 4 million rows with
+  `max_rows = 100` take milliseconds instead of seconds. In longer scripts
+  the extra rows are skipped without being converted. tiberius is vendored
+  with a fix for cancelling a query that is still sending rows.
 
 ### Packaging
 

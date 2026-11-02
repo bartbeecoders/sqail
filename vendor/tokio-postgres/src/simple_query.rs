@@ -51,6 +51,49 @@ pub async fn simple_query(client: &InnerClient, query: &str) -> Result<SimpleQue
     })
 }
 
+/// sqail patch: run one statement through the extended protocol with text
+/// results and a row limit on `Execute` (0 = no limit). The server stops
+/// executing once it has sent `max_rows` rows, so a big `SELECT` costs no
+/// more than the rows asked for. Messages come back as for `simple_query`;
+/// the portal is closed before `Sync`, which leaves transaction state as a
+/// simple query would.
+pub async fn simple_query_limited(
+    client: &InnerClient,
+    query: &str,
+    max_rows: i32,
+) -> Result<SimpleQueryStream, Error> {
+    debug!("executing limited query ({max_rows} rows): {query}");
+
+    let buf = client.with_buf(|buf| {
+        frontend::parse("", query, std::iter::empty(), buf).map_err(Error::encode)?;
+        let r = frontend::bind(
+            "",
+            "",
+            std::iter::empty(),
+            std::iter::empty::<()>(),
+            |(), _| Ok(postgres_protocol::IsNull::No),
+            Some(0),
+            buf,
+        );
+        match r {
+            Ok(()) => {}
+            Err(frontend::BindError::Conversion(e)) => return Err(Error::to_sql(e, 0)),
+            Err(frontend::BindError::Serialization(e)) => return Err(Error::encode(e)),
+        }
+        frontend::describe(b'P', "", buf).map_err(Error::encode)?;
+        frontend::execute("", max_rows, buf).map_err(Error::encode)?;
+        frontend::close(b'P', "", buf).map_err(Error::encode)?;
+        frontend::sync(buf);
+        Ok(buf.split().freeze())
+    })?;
+    let responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
+
+    Ok(SimpleQueryStream {
+        responses,
+        columns: None,
+    })
+}
+
 pub async fn batch_execute(client: &InnerClient, query: &str) -> Result<(), Error> {
     debug!("executing statement batch: {query}");
 
@@ -90,34 +133,40 @@ impl Stream for SimpleQueryStream {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
-        match ready!(this.responses.poll_next(cx)?) {
-            Message::CommandComplete(body) => {
-                let rows = extract_row_affected(&body)?;
-                Poll::Ready(Some(Ok(SimpleQueryMessage::CommandComplete(rows))))
-            }
-            Message::EmptyQueryResponse => {
-                Poll::Ready(Some(Ok(SimpleQueryMessage::CommandComplete(0))))
-            }
-            Message::RowDescription(body) => {
-                let columns: Arc<[SimpleColumn]> = body
-                    .fields()
-                    .map(|f| Ok(SimpleColumn::new(f.name().to_string(), f.type_oid())))
-                    .collect::<Vec<_>>()
-                    .map_err(Error::parse)?
-                    .into();
+        loop {
+            let item = match ready!(this.responses.poll_next(cx)?) {
+                // Extended-protocol acknowledgements (`simple_query_limited`).
+                Message::ParseComplete
+                | Message::BindComplete
+                | Message::NoData
+                | Message::PortalSuspended
+                | Message::CloseComplete => continue,
+                Message::CommandComplete(body) => {
+                    let rows = extract_row_affected(&body)?;
+                    SimpleQueryMessage::CommandComplete(rows)
+                }
+                Message::EmptyQueryResponse => SimpleQueryMessage::CommandComplete(0),
+                Message::RowDescription(body) => {
+                    let columns: Arc<[SimpleColumn]> = body
+                        .fields()
+                        .map(|f| Ok(SimpleColumn::new(f.name().to_string(), f.type_oid())))
+                        .collect::<Vec<_>>()
+                        .map_err(Error::parse)?
+                        .into();
 
-                *this.columns = Some(columns.clone());
-                Poll::Ready(Some(Ok(SimpleQueryMessage::RowDescription(columns))))
-            }
-            Message::DataRow(body) => {
-                let row = match &this.columns {
-                    Some(columns) => SimpleQueryRow::new(columns.clone(), body)?,
+                    *this.columns = Some(columns.clone());
+                    SimpleQueryMessage::RowDescription(columns)
+                }
+                Message::DataRow(body) => match &this.columns {
+                    Some(columns) => {
+                        SimpleQueryMessage::Row(SimpleQueryRow::new(columns.clone(), body)?)
+                    }
                     None => return Poll::Ready(Some(Err(Error::unexpected_message()))),
-                };
-                Poll::Ready(Some(Ok(SimpleQueryMessage::Row(row))))
-            }
-            Message::ReadyForQuery(_) => Poll::Ready(None),
-            _ => Poll::Ready(Some(Err(Error::unexpected_message()))),
+                },
+                Message::ReadyForQuery(_) => return Poll::Ready(None),
+                _ => return Poll::Ready(Some(Err(Error::unexpected_message()))),
+            };
+            return Poll::Ready(Some(Ok(item)));
         }
     }
 }

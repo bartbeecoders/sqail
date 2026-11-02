@@ -196,6 +196,28 @@ impl<'a> ResultWriter<'a> {
         Ok(())
     }
 
+    /// Whether the open result set holds `max_rows` rows, so that any
+    /// further row is dropped. Drivers then skip converting rows (calling
+    /// [`skip_row`](Self::skip_row) instead) or stop reading altogether.
+    pub fn is_truncated(&self) -> bool {
+        self.current
+            .as_ref()
+            .is_some_and(|cur| cur.count >= self.max_rows)
+    }
+
+    /// Record a row past `max_rows` without converting it.
+    pub fn skip_row(&mut self) {
+        if let Some(cur) = self.current.as_mut() {
+            cur.truncated = true;
+        }
+    }
+
+    /// The row limit to ask a server for so that truncation shows: one more
+    /// than `max_rows`, or `None` (no limit) when that does not fit the wire.
+    pub fn fetch_limit(&self) -> Option<i32> {
+        i32::try_from(self.max_rows.saturating_add(1)).ok()
+    }
+
     pub fn is_open(&self) -> bool {
         self.current.is_some()
     }

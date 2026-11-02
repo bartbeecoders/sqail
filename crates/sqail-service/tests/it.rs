@@ -1515,6 +1515,205 @@ async fn mssql_routine_definitions() {
     );
 }
 
+/// Whether result set `index` ended with `row_count` rows and was truncated.
+fn truncated_at(events: &[QueryEvent], index: u32, row_count: u64) -> bool {
+    events.iter().any(|e| {
+        matches!(e, QueryEvent::ResultEnd { index: i, row_count: n, truncated: true }
+            if *i == index && *n == row_count)
+    })
+}
+
+/// Run `sql` with `max_rows` on `path`; the events and how long it took.
+async fn timed(
+    h: &Harness,
+    path: &str,
+    sql: &str,
+    params: Value,
+    max_rows: u64,
+) -> (Vec<QueryEvent>, Duration) {
+    let t = Instant::now();
+    let ev = h
+        .query_on(
+            path,
+            json!({"sql": sql, "params": params, "max_rows": max_rows}),
+            None,
+        )
+        .await;
+    let took = t.elapsed();
+    eprintln!("{took:>10.2?}  max_rows={max_rows}  {sql}");
+    (ev, took)
+}
+
+/// A big query with a small `max_rows` stops on the server instead of
+/// streaming every row to the service (#59), and leaves the connection and
+/// any open transaction as they were.
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn postgres_stops_reading_at_max_rows() {
+    let h = harness().await;
+    let c = profile(&h, &postgres(), false).await;
+    let path = format!("/v1/connections/{c}/query");
+    // 4M rows; materialising 2000 rows per generate_series is instant.
+    let big = "SELECT a.g, md5((a.g * b.g)::text) FROM generate_series(1, 2000) a(g), \
+               generate_series(1, 2000) b(g)";
+    let (ev, took) = timed(&h, &path, big, json!([]), 100).await;
+    assert!(error(&ev).is_none(), "{ev:?}");
+    assert_eq!(rows(&ev, 0).len(), 100);
+    assert_eq!(
+        rows(&ev, 0)[0],
+        vec![json!(1), json!("c4ca4238a0b923820dcc509a6f75849b")]
+    );
+    assert!(truncated_at(&ev, 0, 100), "{ev:?}");
+    assert!(took < Duration::from_secs(2), "took {took:?}");
+
+    // parameterised (binary) path
+    let (ev, took) = timed(
+        &h,
+        &path,
+        "SELECT a.g FROM generate_series(1, 2000) a(g), generate_series(1, $1::int) b(g)",
+        json!([2000]),
+        100,
+    )
+    .await;
+    assert_eq!(rows(&ev, 0).len(), 100);
+    assert!(truncated_at(&ev, 0, 100), "{ev:?}");
+    assert!(took < Duration::from_secs(2), "took {took:?}");
+
+    // exactly max_rows rows is not truncated
+    let (ev, _) = timed(&h, &path, "SELECT generate_series(1, 100)", json!([]), 100).await;
+    assert_eq!(rows(&ev, 0).len(), 100);
+    assert!(ev.iter().any(|e| matches!(
+        e,
+        QueryEvent::ResultEnd {
+            row_count: 100,
+            truncated: false,
+            ..
+        }
+    )));
+
+    // scripts still truncate every result set and run every statement
+    let (ev, _) = timed(
+        &h,
+        &path,
+        "SELECT generate_series(1, 5000); SELECT generate_series(1, 3) AS n",
+        json!([]),
+        100,
+    )
+    .await;
+    assert!(truncated_at(&ev, 0, 100), "{ev:?}");
+    assert_eq!(rows(&ev, 1).len(), 3);
+
+    // inside a session's transaction: the transaction stays open and usable
+    let s: SessionInfo = h
+        .post("/v1/sessions", &json!({"connection_id": c}), &h.admin)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let sp = format!("/v1/sessions/{}/query", s.id);
+    let (ev, _) = timed(&h, &sp, "BEGIN", json!([]), 100).await;
+    assert_eq!(done(&ev).1, Some(true));
+    timed(
+        &h,
+        &sp,
+        "CREATE TEMP TABLE it_cap (a int); INSERT INTO it_cap VALUES (1)",
+        json!([]),
+        100,
+    )
+    .await;
+    let (ev, took) = timed(&h, &sp, big, json!([]), 100).await;
+    assert!(truncated_at(&ev, 0, 100), "{ev:?}");
+    assert!(took < Duration::from_secs(2), "took {took:?}");
+    assert_eq!(done(&ev).1, Some(true), "transaction still open");
+    let (ev, _) = timed(&h, &sp, "SELECT count(*) FROM it_cap", json!([]), 100).await;
+    assert_eq!(rows(&ev, 0), vec![vec![json!(1)]], "{ev:?}");
+    let (ev, _) = timed(&h, &sp, "ROLLBACK", json!([]), 100).await;
+    assert_eq!(done(&ev).1, Some(false));
+}
+
+/// SQL Server: a single query is stopped with an Attention once it passes
+/// `max_rows`; other batches skip converting the extra rows (#59).
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn mssql_stops_reading_at_max_rows() {
+    let h = harness().await;
+    let c = profile(&h, &mssql(), false).await;
+    let path = format!("/v1/connections/{c}/query");
+    // A few thousand objects squared: millions of rows.
+    let big = "SELECT a.object_id, b.name FROM sys.all_objects a CROSS JOIN sys.all_objects b";
+    let (ev, took) = timed(&h, &path, big, json!([]), 100).await;
+    assert!(error(&ev).is_none(), "{ev:?}");
+    assert_eq!(rows(&ev, 0).len(), 100);
+    assert!(truncated_at(&ev, 0, 100), "{ev:?}");
+    assert!(took < Duration::from_secs(2), "took {took:?}");
+
+    // later batches of the script still run
+    let (ev, took) = timed(
+        &h,
+        &path,
+        &format!("{big}\nGO\nSELECT 1 AS one"),
+        json!([]),
+        100,
+    )
+    .await;
+    assert!(truncated_at(&ev, 0, 100), "{ev:?}");
+    assert_eq!(rows(&ev, 1), vec![vec![json!(1)]], "{ev:?}");
+    assert!(took < Duration::from_secs(2), "took {took:?}");
+
+    // a second statement in the batch: not cut short
+    let (ev, _) = timed(
+        &h,
+        &path,
+        "SELECT TOP 5000 a.object_id FROM sys.all_objects a CROSS JOIN sys.all_objects b\nSELECT 2 AS two",
+        json!([]),
+        100,
+    )
+    .await;
+    assert!(truncated_at(&ev, 0, 100), "{ev:?}");
+    assert_eq!(rows(&ev, 1), vec![vec![json!(2)]], "{ev:?}");
+
+    // a session keeps its connection and transaction
+    let s: SessionInfo = h
+        .post("/v1/sessions", &json!({"connection_id": c}), &h.admin)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let sp = format!("/v1/sessions/{}/query", s.id);
+    let (ev, _) = timed(
+        &h,
+        &sp,
+        "BEGIN TRANSACTION; CREATE TABLE #it_cap (a int); INSERT INTO #it_cap VALUES (1)",
+        json!([]),
+        100,
+    )
+    .await;
+    assert_eq!(done(&ev).1, Some(true), "{ev:?}");
+    let (ev, took) = timed(&h, &sp, big, json!([]), 100).await;
+    assert!(truncated_at(&ev, 0, 100), "{ev:?}");
+    assert!(took < Duration::from_secs(2), "took {took:?}");
+    assert_eq!(done(&ev).1, Some(true), "transaction still open: {ev:?}");
+    let (ev, _) = timed(&h, &sp, "SELECT count(*) FROM #it_cap", json!([]), 100).await;
+    assert_eq!(rows(&ev, 0), vec![vec![json!(1)]], "{ev:?}");
+    // With XACT_ABORT on, an Attention would roll the transaction back, so
+    // the query runs to the end instead.
+    timed(&h, &sp, "SET XACT_ABORT ON", json!([]), 100).await;
+    let (ev, _) = timed(
+        &h,
+        &sp,
+        "SELECT TOP 20000 a.object_id FROM sys.all_objects a CROSS JOIN sys.all_objects b",
+        json!([]),
+        100,
+    )
+    .await;
+    assert!(truncated_at(&ev, 0, 100), "{ev:?}");
+    assert_eq!(done(&ev).1, Some(true), "transaction still open: {ev:?}");
+    let (ev, _) = timed(&h, &sp, "SELECT count(*) FROM #it_cap", json!([]), 100).await;
+    assert_eq!(rows(&ev, 0), vec![vec![json!(1)]], "{ev:?}");
+    let (ev, _) = timed(&h, &sp, "ROLLBACK", json!([]), 100).await;
+    assert_eq!(done(&ev).1, Some(false));
+}
+
 #[tokio::test]
 #[ignore = "needs podman test databases (scripts/db.sh up)"]
 async fn postgres_types_and_notices() {
@@ -1690,7 +1889,10 @@ async fn explain_timeout_leaves_a_clean_pool(d: Dialect, sleep: &str) {
     let tx = if d.engine == "mssql" {
         "SELECT @@TRANCOUNT"
     } else {
-        "SELECT CASE WHEN now() = statement_timestamp() THEN 0 ELSE 1 END"
+        // Two statements, so it runs with the simple protocol: a lone query
+        // goes through the extended one, where every message restarts
+        // statement_timestamp() (#59).
+        "SELECT CASE WHEN now() = statement_timestamp() THEN 0 ELSE 1 END; SELECT 1"
     };
     assert_eq!(one(&h.query(c, tx).await), json!(0));
     // Catalog calls work too.

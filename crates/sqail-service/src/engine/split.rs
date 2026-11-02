@@ -257,9 +257,202 @@ pub fn check_single_statement(sql: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Words that start a statement other than a query (beyond
+/// [`STATEMENT_WORDS`]). Some are not reserved and could be bare names; then
+/// the batch merely misses the fast path in [`single_query`].
+const NON_QUERY_WORDS: &[&str] = &[
+    "ALTER", "BULK", "DELETE", "DISABLE", "ENABLE", "FETCH", "GET", "INSERT", "MERGE", "MOVE",
+    "RECEIVE", "SEND", "SET", "THROW", "UPDATE",
+];
+
+/// Words before `(` that make the parenthesis a subquery or a list rather
+/// than the start of another statement.
+const PAREN_OK_AFTER: &[&str] = &[
+    "ALL",
+    "AND",
+    "ANY",
+    "APPLY",
+    "AS",
+    "BETWEEN",
+    "BY",
+    "CASE",
+    "DISTINCT",
+    "ELSE",
+    "EXCEPT",
+    "EXISTS",
+    "FROM",
+    "HAVING",
+    "IN",
+    "INTERSECT",
+    "IS",
+    "JOIN",
+    "LIKE",
+    "NOT",
+    "ON",
+    "OR",
+    "SELECT",
+    "SOME",
+    "THEN",
+    "TOP",
+    "UNION",
+    "WHEN",
+    "WHERE",
+];
+
+#[derive(Debug, PartialEq, Eq)]
+enum QTok {
+    Word(String),
+    Open,
+    Close,
+    Semi,
+    Punct,
+}
+
+/// Conservative check that a batch is exactly one query (`SELECT ...` or
+/// `WITH ... SELECT ...`) and nothing after it. T-SQL needs no separator
+/// between statements, so anything that might begin a second statement
+/// fails the check. Such a batch can be stopped once its rows reach
+/// `max_rows` without skipping work the script still had to do.
+pub fn single_query(sql: &str) -> bool {
+    // The code with strings, names and comments blanked out.
+    let mut code = String::with_capacity(sql.len());
+    let mut st = St::Code;
+    for line in sql.split_inclusive('\n') {
+        let mut buf = vec![' '; line.len()];
+        scan(line, &mut st, |pos, c| {
+            buf[pos] = if c.is_ascii() { c } else { 'x' };
+        });
+        // Blanked strings and names still separate words.
+        code.extend(buf);
+        code.push(' ');
+    }
+    let mut toks: Vec<(QTok, u32)> = Vec::new();
+    let mut depth = 0u32;
+    let mut word = String::new();
+    let flush = |word: &mut String, toks: &mut Vec<(QTok, u32)>, depth: u32| {
+        if !word.is_empty() {
+            toks.push((QTok::Word(std::mem::take(word).to_ascii_uppercase()), depth));
+        }
+    };
+    for c in code.chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '_' | '@' | '#' | '$') {
+            word.push(c);
+            continue;
+        }
+        flush(&mut word, &mut toks, depth);
+        match c {
+            '(' => {
+                toks.push((QTok::Open, depth));
+                depth += 1;
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                toks.push((QTok::Close, depth));
+            }
+            ';' => toks.push((QTok::Semi, depth)),
+            _ if c.is_whitespace() => {}
+            _ => toks.push((QTok::Punct, depth)),
+        }
+    }
+    flush(&mut word, &mut toks, depth);
+
+    let w = |i: usize| match toks.get(i) {
+        Some((QTok::Word(w), _)) => Some(w.as_str()),
+        _ => None,
+    };
+    let leading = w(0);
+    if !matches!(leading, Some("SELECT" | "WITH")) {
+        return false;
+    }
+    let mut selects = usize::from(leading == Some("SELECT"));
+    for (i, (tok, d)) in toks.iter().enumerate().skip(1) {
+        if *d > 0 {
+            continue;
+        }
+        let prev = &toks[i - 1].0;
+        match tok {
+            QTok::Semi => {
+                if toks[i + 1..].iter().any(|(t, _)| *t != QTok::Semi) {
+                    return false;
+                }
+            }
+            QTok::Open => {
+                let subquery = matches!(w(i + 1), Some("SELECT" | "WITH"));
+                let ok = match prev {
+                    QTok::Word(p) => PAREN_OK_AFTER.contains(&p.as_str()),
+                    QTok::Punct | QTok::Open => true,
+                    QTok::Close | QTok::Semi => false,
+                };
+                if subquery && !ok {
+                    return false;
+                }
+            }
+            QTok::Word(word) => {
+                let word = word.as_str();
+                if STATEMENT_WORDS.contains(&word) || NON_QUERY_WORDS.contains(&word) {
+                    return false;
+                }
+                match word {
+                    "SELECT" => {
+                        let combined = matches!(prev, QTok::Word(p)
+                            if matches!(p.as_str(), "UNION" | "ALL" | "EXCEPT" | "INTERSECT"));
+                        if !combined {
+                            selects += 1;
+                        }
+                    }
+                    // Table hints, TOP ... WITH TIES, GROUP BY ... WITH ROLLUP.
+                    "WITH" => {
+                        let hint = matches!(toks.get(i + 1), Some((QTok::Open, _)))
+                            || matches!(w(i + 1), Some("TIES" | "ROLLUP" | "CUBE"));
+                        if !hint {
+                            return false;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            QTok::Close | QTok::Punct => {}
+        }
+    }
+    selects == 1 && depth == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn single_query_check() {
+        for ok in [
+            "SELECT * FROM t",
+            "select a, b from t where c = 'x; DELETE' -- UPDATE\n;",
+            "SELECT TOP 5 WITH TIES a FROM t WITH (NOLOCK) ORDER BY a",
+            "SELECT a FROM t UNION ALL SELECT b FROM u EXCEPT SELECT c FROM v",
+            "WITH c AS (SELECT 1 AS a), d AS (SELECT 2 AS a) SELECT a FROM c",
+            "SELECT (SELECT 1), x FROM (SELECT 2 AS x) s WHERE x IN (SELECT 3)",
+            "SELECT [update], \"set\" FROM t",
+            "SELECT CASE WHEN a = 1 THEN 'x' END FROM t",
+        ] {
+            assert!(single_query(ok), "{ok}");
+        }
+        for bad in [
+            "SELECT 1\nSELECT 2",
+            "SELECT 1; SELECT 2",
+            "SELECT * FROM t\nUPDATE t SET a = 1",
+            "SELECT * FROM t\nEXEC p",
+            "SELECT * FROM t\nPRINT 'x'",
+            "SELECT * FROM t\nCOMMIT",
+            "SELECT 1\nWITH c AS (SELECT 1) SELECT * FROM c",
+            "SELECT a FROM t\n(SELECT 2)",
+            "WITH c AS (SELECT 1 AS a) INSERT INTO t SELECT a FROM c",
+            "INSERT INTO t SELECT 1",
+            "EXEC p",
+            "(SELECT 1)",
+            "SELECT 1 INSERT INTO t VALUES (1)",
+        ] {
+            assert!(!single_query(bad), "{bad}");
+        }
+    }
 
     fn sqls(script: &str) -> Vec<String> {
         split_go(script)

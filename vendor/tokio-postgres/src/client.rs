@@ -681,6 +681,33 @@ impl Client {
         simple_query::simple_query(self.inner(), query).await
     }
 
+    /// sqail patch: like `simple_query_raw` for a single statement, but runs it
+    /// through the extended protocol (text results) and asks the server for at
+    /// most `max_rows` rows (0 = all). The server stops executing after that.
+    pub async fn simple_query_limited(
+        &self,
+        query: &str,
+        max_rows: i32,
+    ) -> Result<SimpleQueryStream, Error> {
+        simple_query::simple_query_limited(self.inner(), query, max_rows).await
+    }
+
+    /// sqail patch: like `query_raw`, but asks the server for at most
+    /// `max_rows` rows (0 = all) and closes the portal after them.
+    pub async fn query_raw_limited<P, I>(
+        &self,
+        statement: &Statement,
+        params: I,
+        max_rows: i32,
+    ) -> Result<RowStream, Error>
+    where
+        P: BorrowToSql,
+        I: IntoIterator<Item = P>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        query::query_limited(&self.inner, statement.clone(), params, max_rows).await
+    }
+
     /// Executes a sequence of SQL statements using the simple query protocol.
     ///
     /// Statements should be separated by semicolons. If an error occurs, execution of the sequence will stop at that

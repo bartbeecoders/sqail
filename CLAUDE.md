@@ -40,7 +40,7 @@ scripts/package-linux.sh / scripts/package-windows.ps1  # release packages into 
 | `sqail-ui::assistant` | the AI assistant: `panel.rs` (UI), `cli.rs` (runs `claude`/`grok` headless with only sqail's tools), `stream.rs` (their NDJSON), `mcp.rs` (`sqail mcp`, the MCP server they start: schema tools + `run_query`), `guard.rs` (read-only statement check) |
 | `sqail-fuzz` | stable-Rust fuzzer for the parsers and the NDJSON decoder |
 
-`vendor/tokio-postgres` is patched to expose column type OIDs on simple-query results (see `SQAIL-PATCH.md`).
+`vendor/tokio-postgres` is patched to expose column type OIDs on simple-query results and to run row-limited queries; `vendor/tiberius` is patched so cancelling a query mid-result leaves the connection usable (see each `SQAIL-PATCH.md`).
 
 The UI stores settings, history and the workspace in the OS config dir (`~/.config/sqail`, `SQAIL_CONFIG_DIR` overrides it) and tokens in the OS credential store (fallback `tokens.toml`). `settings::migrate_from_sqail2` moves 1.0 (sqail2) data on first start. The service keeps its data in `~/.local/share/sqail-service` (Linux user), `%ProgramData%\sqail\service` (Windows service), or `SQAIL_DATA_DIR`. Service env vars are `SQAIL_*`; the UI's log filter is `SQAIL_UI_LOG` so it doesn't collide with the service's `SQAIL_LOG`.
 

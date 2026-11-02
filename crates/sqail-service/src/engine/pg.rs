@@ -21,7 +21,7 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 use super::value::{bytes, float, int, text};
 use super::{
     Cancel, Canceller, Conn, DbError, Driver, EventSink, ExecRequest, Result, ResultWriter,
-    tls_client,
+    pg_guard, tls_client,
 };
 
 pub struct PgDriver {
@@ -168,8 +168,20 @@ impl PgConn {
         Ok(())
     }
 
-    async fn run_simple(&mut self, sql: &str, out: &mut ResultWriter<'_>) -> Result<()> {
-        let stream = self.client.simple_query_raw(sql).await.map_err(db_err)?;
+    /// Run a script with the simple protocol, or, given `limit`, one query
+    /// through the extended protocol, where the server stops after `limit`
+    /// rows instead of sending the rest for us to drop.
+    async fn run_simple(
+        &mut self,
+        sql: &str,
+        limit: Option<i32>,
+        out: &mut ResultWriter<'_>,
+    ) -> Result<()> {
+        let stream = match limit {
+            Some(n) => self.client.simple_query_limited(sql, n).await,
+            None => self.client.simple_query_raw(sql).await,
+        }
+        .map_err(db_err)?;
         futures::pin_mut!(stream);
         let mut columns: Vec<LogicalType> = Vec::new();
         loop {
@@ -185,6 +197,7 @@ impl PgConn {
                     columns = meta.iter().map(|c| c.logical).collect();
                     out.start(meta).await?;
                 }
+                Some(SimpleQueryMessage::Row(_)) if out.is_truncated() => out.skip_row(),
                 Some(SimpleQueryMessage::Row(row)) => {
                     let cells = columns
                         .iter()
@@ -240,16 +253,27 @@ impl PgConn {
             )
             .await?;
         }
+        // Commands without rows ignore the limit anyway.
+        let limit = if types.is_empty() {
+            0
+        } else {
+            out.fetch_limit().unwrap_or(0)
+        };
         let rows = self
             .client
-            .query_raw(
+            .query_raw_limited(
                 &stmt,
                 bound.iter().map(|b| b.as_ref() as &(dyn ToSql + Sync)),
+                limit,
             )
             .await
             .map_err(db_err)?;
         futures::pin_mut!(rows);
         while let Some(row) = rows.try_next().await.map_err(db_err)? {
+            if out.is_truncated() {
+                out.skip_row();
+                continue;
+            }
             let cells = types
                 .iter()
                 .enumerate()
@@ -271,14 +295,20 @@ impl Conn for PgConn {
     async fn execute(&mut self, req: &ExecRequest, sink: &EventSink) -> Result<()> {
         let mut out = ResultWriter::new(sink, req.max_rows);
         let res = if req.params.is_empty() {
-            if req.single_statement {
+            // A single query stops at max_rows on the server; a script can
+            // only skip converting the rows past it.
+            let limit = out
+                .fetch_limit()
+                .filter(|_| pg_guard::single_query(&req.sql));
+            // The extended protocol takes one command only, like `prepare`.
+            if req.single_statement && limit.is_none() {
                 // A prepared statement holds exactly one command: Postgres
                 // rejects anything more at parse time, before running any.
                 // Run it with the simple protocol afterwards so values keep
                 // their text form, exactly as for any other query.
                 self.client.prepare(&req.sql).await.map_err(db_err)?;
             }
-            self.run_simple(&req.sql, &mut out).await
+            self.run_simple(&req.sql, limit, &mut out).await
         } else {
             self.run_prepared(&req.sql, &req.params, &mut out).await
         };

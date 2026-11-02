@@ -236,9 +236,55 @@ pub fn read_only_violation(sql: &str) -> Option<&'static str> {
     })
 }
 
+/// Whether `sql` is one row-returning query (`SELECT`, `WITH`, `VALUES`,
+/// `TABLE`) and nothing else, however the server lexes strings. Such a query
+/// can run through the extended protocol, where the server stops after the
+/// rows asked for.
+pub fn single_query(sql: &str) -> bool {
+    [false, true].into_iter().all(|backslash| {
+        let toks = lex(sql, backslash);
+        let mut stmts = toks.split(|t| *t == Tok::Semi).filter(|s| !s.is_empty());
+        let first = stmts.next();
+        stmts.next().is_none()
+            && first
+                .and_then(|s| s.first())
+                .and_then(word)
+                .is_some_and(|w| matches!(w, "select" | "with" | "values" | "table"))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn single_queries() {
+        for sql in [
+            "SELECT 1",
+            "  select * from t;  ",
+            "-- note\nWITH c AS (SELECT 1) SELECT * FROM c;",
+            "VALUES (1), (2)",
+            "TABLE t",
+            r"SELECT 'a;b', $$x; y$$, E'it\'s; ok', 'x'';y'",
+            "SELECT $tag$ ; $tag$ /* ; /* ; */ */",
+        ] {
+            assert!(single_query(sql), "{sql}");
+        }
+        for sql in [
+            "SELECT 1; SELECT 2",
+            "SELECT 1; COMMIT",
+            "INSERT INTO t VALUES (1)",
+            "BEGIN",
+            "EXPLAIN SELECT 1",
+            "(SELECT 1)",
+            "",
+            ";",
+            // With standard_conforming_strings off the first `;` is in a string.
+            r"SELECT 'a\'; SELECT 2; --'",
+        ] {
+            assert!(!single_query(sql), "{sql}");
+        }
+    }
 
     fn refused(sql: &str) -> bool {
         read_only_violation(sql).is_some()

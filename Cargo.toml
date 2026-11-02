@@ -30,10 +30,12 @@ codegen-units = 1
 strip = true
 panic = "abort"
 
-# tokio-postgres with the column type OID exposed on simple-query results.
-# See vendor/tokio-postgres/SQAIL-PATCH.md.
+# tokio-postgres with the column type OID exposed on simple-query results and
+# row-limited execution; tiberius with a fix for cancelling a query mid-result.
+# See vendor/*/SQAIL-PATCH.md.
 [patch.crates-io]
 tokio-postgres = { path = "vendor/tokio-postgres" }
+tiberius = { path = "vendor/tiberius" }
 
 # Optimised, but panics unwind so the fuzzer can catch and report them.
 [profile.fuzz]

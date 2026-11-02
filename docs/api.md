@@ -139,6 +139,11 @@ api $URL/v1/connections/$ID/query -d '{"sql": "SELECT id, name FROM customers; U
   are ISO-8601, JSON columns are JSON text). `logical` says which applies.
 * `max_rows` caps each result set (the service clamps it to
   `limits.max_rows`), and `truncated: true` says the cap was hit.
+  A script that is a single query stops on the database server once it has
+  the rows (PostgreSQL and SQL Server, like SQLite); in a longer script the
+  rows past the cap are still read, but not converted or sent. (On
+  PostgreSQL such a query runs through the extended protocol, so
+  `statement_timestamp()` no longer equals `now()` in it.)
   `timeout_ms` cancels the query server-side.
 * **Parameters:** with `params`, the script must be exactly one statement,
   and placeholders are the engine's own (`$1`, `@P1`, `?1`):

@@ -6,6 +6,8 @@
 //! INSERT/UPDATE/DELETE/MERGE runs via `execute` to report affected rows.
 //! Cancelling sends `KILL <spid>` from a side connection (needs ALTER ANY
 //! CONNECTION); the caller also drops the connection if that does not stop it.
+//! A batch that is a single query is stopped with a TDS Attention once it
+//! passes `max_rows`; other batches skip converting the rows past it.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,7 +21,7 @@ use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
 use super::entra::Entra;
-use super::split::{check_single_statement, shape, split_go};
+use super::split::{check_single_statement, shape, single_query, split_go};
 use super::value::{bytes, float, int, text};
 use super::{
     Cancel, Canceller, Conn, DbError, Driver, EventSink, ExecRequest, Result, ResultWriter,
@@ -245,23 +247,48 @@ impl Cancel for MssqlCancel {
     }
 }
 
+/// Stream a batch's result sets into `out`. Rows past `max_rows` are not
+/// converted; with `stop_at_cap` the first one ends the stream and `true`
+/// is returned, and the caller must cancel the rest of the batch.
 async fn stream_results(
     mut stream: tiberius::QueryStream<'_>,
     out: &mut ResultWriter<'_>,
-) -> Result<()> {
+    stop_at_cap: bool,
+) -> Result<bool> {
     while let Some(item) = stream.try_next().await.map_err(db_err)? {
         match item {
             QueryItem::Metadata(meta) => {
                 out.start(meta.columns().iter().map(column).collect())
                     .await?
             }
+            QueryItem::Row(_) if out.is_truncated() => {
+                out.skip_row();
+                if stop_at_cap {
+                    return Ok(true);
+                }
+            }
             QueryItem::Row(row) => out.row(row.cells().map(|(_, d)| cell(d)).collect()).await?,
         }
     }
-    out.end().await
+    Ok(false)
 }
 
 impl MssqlConn {
+    /// Whether an Attention, which aborts the running batch, would leave
+    /// the session as it was. It would not with XACT_ABORT on inside a
+    /// transaction: the server then rolls the transaction back.
+    async fn attention_is_harmless(&mut self) -> Result<bool> {
+        let row = self
+            .client
+            .simple_query("SELECT CAST(@@TRANCOUNT AS int), CAST(@@OPTIONS & 16384 AS int)")
+            .await
+            .map_err(db_err)?
+            .into_row()
+            .await
+            .map_err(db_err)?;
+        Ok(row.is_some_and(|r| r.get::<i32, _>(0) == Some(0) || r.get::<i32, _>(1) == Some(0)))
+    }
+
     async fn run_batch(
         &mut self,
         sql: &str,
@@ -275,6 +302,13 @@ impl MssqlConn {
             let res = q.execute(&mut self.client).await.map_err(db_err)?;
             return out.rows_affected(res.total()).await;
         }
+        // A lone query is stopped once it passes max_rows. The probe that
+        // decides whether that is safe would change @@ROWCOUNT and @@ERROR,
+        // so a query reading those runs to the end.
+        let stop_at_cap = out.fetch_limit().is_some()
+            && !sql.contains("@@")
+            && single_query(sql)
+            && self.attention_is_harmless().await?;
         let stream = if params.is_empty() {
             self.client.simple_query(sql).await.map_err(db_err)?
         } else {
@@ -282,7 +316,15 @@ impl MssqlConn {
             bind_all(&mut q, params);
             q.query(&mut self.client).await.map_err(db_err)?
         };
-        stream_results(stream, out).await?;
+        if stream_results(stream, out, stop_at_cap).await? {
+            // An Attention aborts the batch; tiberius then drains the
+            // acknowledgement, which leaves the connection ready for reuse.
+            self.client
+                .cancel_query()
+                .await
+                .map_err(|e| DbError::Connect(format!("cannot stop the query at max_rows: {e}")))?;
+        }
+        out.end().await?;
         if out.results_seen() == results_before {
             out.message("info", "Commands completed successfully.")
                 .await?;

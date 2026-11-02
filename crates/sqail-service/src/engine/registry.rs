@@ -10,7 +10,7 @@ use uuid::Uuid;
 use super::mssql::MssqlDriver;
 use super::pg::PgDriver;
 use super::sqlite::{PathPolicy, SqliteDriver};
-use super::{Driver, Pool, Result};
+use super::{DbError, Driver, Pool, Result};
 
 /// Everything needed to open connections for one profile.
 pub struct DriverSpec<'a> {
@@ -32,6 +32,7 @@ pub fn build_driver(spec: &DriverSpec<'_>) -> Result<Arc<dyn Driver>> {
         )?),
         ConnectionParams::Mssql(p) => Arc::new(MssqlDriver::new(p, spec.password, spec.read_only)?),
         ConnectionParams::Sqlite(p) => Arc::new(SqliteDriver::new(p, spec.read_only, spec.sqlite)?),
+        ConnectionParams::Other(_) => return Err(DbError::unknown_engine()),
     })
 }
 

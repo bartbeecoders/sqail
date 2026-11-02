@@ -132,7 +132,7 @@ fn exercise(s: &Svc, conn: Uuid, engine: Engine, schema: &str, grantee: Option<&
     let (int, text) = match engine {
         Engine::Postgres => ("integer", "text"),
         Engine::Mssql => ("int", "nvarchar(100)"),
-        Engine::Sqlite => ("INTEGER", "TEXT"),
+        Engine::Sqlite | Engine::Unknown => ("INTEGER", "TEXT"),
     };
     let q = |n: &str| sqail_ui::sql::qualified_name(engine, Some(schema), n);
 
@@ -181,7 +181,7 @@ fn exercise(s: &Svc, conn: Uuid, engine: Engine, schema: &str, grantee: Option<&
     d.column_mut(qty).unwrap().data_type = match engine {
         Engine::Postgres => "bigint",
         Engine::Mssql => "bigint",
-        Engine::Sqlite => "NUMERIC",
+        Engine::Sqlite | Engine::Unknown => "NUMERIC",
     }
     .into();
     d.column_mut(qty).unwrap().default = "5".into();

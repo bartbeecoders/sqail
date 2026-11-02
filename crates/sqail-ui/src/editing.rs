@@ -395,7 +395,7 @@ impl EditState {
         match self.engine {
             Engine::Postgres => format!("${n}::text::{}", col.data_type),
             Engine::Mssql => format!("@P{n}"),
-            Engine::Sqlite => format!("?{n}"),
+            Engine::Sqlite | Engine::Unknown => format!("?{n}"),
         }
     }
 
@@ -509,7 +509,7 @@ pub fn preview(engine: Engine, sql: &str, params: &[Param]) -> String {
             // `$n::text::type` → `'value'::type`
             Engine::Postgres => (format!("${n}::text::"), format!("{lit}::")),
             Engine::Mssql => (format!("@P{n}"), lit),
-            Engine::Sqlite => (format!("?{n}"), lit),
+            Engine::Sqlite | Engine::Unknown => (format!("?{n}"), lit),
         };
         s = s.replace(&pat, &rep);
     }

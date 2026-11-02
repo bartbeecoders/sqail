@@ -545,6 +545,8 @@ impl Run {
     pub fn apply(&mut self, ev: QueryEvent) {
         match ev {
             QueryEvent::Started { query_id } => self.query_id = Some(query_id),
+            // Newer than this build; the client already drops these.
+            QueryEvent::Unknown => {}
             QueryEvent::ResultStart { columns, .. } => {
                 self.results.push(ResultSet::new(columns));
                 if self.results.len() == 1 {

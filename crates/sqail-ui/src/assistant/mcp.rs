@@ -138,6 +138,7 @@ pub fn engine_name(engine: Engine) -> &'static str {
         Engine::Postgres => "PostgreSQL",
         Engine::Mssql => "SQL Server",
         Engine::Sqlite => "SQLite",
+        Engine::Unknown => "an engine this sqail version does not support",
     }
 }
 
@@ -424,6 +425,8 @@ impl Backend for ServiceBackend {
             Engine::Postgres => "BEGIN READ ONLY",
             Engine::Mssql => "BEGIN TRANSACTION",
             Engine::Sqlite => "BEGIN",
+            // No known way to make it read-only, so don't run anything.
+            Engine::Unknown => anyhow::bail!("this engine is not supported by this sqail version"),
         };
         run_all(&self.client, session, begin, 1).await?;
         let mut req = QueryRequest::new(sql);

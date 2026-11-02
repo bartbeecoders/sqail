@@ -377,6 +377,52 @@ fn tabs_close_with_the_close_button() {
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "SELECT 2");
 }
 
+/// A profile of an engine newer than this build is listed as unsupported, and
+/// not offered in the tab's connection picker.
+#[test]
+fn unknown_engines_are_listed_as_unsupported() {
+    let _e = env();
+    let mut h = app([1280.0, 800.0]);
+    let newer: sqail_client::proto::Connection = serde_json::from_value(serde_json::json!({
+        "id": "00000000-0000-0000-0000-0000000000aa", "name": "warehouse",
+        "engine": "oracle", "params": {"engine": "oracle", "host": "db"},
+        "has_password": true, "read_only": false, "color": null, "environment": null,
+        "folder": null, "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+    }))
+    .unwrap();
+    h.state_mut().service.connections.push(newer);
+    h.run_steps(2);
+    h.get_by_label("warehouse");
+    h.get_by_label("not supported by this sqail version");
+    shot(&mut h, "unknown-engine");
+
+    let idx = h.state_mut().new_tab(None);
+    h.state_mut().tabs[idx].connection = None;
+    h.run_steps(2);
+    h.get_by_role(egui::accesskit::Role::ComboBox).click();
+    h.run_steps(2);
+    assert!(
+        h.query_by_label_contains("people db  ·  SQLite").is_some(),
+        "known connections are offered"
+    );
+    assert!(
+        h.query_by_label_contains("warehouse  ·").is_none(),
+        "unsupported connections are not offered"
+    );
+    h.key_press(Key::Escape);
+    h.run_steps(2);
+
+    // Its menu still offers Delete.
+    real_click(&mut h, "warehouse", egui::PointerButton::Secondary);
+    h.run_steps(2);
+    h.get_by_label("Delete…").click();
+    h.run_steps(2);
+    assert!(matches!(
+        h.state().dialog,
+        sqail_ui::dialogs::Dialog::ConfirmDelete(_, ref name) if name == "warehouse"
+    ));
+}
+
 /// The connection tree: a new folder from the toolbar, renamed in place, a
 /// connection dragged into it, and the connection and folder renamed.
 #[test]

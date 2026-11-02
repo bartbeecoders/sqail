@@ -53,6 +53,11 @@ pub enum DbError {
 }
 
 impl DbError {
+    /// A profile whose engine this build does not know ([`Engine::Unknown`]).
+    pub fn unknown_engine() -> Self {
+        DbError::Unsupported("this engine is not supported by this sqail-service version".into())
+    }
+
     pub fn code(&self) -> &'static str {
         match self {
             DbError::Database { .. } => "db_error",

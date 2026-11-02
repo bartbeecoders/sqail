@@ -505,4 +505,8 @@ client_key = "/home/me/.config/sqail/me.key.pem"
   administrator replaced it. Otherwise treat it as an attack. After checking
   the new fingerprint, choose *Service → Forget this service*, then connect
   again.
+* **A connection says "not supported by this sqail version":** the service
+  is newer than your sqail and the connection uses an engine your version
+  doesn't know. It can't be opened, edited or picked for a tab (only deleted)
+  until you update sqail; the rest of the list works as usual.
 * **Logs:** start sqail from a terminal with `SQAIL_UI_LOG=debug`.

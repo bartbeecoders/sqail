@@ -251,7 +251,7 @@ pub fn sql_literal(engine: Engine, c: &Cell, logical: LogicalType) -> String {
         Cell::Text(s) if logical == LogicalType::Bytes => match engine {
             Engine::Postgres => format!("'\\x{s}'::bytea"),
             Engine::Mssql => format!("0x{s}"),
-            Engine::Sqlite => format!("X'{s}'"),
+            Engine::Sqlite | Engine::Unknown => format!("X'{s}'"),
         },
         Cell::Text(s) if logical == LogicalType::Decimal && s.parse::<f64>().is_ok() => {
             s.to_string()
@@ -455,7 +455,7 @@ pub struct ImportSpec {
 fn param_limit(engine: Engine) -> usize {
     match engine {
         Engine::Postgres => 65_000,
-        Engine::Mssql => 2_000,
+        Engine::Mssql | Engine::Unknown => 2_000,
         Engine::Sqlite => 30_000,
     }
 }
@@ -465,7 +465,7 @@ fn placeholder(engine: Engine, n: usize, col: &ColumnInfo) -> String {
         // Bind as text and let Postgres convert to the column type.
         Engine::Postgres => format!("${n}::text::{}", col.data_type),
         Engine::Mssql => format!("@P{n}"),
-        Engine::Sqlite => format!("?{n}"),
+        Engine::Sqlite | Engine::Unknown => format!("?{n}"),
     }
 }
 

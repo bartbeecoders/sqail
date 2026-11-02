@@ -42,6 +42,13 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
 - **Fix:** with Auto-commit off, the first run's `BEGIN` is sent as its own
   request instead of being prefixed to your SQL, so that query can be
   edited in the grid, and history and export hold just your SQL (#79).
+- **Newer services don't break older editors.** A connection whose engine
+  this sqail version doesn't know (added by a newer sqail-service) is listed
+  as *not supported by this sqail version* instead of making the whole
+  connection list fail to load; it can't be opened or picked for a tab, only
+  deleted. Unknown query-stream events and column types are skipped or shown
+  as plain values instead of failing the query. sqail-service answers
+  `400 Bad Request` to a profile with an engine it doesn't know (#62).
 
 - **Nightly builds.** Each night that `main` changed, its Linux tarball and
   Windows zip are published as the `nightly` prerelease on GitHub and under

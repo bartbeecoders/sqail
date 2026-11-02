@@ -460,6 +460,44 @@ fn app_ref<'a>(app: &'a mut SqailApp, folders: &'a [String]) -> TreeCtx<'a> {
     }
 }
 
+/// A profile whose engine is newer than this build: listed, but it can't be
+/// opened, edited or queried here; only deleted.
+fn unsupported_connection_node(
+    ui: &mut egui::Ui,
+    c: &Connection,
+    title: RichText,
+    color: Color32,
+    actions: &mut Vec<Action>,
+) {
+    let row = ui
+        .horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+            ui.painter().circle_filled(rect.center(), 4.0, color);
+            ui.add(egui::Label::new(title.weak()).selectable(false));
+            ui.add(
+                egui::Label::new(
+                    RichText::new("not supported by this sqail version")
+                        .weak()
+                        .small(),
+                )
+                .selectable(false),
+            );
+        })
+        .response;
+    // Clickable, so the right-click menu opens.
+    let row = ui.interact(row.rect, row.id, egui::Sense::click());
+    row.on_hover_text(format!(
+        "Engine '{}' is not supported by this sqail version. Update sqail to use this connection.",
+        c.params.engine_name()
+    ))
+    .context_menu(|ui| {
+        if ui.button("Delete…").clicked() {
+            actions.push(Action::Delete(c.id, c.name.clone()));
+            ui.close();
+        }
+    });
+}
+
 fn connection_node(
     ui: &mut egui::Ui,
     mut t: TreeCtx<'_>,
@@ -491,6 +529,10 @@ fn connection_node(
         sqail_client::proto::Engine::Postgres => "pg",
         sqail_client::proto::Engine::Mssql => "mssql",
         sqail_client::proto::Engine::Sqlite => "sqlite",
+        sqail_client::proto::Engine::Unknown => {
+            unsupported_connection_node(ui, c, title, color, actions);
+            return;
+        }
     };
     let header = CollapsingHeader::new(title)
         .id_salt(("conn", c.id))

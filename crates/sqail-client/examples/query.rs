@@ -73,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
             QueryEvent::Message { severity, text } => println!("{severity}: {text}"),
             QueryEvent::Error { message, .. } => eprintln!("error: {message}"),
             QueryEvent::Done { elapsed_ms, .. } => println!("-- {elapsed_ms} ms"),
-            QueryEvent::Started { .. } => {}
+            QueryEvent::Started { .. } | QueryEvent::Unknown => {}
         }
     }
     Ok(())

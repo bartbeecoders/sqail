@@ -586,7 +586,9 @@ fn encode(s: &str) -> String {
 pub const MAX_LINE: usize = 256 * 1024 * 1024;
 
 /// Incremental NDJSON → [`QueryEvent`] decoder; bytes may arrive in any
-/// chunking. Pure (no I/O), so it can be fuzzed.
+/// chunking. Pure (no I/O), so it can be fuzzed. Events newer than this build
+/// ([`QueryEvent::Unknown`]) are skipped, so a newer service doesn't break the
+/// stream.
 #[derive(Default)]
 pub struct NdjsonDecoder {
     buf: BytesMut,
@@ -635,10 +637,11 @@ impl NdjsonDecoder {
         if line.iter().all(u8::is_ascii_whitespace) {
             return None;
         }
-        Some(
-            serde_json::from_slice::<QueryEvent>(line)
-                .map_err(|e| Error::Decode(format!("bad event: {e}"))),
-        )
+        match serde_json::from_slice::<QueryEvent>(line) {
+            Ok(QueryEvent::Unknown) => None,
+            Ok(ev) => Some(Ok(ev)),
+            Err(e) => Some(Err(Error::Decode(format!("bad event: {e}")))),
+        }
     }
 }
 
@@ -734,6 +737,16 @@ mod tests {
             .is_empty()
         );
         assert!(matches!(d.finish(), Some(Ok(QueryEvent::Started { .. }))));
+    }
+
+    #[test]
+    fn decoder_skips_events_newer_than_this_build() {
+        let mut d = NdjsonDecoder::default();
+        let out = d.push(
+            b"{\"event\":\"progress\",\"percent\":50}\n{\"event\":\"done\",\"elapsed_ms\":3,\"cancelled\":false}\n",
+        );
+        assert_eq!(out.len(), 1);
+        assert!(matches!(out[0], Ok(QueryEvent::Done { elapsed_ms: 3, .. })));
     }
 
     #[test]

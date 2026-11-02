@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Build a release tarball: dist/sqail-<version>-linux-<arch>.tar.gz
 # containing both binaries, desktop entry, icons, systemd user unit and install.sh.
+# SQAIL_PACKAGE_VERSION overrides <version> in the names (nightly.yml sets
+# 1.4.0-nightly.20261102); the binaries keep the Cargo.toml version.
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 cd "$ROOT"
 need tar "install tar"
-VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+VERSION="${SQAIL_PACKAGE_VERSION:-$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)}"
 ARCH="$(uname -m)"
 NAME="sqail-$VERSION-linux-$ARCH"
 STAGE="$ROOT/dist/$NAME"

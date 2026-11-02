@@ -18,6 +18,12 @@ can also build the package with the `PKGBUILD` attached to each GitHub release
 **Windows:** run the MSI, or unzip the portable
 `sqail-<version>-windows-x64.zip` anywhere and start `sqail.exe`.
 
+**Nightly builds:** every night that `main` changed, a build of it is
+published as the [`nightly` prerelease](https://github.com/bartbeecoders/sqail/releases/tag/nightly)
+(`sqail-<version>-nightly.<date>-…`, Linux tarball and Windows zip, no MSI).
+It has passed the full test suite but is otherwise untried; use a tagged
+release for anything that matters. Each nightly replaces the previous one.
+
 ## First start
 
 sqail offers two choices:

@@ -4,6 +4,7 @@ name: release
 #   ci.yml checks → Linux tarball + Windows zip/MSI + pinned Arch PKGBUILD
 #   → GitHub release,
 #   upload to the download server (+ current.json) → portal redeploy.
+# Daily builds of main are nightly.yml's job; this is for stable versions.
 # "Run workflow" (workflow_dispatch) only builds the packages and attaches
 # them to the run as artifacts.
 on:
@@ -21,6 +22,8 @@ env:
 jobs:
   ci:
     uses: ./.github/workflows/ci.yml
+    with:
+      full: true
 
   version:
     runs-on: ubuntu-24.04

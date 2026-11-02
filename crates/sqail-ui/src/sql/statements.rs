@@ -81,11 +81,8 @@ pub fn split(text: &str, engine: Option<Engine>) -> Vec<Range<usize>> {
                     "CASE" => blocks += 1,
                     "BEGIN" => {
                         let next = next_word(text, &tokens[idx + 1..]);
-                        let is_tx = matches!(
-                            next.as_deref(),
-                            Some("TRAN" | "TRANSACTION" | "WORK" | "DISTRIBUTED" | "ISOLATION")
-                                | None
-                        ) || prev_word.as_deref() == Some("END");
+                        let is_tx = next.as_deref().is_none_or(is_transaction_word)
+                            || prev_word.as_deref() == Some("END");
                         if !is_tx {
                             blocks += 1;
                         }
@@ -126,6 +123,26 @@ fn is_tsql_module(head: &[String]) -> bool {
     matches!(
         rest.first().map(String::as_str),
         Some("PROC" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "VIEW")
+    )
+}
+
+/// Words that can follow `BEGIN` when it starts a transaction rather than a
+/// block: T-SQL `BEGIN TRAN|DISTRIBUTED`, SQLite `BEGIN IMMEDIATE|DEFERRED|
+/// EXCLUSIVE`, Postgres `BEGIN WORK|ISOLATION …|READ ONLY|[NOT] DEFERRABLE`.
+fn is_transaction_word(word: &str) -> bool {
+    matches!(
+        word,
+        "TRAN"
+            | "TRANSACTION"
+            | "WORK"
+            | "DISTRIBUTED"
+            | "ISOLATION"
+            | "IMMEDIATE"
+            | "DEFERRED"
+            | "EXCLUSIVE"
+            | "READ"
+            | "NOT"
+            | "DEFERRABLE"
     )
 }
 
@@ -239,6 +256,61 @@ mod tests {
         let t = "BEGIN TRANSACTION\n\nUPDATE t SET a = 1\n\nCOMMIT";
         assert_eq!(stmts(t, Some(Engine::Mssql)).len(), 3);
         assert_eq!(stmts("BEGIN;\n\nSELECT 1", Some(Engine::Postgres)).len(), 2);
+    }
+
+    #[test]
+    fn begin_transaction_modes_are_not_blocks() {
+        for (begin, engine) in [
+            ("BEGIN IMMEDIATE;", Engine::Sqlite),
+            ("BEGIN DEFERRED TRANSACTION;", Engine::Sqlite),
+            ("BEGIN EXCLUSIVE;", Engine::Sqlite),
+            ("begin immediate;", Engine::Sqlite),
+            ("BEGIN READ ONLY;", Engine::Postgres),
+            ("BEGIN READ WRITE;", Engine::Postgres),
+            ("BEGIN ISOLATION LEVEL SERIALIZABLE;", Engine::Postgres),
+            ("BEGIN NOT DEFERRABLE;", Engine::Postgres),
+            ("BEGIN DEFERRABLE;", Engine::Postgres),
+        ] {
+            let t = format!("{begin}\nUPDATE t SET a = 1;\nCOMMIT;\nSELECT 1");
+            assert_eq!(
+                stmts(&t, Some(engine)),
+                [
+                    begin.trim_end_matches(';'),
+                    "UPDATE t SET a = 1",
+                    "COMMIT",
+                    "SELECT 1"
+                ],
+                "{begin}"
+            );
+        }
+    }
+
+    #[test]
+    fn begin_try_catch_are_blocks() {
+        let body = "BEGIN TRY\n  SELECT 1;\n\n  SELECT 2;\nEND TRY\nBEGIN CATCH\n  SELECT 3;\n\n  SELECT 4;\nEND CATCH";
+        let t = format!("{body}\nGO\nSELECT 5");
+        assert_eq!(stmts(&t, Some(Engine::Mssql)), [body, "SELECT 5"]);
+    }
+
+    #[test]
+    fn go_ends_unbalanced_parens_and_blocks() {
+        let ms = Some(Engine::Mssql);
+        let t = "SELECT (1\nGO\nSELECT 2;\nSELECT 3\n\nSELECT 4";
+        assert_eq!(
+            stmts(t, ms),
+            ["SELECT (1", "SELECT 2", "SELECT 3", "SELECT 4"]
+        );
+        let t = "IF 1 = 1\nBEGIN\n  SELECT 1\nGO\nSELECT 2;\nSELECT 3";
+        assert_eq!(
+            stmts(t, ms),
+            ["IF 1 = 1\nBEGIN\n  SELECT 1", "SELECT 2", "SELECT 3"]
+        );
+        // `GO n`, lowercase `go`, and GO inside a string or comment.
+        let t = "SELECT '\nGO\n' AS a -- GO\nFROM t\nGO 5\nSELECT 1\ngo\nSELECT 2";
+        assert_eq!(
+            stmts(t, ms),
+            ["SELECT '\nGO\n' AS a -- GO\nFROM t", "SELECT 1", "SELECT 2"]
+        );
     }
 
     #[test]

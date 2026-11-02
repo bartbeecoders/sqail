@@ -571,7 +571,8 @@ pub fn complete(
         .into_iter()
         .find(|r| r.start <= anchor && anchor <= r.end + 1)
         .unwrap_or(cursor..cursor);
-    let start = stmt.start.min(cursor);
+    // The opening quote must be inside `sql` even when no statement holds it.
+    let start = stmt.start.min(anchor);
     let end = stmt.end.max(cursor);
     let sql = &text[start..end];
     let rel = cursor - start;
@@ -1334,6 +1335,33 @@ mod tests {
         assert_eq!(t, "SELECT * FROM [sales].[orders]");
         let (t, _) = take_first(Engine::Mssql, "SELECT * FROM [|]");
         assert!(t.starts_with("SELECT * FROM [") && !t.contains("[["), "{t}");
+    }
+
+    #[test]
+    fn quote_outside_any_statement() {
+        // Found by sqail-fuzz: an opening quote that no statement range holds
+        // (`"` then a name at the start of the text) indexed before an empty
+        // slice.
+        for s in [
+            "\"ى JOIN\r\nTOPSELECT\"E'",
+            "\"ODELETE#mp$$APPLY,; 3].X'X'?11e9",
+            "\"THEN'[\nGO\nFME'WITHONé'*FROM⇃\"::`\0",
+            "`UPDAE)UPDATET;WHENgo 3@@SPID⣞é *AS世界CASE.5.LATERALᅺWHEREGOaෳ$$::a\r\n)",
+            "ਖ਼\"\"0⚶*/)SELECT",
+            "\"or",
+            "[or",
+        ] {
+            for e in [Engine::Postgres, Engine::Mssql, Engine::Sqlite] {
+                for cursor in (0..=s.len()).filter(|&c| s.is_char_boundary(c)) {
+                    if let Some(c) = complete(s, cursor, e, &Fake) {
+                        assert!(
+                            c.range.start <= cursor && c.range.end <= cursor + 1,
+                            "{s:?} {cursor}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

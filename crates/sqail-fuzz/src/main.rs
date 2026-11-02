@@ -230,7 +230,13 @@ fn run_targets(rng: &mut Rng, s: &str) {
         if let Some(e) = engine {
             if let Some(c) = complete::complete(s, cursor, e, &Catalog) {
                 check(
-                    c.range.end == cursor && s.is_char_boundary(c.range.start),
+                    // Up to the cursor, or one past it to take a closing
+                    // quote with it (`[Or|]`).
+                    (c.range.end == cursor
+                        || (c.range.end == cursor + 1
+                            && matches!(s.as_bytes()[cursor], b']' | b'"' | b'`')))
+                        && c.range.start <= cursor
+                        && s.is_char_boundary(c.range.start),
                     "completion replaces the typed prefix",
                 );
             }

@@ -25,6 +25,11 @@
 .PARAMETER SkipBuild
     Package the binaries already in target\release.
 
+.PARAMETER PackageVersion
+    The <ver> in the file names and README (nightly.yml passes
+    1.4.0-nightly.20261102). Defaults to the Cargo.toml version, which the
+    binaries and the MSI's product version always use.
+
 .PARAMETER SignThumbprint
     Code-sign both executables (and the MSI) with this certificate from the
     current user's store, using signtool.exe from the Windows SDK.
@@ -32,13 +37,15 @@
 [CmdletBinding()]
 param(
     [switch] $SkipBuild,
+    [string] $PackageVersion = $env:SQAIL_PACKAGE_VERSION,
     [string] $SignThumbprint = $env:SQAIL_SIGN_THUMBPRINT
 )
 . "$PSScriptRoot/common.ps1"
 Set-Location $Root
 
 $Version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
-$Name = "sqail-$Version-windows-x64"
+if (-not $PackageVersion) { $PackageVersion = $Version }
+$Name = "sqail-$PackageVersion-windows-x64"
 $Dist = Join-Path $Root 'dist'
 $Stage = Join-Path $Dist $Name
 
@@ -76,7 +83,7 @@ foreach ($d in 'docs/user-guide.md', 'docs/windows-setup.md', 'docs/operations.m
     Copy-Item $d "$Stage/docs"
 }
 @"
-sqail ${Version}: a fast SQL editor backed by sqail-service
+sqail ${PackageVersion}: a fast SQL editor backed by sqail-service
 =============================================================
 
 Just me, on this PC

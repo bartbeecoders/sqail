@@ -1,0 +1,176 @@
+name: nightly
+
+# Every night, if main changed since the last nightly:
+#   ci.yml full suite (Windows, MSRV, integration, fuzz) → Linux tarball +
+#   Windows zip → the rolling `nightly` GitHub prerelease (replaced each time)
+#   and /opt/sqail-releases/nightly on the download server (+ nightly.json).
+# Stable versions still come from v* tags (release.yml); the portal's
+# current.json is never touched here. Pull requests only get the fast checks,
+# so a nightly that fails is the first sign of a Windows, integration or fuzz
+# regression: fix it on main and the next night publishes again.
+#
+# "Run workflow" builds now, even if main hasn't changed.
+on:
+  schedule:
+    - cron: "17 2 * * *" # 02:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      build: ${{ steps.c.outputs.build }}
+      previous: ${{ steps.c.outputs.previous }}
+      version: ${{ steps.c.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - id: c
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "::error::nightlies are built from main, not $GITHUB_REF"
+            exit 1
+          fi
+          PREVIOUS=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/nightly" --jq .object.sha 2>/dev/null || true)
+          echo "previous=$PREVIOUS" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_EVENT_NAME" == schedule && "$PREVIOUS" == "$GITHUB_SHA" ]]; then
+            echo "main is still at the last nightly ($GITHUB_SHA): nothing to build"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "build=true" >> "$GITHUB_OUTPUT"
+          BASE=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          VERSION="$BASE-nightly.$(date -u +%Y%m%d)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "nightly $VERSION from $GITHUB_SHA (previous: ${PREVIOUS:-none})"
+
+  ci:
+    needs: [changes]
+    if: needs.changes.outputs.build == 'true'
+    uses: ./.github/workflows/ci.yml
+    with:
+      full: true
+
+  package:
+    needs: [changes, ci]
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      SQAIL_PACKAGE_VERSION: ${{ needs.changes.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Linux tarball
+        if: runner.os == 'Linux'
+        run: ./scripts/package-linux.sh
+      - name: Windows zip
+        # No MSI: its product version must be numeric, so a nightly MSI would
+        # carry the last release's version and confuse upgrades.
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/package-windows.ps1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nightly-${{ runner.os }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  github-release:
+    needs: [changes, package]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          pattern: nightly-*
+          merge-multiple: true
+      - name: Release notes
+        env:
+          VERSION: ${{ needs.changes.outputs.version }}
+          PREVIOUS: ${{ needs.changes.outputs.previous }}
+        run: |
+          {
+            echo "Automated build of \`main\` at $GITHUB_SHA ($(date -u +%Y-%m-%d))."
+            echo "Not a stable release: it passed the full test suite, but nobody has tried it yet."
+            echo
+            if [[ -n "$PREVIOUS" && "$PREVIOUS" != "$GITHUB_SHA" ]]; then
+              echo "Changes since the previous nightly: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/$PREVIOUS...$GITHUB_SHA"
+              echo
+            fi
+            echo "## Unreleased"
+            awk '/^## / { p = ($2 == "Unreleased"); next } p' CHANGELOG.md
+          } > notes.md
+          cat notes.md
+      - name: Replace the nightly prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.changes.outputs.version }}
+        run: |
+          # The `nightly` tag moves to this commit (only v* tags are protected).
+          gh release delete nightly --cleanup-tag --yes || true
+          gh release create nightly dist/* \
+            --target "$GITHUB_SHA" \
+            --title "sqail nightly $VERSION" \
+            --notes-file notes.md \
+            --prerelease --latest=false
+
+  deploy-binaries:
+    needs: [changes, package]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: production
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: upload
+          pattern: nightly-*
+          merge-multiple: true
+      - name: Write nightly.json
+        run: |
+          cd upload
+          ls -1 | jq -R -s \
+            --arg version "${{ needs.changes.outputs.version }}" \
+            --arg commit "$GITHUB_SHA" \
+            --arg date "$(date -u +%Y-%m-%d)" \
+            '{version: $version, commit: $commit, date: $date, files: (split("\n") | map(select(length > 0)))}' \
+            > nightly.json
+          cat nightly.json
+      - name: Upload to VPS
+        uses: appleboy/scp-action@917f8b81dfc1ccd331fef9e2d61bdc6c8be94634 # v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          fingerprint: ${{ secrets.VPS_SSH_FINGERPRINT }}
+          source: "upload/*"
+          # Emptied first, so only the latest nightly is kept.
+          target: /opt/sqail-releases/nightly
+          rm: true
+          strip_components: 1

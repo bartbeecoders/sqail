@@ -420,11 +420,19 @@ curl -sk -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
 3. Merge that as a pull request (main only accepts pull requests whose checks
    passed), then tag the merge commit `v<version>` and push the tag. Release
    tags must be on main and cannot be moved or deleted afterwards; a broken
-   release is fixed with a new patch version. `release.yml` runs every check from
-   `ci.yml`, attaches the Linux tarball and the Windows zip/MSI to a GitHub
+   release is fixed with a new patch version. `release.yml` runs the full
+   `ci.yml` suite, attaches the Linux tarball and the Windows zip/MSI to a GitHub
    release, uploads them to the download server, and redeploys the portal.
 
-The deploy jobs (`deploy-binaries` in `release.yml`, `deploy` in
+Pull requests and pushes to `main` only run the fast checks (Linux build,
+clippy, tests, docs, `cargo deny`/`cargo audit`). `nightly.yml` runs at
+02:17 UTC: if `main` moved since the last nightly it runs the full suite
+(Windows, MSRV, integration tests, fuzzer), then replaces the `nightly`
+GitHub prerelease and `/opt/sqail-releases/nightly` (with `nightly.json`) on
+the download server. It never touches `current.json` or the portal. *Run
+workflow* on it builds a nightly straight away.
+
+The deploy jobs (`deploy-binaries` in `release.yml` and `nightly.yml`, `deploy` in
 `portal.yml`) run in the GitHub environment `production`. Keep `VPS_HOST`,
 `VPS_USER`, `VPS_SSH_KEY`, `VPS_SSH_FINGERPRINT`, `ACR_USERNAME` and
 `ACR_PASSWORD` there, not as repository secrets, and limit the environment's

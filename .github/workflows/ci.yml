@@ -1,8 +1,15 @@
 name: ci
 
-# Checks for sqail and sqail-service. release.yml calls this workflow before
-# it builds packages. The portal and the frozen sqail-legacy/ app are not
-# built here.
+# Checks for sqail and sqail-service. The portal and the frozen sqail-legacy/
+# app are not built here.
+#
+# Two depths:
+#   fast (pull requests, pushes to main): fmt, clippy, tests and docs on Linux,
+#     plus cargo-deny/audit. These are the checks main requires, so a PR gets
+#     its answer in a few minutes.
+#   full (`full: true`, used by nightly.yml and release.yml): adds Windows,
+#     the MSRV build, the integration tests against PostgreSQL and SQL Server,
+#     and the fuzzer. Nothing is published unless these pass.
 on:
   push:
     branches: [main]
@@ -15,11 +22,22 @@ on:
       - "**.md"
       - ".github/workflows/portal.yml"
       - ".github/workflows/release.yml"
+      - ".github/workflows/nightly.yml"
   # Every pull request runs the checks: main requires them before merging,
   # and a PR that skipped them could never merge.
   pull_request:
   workflow_call:
+    inputs:
+      full:
+        description: "Run the full suite (Windows, MSRV, integration, fuzz)"
+        type: boolean
+        default: false
   workflow_dispatch:
+    inputs:
+      full:
+        description: "Run the full suite (Windows, MSRV, integration, fuzz)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -40,7 +58,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-latest]
+        # The job names stay "check (<os>)": main requires "check (ubuntu-24.04)".
+        os: ${{ fromJSON(inputs.full && '["ubuntu-24.04","windows-latest"]' || '["ubuntu-24.04"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
@@ -74,6 +93,7 @@ jobs:
   msrv:
     # rust-version in Cargo.toml; keep the two in step.
     name: msrv (1.95)
+    if: inputs.full
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -98,6 +118,7 @@ jobs:
   integration:
     # Postgres + SQL Server in podman (preinstalled on the Ubuntu runners),
     # seeded by the same script developers use.
+    if: inputs.full
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -115,6 +136,7 @@ jobs:
         run: podman logs sqail-mssql | tail -50; podman logs sqail-postgres | tail -50
 
   fuzz:
+    if: inputs.full
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:

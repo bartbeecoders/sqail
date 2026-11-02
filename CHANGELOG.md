@@ -31,6 +31,10 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
   default) wraps values and shows their line breaks, with rows up to 10
   lines tall (#48).
 
+- **Nightly builds.** Each night that `main` changed, its Linux tarball and
+  Windows zip are published as the `nightly` prerelease on GitHub and under
+  `/releases/nightly/` on sqail.io, after the full test suite passed.
+
 ### sqail-service
 
 - **SQL Server: say why a definition is missing** (#44). Scripting a view,

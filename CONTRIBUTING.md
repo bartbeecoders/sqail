@@ -13,10 +13,14 @@ short guide to the workspace, the commands and the conventions; the
    `feat/<issue>-<slug>`.
 3. Open a pull request that says `Closes #<issue>`. The template has the
    checklist.
-4. `main` only accepts pull requests whose checks passed: build, clippy and
-   tests on Linux and Windows, `cargo deny`/`cargo audit`, the integration
-   tests against PostgreSQL and SQL Server, the fuzzer, the MSRV check.
-5. Releases are tags on `main`; see *Releasing* in the README.
+4. `main` only accepts pull requests whose checks passed. These are the fast
+   ones: fmt, clippy, tests and docs on Linux, and `cargo deny`/`cargo audit`.
+5. Every night, `nightly.yml` runs the full suite on `main` (adds Windows,
+   the MSRV build, the integration tests against PostgreSQL and SQL Server,
+   and the fuzzer) and, if it passes, publishes the `nightly` prerelease. A
+   red nightly is a regression on `main`: fix it before other work. Run
+   `scripts/check.sh --it` locally when you touch the service or a driver.
+6. Stable releases are `v*` tags on `main`; see *Releasing* in the README.
 
 ## Before you push
 

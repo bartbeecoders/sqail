@@ -39,6 +39,9 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
   file as one statement after SQLite `BEGIN IMMEDIATE|DEFERRED|EXCLUSIVE`
   or PostgreSQL `BEGIN READ ONLY|READ WRITE`, `BEGIN ISOLATION LEVEL …` or
   `BEGIN [NOT] DEFERRABLE` (#69).
+- **Fix:** with Auto-commit off, the first run's `BEGIN` is sent as its own
+  request instead of being prefixed to your SQL, so that query can be
+  edited in the grid, and history and export hold just your SQL (#79).
 
 - **Nightly builds.** Each night that `main` changed, its Linux tarball and
   Windows zip are published as the `nightly` prerelease on GitHub and under

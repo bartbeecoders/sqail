@@ -568,21 +568,19 @@ impl SqailApp {
             self.notify("A query is already running in this tab.", true);
             return;
         }
-        let mut sql = sql.trim().to_string();
+        let sql = sql.trim().to_string();
         if sql.is_empty() {
             return;
         }
-        // Manual-commit tabs open a transaction on the first run.
-        let manual_begin = !tab.autocommit && !tab.in_transaction;
-        if manual_begin {
-            let engine = self.service.connection(conn).map(|c| c.engine);
-            let begin = if engine == Some(Engine::Mssql) {
-                "BEGIN TRANSACTION"
-            } else {
-                "BEGIN"
-            };
-            sql = format!("{begin};\n{sql}");
-        }
+        // Manual-commit tabs open a transaction on the first run. BEGIN goes
+        // to the session as its own request, so the run (and with it result
+        // editing, history and export) only ever holds the user's SQL.
+        let begin = (!tab.autocommit && !tab.in_transaction).then(|| {
+            match self.service.connection(conn).map(|c| c.engine) {
+                Some(Engine::Mssql) => "BEGIN TRANSACTION",
+                _ => "BEGIN",
+            }
+        });
         let tab = &mut self.tabs[idx];
         let run_id = self.next_run;
         self.next_run += 1;
@@ -620,6 +618,29 @@ impl SqailApp {
                         Err(e) => return sink.send(fail(e.to_string())),
                     },
                 };
+                if let Some(begin) = begin {
+                    let mut breq = QueryRequest::new(begin);
+                    breq.max_rows = Some(1);
+                    match client.query_all(On::Session(sid), &breq).await {
+                        Ok(events) => {
+                            if let Some(QueryEvent::Error { message, .. }) = events
+                                .into_iter()
+                                .find(|e| matches!(e, QueryEvent::Error { .. }))
+                            {
+                                return sink.send(fail(format!("{begin}: {message}")));
+                            }
+                        }
+                        Err(e)
+                            if attempt == 0
+                                && matches!(e.status(), Some(404 | 409))
+                                && is_session_gone(&e) =>
+                        {
+                            session = None;
+                            continue;
+                        }
+                        Err(e) => return sink.send(fail(e.to_string())),
+                    }
+                }
                 match client.query(On::Session(sid), &req).await {
                     Ok(mut stream) => {
                         while let Some(ev) = stream.events.next().await {

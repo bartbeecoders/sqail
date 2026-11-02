@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use egui::{Key, Modifiers};
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use sqail_client::proto::{ConnectionInput, ConnectionParams, QueryRequest, SqliteParams};
 use sqail_client::{Client, On, Target, Trust};
 use sqail_ui::SqailApp;
@@ -1292,6 +1292,26 @@ fn editor_runs_queries_end_to_end() {
         h.state().tabs[0].run.as_ref().unwrap().results[0].row(0)[0],
         sqail_ui::results::Cell::Float(9.5)
     );
+    // The SELECT opened a transaction, but the run, the history and result
+    // editing all see only the user's SQL (#79).
+    assert!(h.state().tabs[0].in_transaction, "BEGIN was sent first");
+    assert_eq!(
+        h.state().tabs[0].run.as_ref().unwrap().sql,
+        "SELECT score FROM people WHERE id = 1"
+    );
+    assert_eq!(
+        h.state().history.entries.last().map(|e| e.sql.as_str()),
+        Some("SELECT score FROM people WHERE id = 1")
+    );
+    assert_eq!(h.state().editability(0), Ok(()));
+    assert!(
+        !h.get_by_label("✎ Edit data").accesskit_node().is_disabled(),
+        "Edit is offered in a manual-commit tab"
+    );
+    run_with(&mut h, "rollback the select's transaction", |h| {
+        h.get_by_label("Rollback").click()
+    });
+    assert!(!h.state().tabs[0].in_transaction);
     h.get_by_label("Auto-commit").click();
     h.step();
 

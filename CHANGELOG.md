@@ -7,6 +7,8 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
 
 ## Unreleased
 
+## 1.4.1 — 2026-11-03
+
 ### sqail
 
 - **Pinned tabs.** Right-click a tab to pin it. Pinned tabs get their own

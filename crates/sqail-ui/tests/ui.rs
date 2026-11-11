@@ -1416,6 +1416,113 @@ fn editor_runs_queries_end_to_end() {
     server.shutdown();
 }
 
+/// A client of the test service, for looking at the database from outside.
+fn outside(server: &sqail_service::Server) -> Client {
+    Client::new(&Target {
+        url: format!("https://{}", server.addr),
+        token: server.bootstrap_token.clone().unwrap(),
+        trust: Trust::Pinned(server.fingerprint.clone()),
+        identity: None,
+    })
+    .unwrap()
+}
+
+/// `people.score` by id, read on a fresh connection (committed data only).
+fn scores(e: &Env, client: &Client, conn: uuid::Uuid) -> Vec<serde_json::Value> {
+    let events =
+        e.rt.block_on(client.query_all(
+            On::Connection(conn),
+            &QueryRequest::new("SELECT score FROM people ORDER BY id"),
+        ))
+        .unwrap();
+    events
+        .into_iter()
+        .filter_map(|ev| match ev {
+            sqail_client::proto::QueryEvent::Rows { rows, .. } => Some(rows),
+            _ => None,
+        })
+        .flatten()
+        .map(|mut r| r.remove(0))
+        .collect()
+}
+
+/// #152: when the session of a manual-commit tab goes away mid-transaction,
+/// the next statement must not silently run (and auto-commit) on a new one.
+#[test]
+fn lost_session_does_not_auto_commit() {
+    let e = env();
+    let client = outside(&e.server);
+    let mut h = app([1280.0, 800.0]);
+    let conn = h.state().tabs[0].connection.unwrap();
+    h.state_mut().tabs[0].autocommit = false;
+    h.state_mut().tabs[0].text = "UPDATE people SET score = 1 WHERE id = 1".into();
+    h.step();
+    run_with(&mut h, "update in a transaction", |h| h.key_press(Key::F5));
+    assert!(h.state().tabs[0].in_transaction);
+    let (_, sid) = h.state().tabs[0].session.unwrap();
+
+    // The service drops the session (idle reaper, restart, lost connection).
+    e.rt.block_on(client.close_session(sid)).unwrap();
+    h.state_mut().tabs[0].text = "UPDATE people SET score = 2 WHERE id = 2".into();
+    h.step();
+    run_with(&mut h, "update after the session is gone", |h| {
+        h.key_press(Key::F5)
+    });
+    {
+        let tab = &h.state().tabs[0];
+        let run = tab.run.as_ref().unwrap();
+        assert!(run.failed);
+        assert!(
+            run.messages
+                .iter()
+                .any(|m| m.text.contains("open transaction was rolled back")),
+            "{:?}",
+            run.messages.iter().map(|m| &m.text).collect::<Vec<_>>()
+        );
+        assert!(!tab.in_transaction, "the transaction state is cleared");
+    }
+    h.get_by_label_contains("open transaction was rolled back");
+    assert!(h.query_by_label("Transaction open").is_none());
+    assert_eq!(
+        scores(&e, &client, conn)[..2],
+        [serde_json::json!(9.5), serde_json::json!(8.25)],
+        "the first update was rolled back, the second was not run"
+    );
+
+    // Running it again starts a new transaction on a new session.
+    run_with(&mut h, "deliberate re-run", |h| h.key_press(Key::F5));
+    assert!(!h.state().tabs[0].run.as_ref().unwrap().failed);
+    assert!(h.state().tabs[0].in_transaction, "BEGIN on the new session");
+    assert_eq!(
+        scores(&e, &client, conn)[1],
+        serde_json::json!(8.25),
+        "not committed"
+    );
+
+    // Outside a transaction the lost session is replaced silently, and a
+    // manual-commit tab still gets its BEGIN on the new one.
+    run_with(&mut h, "rollback", |h| h.get_by_label("Rollback").click());
+    assert!(!h.state().tabs[0].in_transaction);
+    let (_, sid) = h.state().tabs[0].session.unwrap();
+    e.rt.block_on(client.close_session(sid)).unwrap();
+    h.state_mut().tabs[0].text = "UPDATE people SET score = 3 WHERE id = 3".into();
+    h.step();
+    run_with(&mut h, "update on a replaced session", |h| {
+        h.key_press(Key::F5)
+    });
+    assert!(!h.state().tabs[0].run.as_ref().unwrap().failed);
+    assert!(h.state().tabs[0].in_transaction, "BEGIN was re-sent");
+    assert_ne!(h.state().tabs[0].session.unwrap().1, sid);
+    assert_eq!(
+        scores(&e, &client, conn)[2],
+        serde_json::Value::Null,
+        "not committed"
+    );
+
+    drop(h);
+    e.server.shutdown();
+}
+
 // ============================================================ big + engines ==
 
 /// Frame time while scrolling a ~1M row result, a 5,000-line script in the

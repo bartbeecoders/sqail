@@ -646,6 +646,137 @@ fn history_list_is_virtualised() {
     shot(&mut h, "15-history-virtualised");
 }
 
+/// A real click at a point (not on a widget).
+fn click_at(h: &mut Harness<'_, SqailApp>, pos: egui::Pos2) {
+    h.hover_at(pos);
+    h.step();
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+        h.step();
+    }
+    h.run_steps(2);
+}
+
+/// Editor shortcuts stay off while typing elsewhere, Esc goes to the find
+/// bar before it cancels a query, and AltGr (Ctrl+Alt) types instead of
+/// running a Ctrl shortcut (#159).
+#[test]
+fn shortcuts_respect_the_focus() {
+    let _e = env();
+    let mut h = app([1280.0, 800.0]);
+    h.state_mut().new_tab(None);
+    h.state_mut().tabs[1].text = "SELECT 1".into();
+    h.run_steps(2);
+
+    // Ctrl+W in the find field does not close the tab behind it.
+    h.key_press_modifiers(Modifiers::COMMAND, Key::F);
+    h.run_steps(3);
+    assert!(h.state().tabs[1].find.open);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::W);
+    h.run_steps(2);
+    assert_eq!(h.state().tabs.len(), 2, "typing in the find bar");
+    assert!(h.state().tabs[1].find.open);
+
+    // Esc with a query running closes the find bar first (the run is a
+    // stand-in: it has no query id, so a cancel would not reach a service).
+    h.state_mut().tabs[1].run = Some(sqail_ui::results::Run::new(999, "SELECT 1".into()));
+    assert!(h.state().tabs[1].run.as_ref().unwrap().running);
+    h.run_steps(2);
+    h.key_press(Key::Escape);
+    h.run_steps(3);
+    assert!(!h.state().tabs[1].find.open, "Esc closed the find bar");
+    h.state_mut().tabs[1].run = None;
+    h.run_steps(2);
+
+    // AltGr+E (Ctrl+Alt+E on Windows) is not Ctrl+E (Explain).
+    h.key_press_modifiers(Modifiers::COMMAND | Modifiers::ALT, Key::E);
+    h.run_steps(2);
+    assert!(h.state().tabs[1].run.is_none(), "AltGr+E did not explain");
+    // In the editor, Ctrl+W does close the tab.
+    let editor = h.state().tabs[1].editor_id();
+    h.ctx.memory_mut(|m| m.request_focus(editor));
+    h.run_steps(2);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::W);
+    h.run_steps(3);
+    assert!(
+        h.state().tabs.len() == 1
+            || matches!(h.state().dialog, sqail_ui::dialogs::Dialog::ConfirmClose(_)),
+        "Ctrl+W in the editor closes the tab"
+    );
+}
+
+/// The connection form ignores clicks beside it and asks before throwing
+/// away typed input; History → Clear asks first (#159).
+#[test]
+fn dialogs_do_not_lose_input() {
+    use sqail_ui::dialogs::Dialog;
+    let _e = env();
+    let mut h = app([1280.0, 800.0]);
+    h.state_mut().dialog = Dialog::Connection(Box::new(sqail_ui::dialogs::ConnForm::new_default()));
+    h.run_steps(3);
+    h.get_by_label("Name").focus();
+    h.step();
+    h.get_by_label("Name").type_text("half done");
+    h.run_steps(2);
+    // A click on the backdrop keeps the form.
+    click_at(&mut h, egui::pos2(5.0, 400.0));
+    assert!(
+        matches!(h.state().dialog, Dialog::Connection(_)),
+        "backdrop click"
+    );
+    // Cancel on a changed form asks; Keep editing keeps it.
+    h.get_by_label("Cancel").click();
+    h.run_steps(3);
+    h.get_by_label("Discard your changes to this connection?");
+    shot(&mut h, "16-discard-connection");
+    h.get_by_label("Keep editing").click();
+    h.run_steps(3);
+    assert!(matches!(h.state().dialog, Dialog::Connection(_)));
+    assert!(h.query_by_label("Keep editing").is_none());
+    // Esc asks too; Discard closes.
+    h.key_press(Key::Escape);
+    h.run_steps(3);
+    h.get_by_label("Discard").click();
+    h.run_steps(3);
+    assert!(matches!(h.state().dialog, Dialog::None));
+    // An unchanged form closes right away.
+    h.state_mut().dialog = Dialog::Connection(Box::new(sqail_ui::dialogs::ConnForm::new_default()));
+    h.run_steps(3);
+    h.get_by_label("Cancel").click();
+    h.run_steps(3);
+    assert!(matches!(h.state().dialog, Dialog::None));
+
+    // History → Clear asks first.
+    h.state_mut().history.push(sqail_ui::local::HistoryEntry {
+        at: 0,
+        connection: None,
+        connection_name: "people db".into(),
+        sql: "SELECT 'keep me'".into(),
+        duration_ms: 1,
+        rows: 1,
+        outcome: sqail_ui::local::Outcome::Ok,
+    });
+    h.state_mut().sidebar = sqail_ui::sidebar::View::History;
+    h.run_steps(3);
+    h.get_by_label("Clear").click();
+    h.run_steps(3);
+    assert!(matches!(h.state().dialog, Dialog::ConfirmClearHistory));
+    h.get_by_label("Cancel").click();
+    h.run_steps(3);
+    assert_eq!(h.state().history.entries.len(), 1);
+    h.get_by_label("Clear").click();
+    h.run_steps(3);
+    h.get_by_label("Clear history").click();
+    h.run_steps(3);
+    assert!(h.state().history.entries.is_empty());
+    assert!(matches!(h.state().dialog, Dialog::None));
+}
+
 /// A profile of an engine newer than this build is listed as unsupported, and
 /// not offered in the tab's connection picker.
 #[test]

@@ -310,7 +310,14 @@ remember their state.
 * **Connections:** a tree of schemas, tables, views, columns, indexes, foreign
   keys and routines, loaded lazily. Right-click a table for *SELECT top 100*,
   *Design table…*, *Import CSV…*, *Script CREATE*, *Drop table…* or *Copy
-  name*; right-click a routine for *Script definition* or *Copy name*. When
+  name*; right-click a routine for *Script definition* or *Copy name*.
+  *Script CREATE* on a table writes columns with their identity, computed
+  or generated definition, defaults, collations, keys, unique, check and
+  foreign-key constraints (with their `ON DELETE`/`ON UPDATE` actions) and
+  indexes with sort order, `INCLUDE` columns and filters; on PostgreSQL also
+  partitioning and comments, with serial columns written as `serial`. SQL
+  Server constraints whose names it generated are scripted without a name,
+  so a copy gets fresh ones. When
   the object can't be scripted, the new tab says why instead; on SQL Server
   that is usually a missing `VIEW DEFINITION` grant for the service's login,
   and the tab shows the `GRANT` to run (see `docs/windows-setup.md`).

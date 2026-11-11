@@ -1,10 +1,13 @@
 //! PostgreSQL via tokio-postgres.
 //!
-//! Scripts without parameters use the simple-query protocol: several
-//! statements per request, text-format values (typed through the column OIDs
-//! our vendored tokio-postgres exposes) and column headers even for empty
-//! results. Parameterised statements use the extended protocol and binary
-//! decoding.
+//! Scripts without parameters use the simple-query protocol: text-format
+//! values (typed through the column OIDs our vendored tokio-postgres
+//! exposes) and column headers even for empty results. A script is split
+//! like psql splits it and runs one statement per message, so each commits
+//! on its own unless the script opens a transaction (several statements in
+//! one message would share one implicit transaction, and a failing statement
+//! would silently roll back the ones before it). Parameterised statements
+//! use the extended protocol and binary decoding.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -171,23 +174,27 @@ impl PgConn {
     /// Run a script with the simple protocol, or, given `limit`, one query
     /// through the extended protocol, where the server stops after `limit`
     /// rows instead of sending the rest for us to drop.
+    /// `offset`: characters of the script before `sql`, added to error
+    /// positions.
     async fn run_simple(
         &mut self,
         sql: &str,
+        offset: usize,
         limit: Option<i32>,
         out: &mut ResultWriter<'_>,
     ) -> Result<()> {
+        let err = |e| db_err_at(e, offset);
         let stream = match limit {
             Some(n) => self.client.simple_query_limited(sql, n).await,
             None => self.client.simple_query_raw(sql).await,
         }
-        .map_err(db_err)?;
+        .map_err(err)?;
         futures::pin_mut!(stream);
         let mut columns: Vec<LogicalType> = Vec::new();
         loop {
             let item = stream.try_next().await;
             self.forward_notices(out).await?;
-            match item.map_err(db_err)? {
+            match item.map_err(err)? {
                 None => break,
                 Some(SimpleQueryMessage::RowDescription(cols)) => {
                     let meta: Vec<Column> = cols
@@ -220,6 +227,19 @@ impl PgConn {
             }
         }
         self.forward_notices(out).await
+    }
+
+    /// Run a script's statements one by one, each in its own simple-query
+    /// message, stopping at the first error.
+    async fn run_statements(
+        &mut self,
+        stmts: &[pg_guard::Statement<'_>],
+        out: &mut ResultWriter<'_>,
+    ) -> Result<()> {
+        for s in stmts {
+            self.run_simple(s.sql, s.offset, None, out).await?;
+        }
+        Ok(())
     }
 
     async fn run_prepared(
@@ -308,7 +328,18 @@ impl Conn for PgConn {
                 // their text form, exactly as for any other query.
                 self.client.prepare(&req.sql).await.map_err(db_err)?;
             }
-            self.run_simple(&req.sql, limit, &mut out).await
+            match pg_guard::split_statements(&req.sql) {
+                Some(stmts) if limit.is_none() && stmts.len() > 1 => {
+                    self.run_statements(&stmts, &mut out).await
+                }
+                // Statement boundaries depend on standard_conforming_strings:
+                // one message, so one transaction, as before.
+                None if limit.is_none() => self
+                    .run_simple(&req.sql, 0, None, &mut out)
+                    .await
+                    .map_err(rolled_back_together),
+                _ => self.run_simple(&req.sql, 0, limit, &mut out).await,
+            }
         } else {
             self.run_prepared(&req.sql, &req.params, &mut out).await
         };
@@ -599,10 +630,15 @@ fn numeric_to_string(raw: &[u8]) -> Option<String> {
 }
 
 fn db_err(e: tokio_postgres::Error) -> DbError {
+    db_err_at(e, 0)
+}
+
+/// `db_err` for a statement that starts `offset` characters into the script.
+fn db_err_at(e: tokio_postgres::Error, offset: usize) -> DbError {
     match e.as_db_error() {
         Some(db) => DbError::Database {
             code: Some(db.code().code().to_string()),
-            message: pg_message(&e),
+            message: pg_message_at(&e, offset),
         },
         None if e.is_closed() => DbError::Connect("connection closed".into()),
         None => DbError::Database {
@@ -612,8 +648,30 @@ fn db_err(e: tokio_postgres::Error) -> DbError {
     }
 }
 
-/// `ERROR: message` plus detail/hint/position, like psql prints it.
+/// For a script that had to run as one message: a failure rolled back the
+/// statements before it in the same implicit transaction.
+fn rolled_back_together(e: DbError) -> DbError {
+    match e {
+        DbError::Database { code, message } => DbError::Database {
+            code,
+            message: format!(
+                "{message}\nNOTE: this script ran as one transaction (its statements could not \
+                 be split safely), so the statements before the error were rolled back too, \
+                 unless the script committed them itself."
+            ),
+        },
+        other => other,
+    }
+}
+
 fn pg_message(e: &tokio_postgres::Error) -> String {
+    pg_message_at(e, 0)
+}
+
+/// `ERROR: message` plus detail/hint/position, like psql prints it. The
+/// position counts from the start of the script, `offset` characters before
+/// the statement the server saw.
+fn pg_message_at(e: &tokio_postgres::Error, offset: usize) -> String {
     let Some(db) = e.as_db_error() else {
         return e.to_string();
     };
@@ -625,7 +683,7 @@ fn pg_message(e: &tokio_postgres::Error) -> String {
         msg.push_str(&format!("\nHINT: {h}"));
     }
     if let Some(tokio_postgres::error::ErrorPosition::Original(p)) = db.position() {
-        msg.push_str(&format!("\nPOSITION: {p}"));
+        msg.push_str(&format!("\nPOSITION: {}", *p as usize + offset));
     }
     msg
 }

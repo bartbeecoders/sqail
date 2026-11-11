@@ -106,7 +106,10 @@ const FORBIDDEN_MSSQL: &[&str] = &[
     "UPDATETEXT",
 ];
 
-/// Functions with side effects, or that read files on the server.
+/// Functions with side effects, or that read files on the server. A
+/// read-only transaction does not stop most of these: they signal other
+/// backends, take session locks, reset statistics, touch replication state
+/// or the server's files, or open a connection of their own.
 const FORBIDDEN_FUNCTIONS: &[&str] = &[
     "nextval",
     "setval",
@@ -120,13 +123,39 @@ const FORBIDDEN_FUNCTIONS: &[&str] = &[
     "pg_promote",
     "pg_notify",
     "pg_logical_emit_message",
+    "pg_log_backend_memory_contexts",
+    "pg_log_standby_snapshot",
+    "pg_import_system_collations",
+    "pg_start_backup",
+    "pg_stop_backup",
+    // Server files (adminpack's `pg_file_*` included; `pg_file_settings` is
+    // a view, so these are listed rather than matched by prefix).
     "pg_read_file",
     "pg_read_binary_file",
-    "pg_ls_dir",
     "pg_stat_file",
-    "pg_ls_logdir",
-    "pg_ls_waldir",
-    "pg_ls_tmpdir",
+    "pg_file_read",
+    "pg_file_write",
+    "pg_file_rename",
+    "pg_file_unlink",
+    "pg_file_sync",
+    "pg_file_length",
+    "pg_logdir_ls",
+    // Replication slots and origins (`pg_replication_slots` and
+    // `pg_replication_origin_status` are views, so no prefix match).
+    "pg_create_physical_replication_slot",
+    "pg_create_logical_replication_slot",
+    "pg_drop_replication_slot",
+    "pg_copy_physical_replication_slot",
+    "pg_copy_logical_replication_slot",
+    "pg_replication_slot_advance",
+    "pg_sync_replication_slots",
+    "pg_replication_origin_create",
+    "pg_replication_origin_drop",
+    "pg_replication_origin_advance",
+    "pg_replication_origin_session_setup",
+    "pg_replication_origin_session_reset",
+    "pg_replication_origin_xact_setup",
+    "pg_replication_origin_xact_reset",
     "query_to_xml",
     "query_to_xmlschema",
     "query_to_xml_and_xmlschema",
@@ -147,11 +176,47 @@ const FORBIDDEN_FUNCTIONS: &[&str] = &[
     "load_extension",
     "readfile",
     "writefile",
+    "fts3_tokenizer",
 ];
 
 /// Function name prefixes refused like [`FORBIDDEN_FUNCTIONS`]: advisory
-/// locks (session-level ones outlive the rollback) and remote queries.
-const FORBIDDEN_PREFIXES: &[&str] = &["pg_advisory", "pg_try_advisory", "dblink"];
+/// locks (session-level ones outlive the rollback), remote queries, sleeps,
+/// directory listings, logical decoding (it consumes the slot), backups and
+/// WAL replay control.
+const FORBIDDEN_PREFIXES: &[&str] = &[
+    "pg_advisory",
+    "pg_try_advisory",
+    "dblink",
+    "pg_sleep",
+    "pg_ls_",
+    "pg_logical_slot_",
+    "pg_backup_",
+    "pg_wal_replay_",
+];
+
+/// Whether `name` (lowercase) is a refused function: listed, a listed
+/// prefix, or a statistics reset (`pg_stat_reset*`, `pg_stat_*_reset`,
+/// `pg_stat_statements_reset` and the like).
+fn forbidden_function(name: &str) -> bool {
+    FORBIDDEN_FUNCTIONS.contains(&name)
+        || FORBIDDEN_PREFIXES.iter().any(|p| name.starts_with(p))
+        || (name.starts_with("pg_stat") && name.contains("reset"))
+}
+
+/// The name a quoted identifier stands for: quotes stripped, doubled
+/// closing quotes unescaped, lowercased for the comparison (Postgres folds
+/// only unquoted names, but SQLite and SQL Server match names regardless of
+/// case, so the guard does too).
+fn unquote(raw: &str) -> String {
+    let close = match raw.as_bytes().first() {
+        Some(b'[') => ']',
+        Some(&q) => q as char,
+        None => return String::new(),
+    };
+    let inner = raw.get(1..raw.len().saturating_sub(1)).unwrap_or("");
+    let doubled = format!("{close}{close}");
+    inner.replace(&doubled, &close.to_string()).to_lowercase()
+}
 
 /// Words before a top-level `SELECT` that keep it in the same statement.
 const SET_OPERATORS: &[&str] = &["UNION", "ALL", "EXCEPT", "INTERSECT", "DISTINCT"];
@@ -188,18 +253,48 @@ pub fn check_read_only(sql: &str, engine: Engine) -> Result<(), String> {
         ));
     }
     let mssql = engine == Engine::Mssql;
-    for t in tokens.iter().filter(|t| t.kind == Kind::Word) {
-        let w = word(t);
-        if FORBIDDEN.contains(&w.as_str()) || (mssql && FORBIDDEN_MSSQL.contains(&w.as_str())) {
-            return Err(format!(
-                "{w} is not allowed: the assistant may only read data"
-            ));
-        }
-        let lower = w.to_ascii_lowercase();
-        if FORBIDDEN_FUNCTIONS.contains(&lower.as_str())
-            || FORBIDDEN_PREFIXES.iter().any(|p| lower.starts_with(p))
-        {
-            return Err(format!("{lower}() is not allowed: it has side effects"));
+    let text = |t: &Token| &sql[t.range.clone()];
+    for (i, t) in tokens.iter().enumerate() {
+        let name = match t.kind {
+            Kind::Word => {
+                let w = word(t);
+                if FORBIDDEN.contains(&w.as_str())
+                    || (mssql && FORBIDDEN_MSSQL.contains(&w.as_str()))
+                {
+                    return Err(format!(
+                        "{w} is not allowed: the assistant may only read data"
+                    ));
+                }
+                w.to_ascii_lowercase()
+            }
+            Kind::QuotedIdent => {
+                // `U&"d\0061ta"` spells a name with Unicode escapes, which
+                // this check would have to decode: refuse it instead.
+                let unicode = engine == Engine::Postgres
+                    && i >= 2
+                    && text(&tokens[i - 1]) == "&"
+                    && tokens[i - 1].range.end == t.range.start
+                    && tokens[i - 2].range.end == tokens[i - 1].range.start
+                    && word(&tokens[i - 2]) == "U";
+                if unicode {
+                    return Err("U& (Unicode-escaped) names are not allowed".into());
+                }
+                // A quoted name is a function only where it is called:
+                // before `(` (also `schema."f"(…)`), or after `.` in
+                // Postgres' attribute notation (`(1)."f"` calls `f(1)`). A
+                // quoted column or table that shares a function's name stays
+                // usable.
+                let called = tokens.get(i + 1).is_some_and(|n| n.kind == Kind::Open)
+                    || (i > 0 && text(&tokens[i - 1]) == ".");
+                if !called {
+                    continue;
+                }
+                unquote(text(t))
+            }
+            _ => continue,
+        };
+        if forbidden_function(&name) {
+            return Err(format!("{name}() is not allowed: it has side effects"));
         }
     }
     // T-SQL needs no `;` between statements: a second top-level SELECT that
@@ -353,10 +448,83 @@ mod tests {
         rejected("SELECT setval('s', 1)", pg);
         rejected("SELECT 1 DO $$ BEGIN END $$", pg);
         rejected("SELECT 1 FOR SHARE NOWAIT; LOCK t", pg);
+        // Quoted names call the same function as bare ones.
+        rejected(r#"SELECT "pg_cancel_backend"(1)"#, pg);
+        rejected(r#"SELECT "PG_Cancel_Backend" (1)"#, pg);
+        rejected(r#"SELECT pg_catalog."pg_advisory_lock"(1)"#, pg);
+        rejected(r#"SELECT "pg_catalog"."pg_terminate_backend"(1)"#, pg);
+        rejected(r#"SELECT "pg_catalog".pg_terminate_backend(1)"#, pg);
+        rejected(r#"SELECT "pg_read_file" /* x */ ('/etc/passwd')"#, pg);
+        rejected(r#"SELECT * FROM "dblink"('x', 'y') AS t(a int)"#, pg);
+        // Attribute notation: `(1)."f"` is `f(1)`.
+        rejected(r#"SELECT (1)."pg_cancel_backend""#, pg);
+        rejected(r#"SELECT (0.1)."pg_sleep""#, pg);
+        // Unicode-escaped names are refused outright.
+        rejected(r#"SELECT U&"pg_cancel_backend"(1)"#, pg);
+        rejected(r#"SELECT u&"\0070g_sleep"(1)"#, pg);
+        rejected(r#"SELECT 1 FROM t WHERE x = U&"d\0061ta""#, pg);
+        // Admin families a read-only transaction does not stop.
+        for f in [
+            "pg_stat_reset()",
+            "pg_stat_reset_shared('bgwriter')",
+            "pg_stat_reset_single_table_counters(1)",
+            "pg_stat_statements_reset()",
+            "pg_create_logical_replication_slot('s', 'test_decoding')",
+            "pg_drop_replication_slot('s')",
+            "pg_replication_slot_advance('s', '0/0')",
+            "pg_logical_slot_get_changes('s', NULL, NULL)",
+            "pg_replication_origin_create('o')",
+            "pg_file_write('f', 'x', false)",
+            "pg_file_unlink('f')",
+            "pg_logdir_ls()",
+            "pg_ls_archive_statusdir()",
+            "pg_sleep(10)",
+            "pg_sleep_for('1 hour')",
+            "pg_backup_start('x')",
+            "pg_wal_replay_pause()",
+            "pg_log_backend_memory_contexts(1)",
+        ] {
+            rejected(&format!("SELECT {f}"), pg);
+            let quoted = f.replacen('(', "\"(", 1);
+            rejected(&format!("SELECT \"{quoted}"), pg);
+        }
+        // Quoted columns and tables that share a function's name, not called.
+        assert_eq!(
+            check_read_only(r#"SELECT "pg_sleep", t."dblink" FROM "nextval" t"#, pg),
+            Err("dblink() is not allowed: it has side effects".into())
+        );
+        assert_eq!(
+            check_read_only(r#"SELECT "pg_sleep", "dblink" FROM "nextval""#, pg),
+            Ok(())
+        );
+        // Views and columns that look like the families stay readable.
+        for sql in [
+            "SELECT slot_name, active FROM pg_replication_slots",
+            "SELECT * FROM pg_replication_origin_status",
+            "SELECT name, setting FROM pg_file_settings",
+            "SELECT datname, stats_reset FROM pg_stat_database",
+            "SELECT * FROM pg_stat_activity",
+            r#"SELECT "abs"(-1), upper("name") FROM "sales"."customers""#,
+            "SELECT u & 1 FROM t",
+        ] {
+            assert_eq!(check_read_only(sql, pg), Ok(()), "{sql}");
+        }
         assert_eq!(check_read_only(r"SELECT E'it\'s', 'a\'", pg), Ok(()));
         assert_eq!(check_read_only("SELECT a$b FROM t", pg), Ok(()));
         assert_eq!(check_read_only("TABLE sales.orders", pg), Ok(()));
         assert_eq!(check_read_only("SHOW search_path", pg), Ok(()));
+    }
+
+    #[test]
+    fn quoted_names_are_unquoted() {
+        assert_eq!(unquote(r#""PG_Sleep""#), "pg_sleep");
+        assert_eq!(unquote(r#""a""b""#), r#"a"b"#);
+        assert_eq!(unquote("[a]]b]"), "a]b");
+        assert_eq!(unquote("`a``b`"), "a`b");
+        assert_eq!(unquote(r#""""#), "");
+        // A doubled quote inside the name does not hide the prefix.
+        rejected(r#"SELECT "pg_sleep"""(1)"#, Engine::Postgres);
+        rejected("SELECT [xp_cmdshell]('dir')", Engine::Mssql);
     }
 
     #[test]
@@ -405,6 +573,21 @@ mod tests {
         rejected("SELECT 1 DETACH DATABASE x", lite);
         rejected("SELECT 1 REINDEX", lite);
         rejected("SELECT 1 ANALYZE", lite);
+        // SQLite resolves quoted function names, in any case.
+        rejected(r#"SELECT "load_extension"('x')"#, lite);
+        rejected("SELECT `Load_Extension`('x')", lite);
+        rejected("SELECT [load_extension]('x')", lite);
+        rejected(r#"SELECT "readfile" ('/etc/passwd')"#, lite);
+        rejected("SELECT [writefile]('f', 'x')", lite);
+        rejected(r#"SELECT "fts3_tokenizer"('simple')"#, lite);
+        // A quoted column or table named like one, not called, is fine.
+        assert_eq!(
+            check_read_only(
+                r#"SELECT "readfile", [writefile] FROM "load_extension""#,
+                lite
+            ),
+            Ok(())
+        );
         assert_eq!(check_read_only("SELECT [a b] FROM `t`", lite), Ok(()));
         assert_eq!(check_read_only("SELECT iif(a, 1, 2) FROM t", lite), Ok(()));
     }

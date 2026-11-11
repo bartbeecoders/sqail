@@ -171,6 +171,22 @@ async fn sqlite_schema(conn: &mut dyn Conn, schema: Option<&str>) -> Result<Sqli
 
 // -------------------------------------------------------------- columns --
 
+/// SQL Server: a column's type as written in DDL (`c` is `sys.columns`,
+/// `t` its `sys.types` row).
+macro_rules! ms_type {
+    () => {
+        "CASE WHEN t.name IN ('varchar', 'char', 'varbinary', 'binary')
+                   THEN t.name + '(' + IIF(c.max_length = -1, 'max', CAST(c.max_length AS varchar(10))) + ')'
+              WHEN t.name IN ('nvarchar', 'nchar')
+                   THEN t.name + '(' + IIF(c.max_length = -1, 'max', CAST(c.max_length / 2 AS varchar(10))) + ')'
+              WHEN t.name IN ('decimal', 'numeric')
+                   THEN t.name + '(' + CAST(c.precision AS varchar(3)) + ',' + CAST(c.scale AS varchar(3)) + ')'
+              WHEN t.name IN ('datetime2', 'time', 'datetimeoffset')
+                   THEN t.name + '(' + CAST(c.scale AS varchar(3)) + ')'
+              ELSE t.name END"
+    };
+}
+
 pub async fn columns(
     conn: &mut dyn Conn,
     schema: Option<&str>,
@@ -193,16 +209,10 @@ pub async fn columns(
             vec![param(schema), param(Some(table))],
         ),
         Engine::Mssql => (
-            "SELECT c.name, c.column_id,
-                    CASE WHEN t.name IN ('varchar', 'char', 'varbinary', 'binary')
-                              THEN t.name + '(' + IIF(c.max_length = -1, 'max', CAST(c.max_length AS varchar(10))) + ')'
-                         WHEN t.name IN ('nvarchar', 'nchar')
-                              THEN t.name + '(' + IIF(c.max_length = -1, 'max', CAST(c.max_length / 2 AS varchar(10))) + ')'
-                         WHEN t.name IN ('decimal', 'numeric')
-                              THEN t.name + '(' + CAST(c.precision AS varchar(3)) + ',' + CAST(c.scale AS varchar(3)) + ')'
-                         WHEN t.name IN ('datetime2', 'time', 'datetimeoffset')
-                              THEN t.name + '(' + CAST(c.scale AS varchar(3)) + ')'
-                         ELSE t.name END,
+            concat!(
+                "SELECT c.name, c.column_id, ",
+                ms_type!(),
+                ",
                     c.is_nullable, dc.definition,
                     CAST(CASE WHEN pk.column_id IS NULL THEN 0 ELSE 1 END AS bit)
              FROM sys.columns c
@@ -215,7 +225,8 @@ pub async fn columns(
                         WHERE i.is_primary_key = 1) pk
                     ON pk.object_id = c.object_id AND pk.column_id = c.column_id
              WHERE s.name = COALESCE(@P1, SCHEMA_NAME()) AND o.name = @P2
-             ORDER BY c.column_id",
+             ORDER BY c.column_id"
+            ),
             vec![param(schema), param(Some(table))],
         ),
         Engine::Sqlite => {
@@ -259,7 +270,13 @@ pub async fn indexes(
                     i.indisunique, i.indisprimary,
                     EXISTS (SELECT 1 FROM pg_constraint con
                             WHERE con.conindid = i.indexrelid AND con.conrelid = i.indrelid
-                              AND con.contype IN ('p', 'u', 'x'))
+                              AND con.contype IN ('p', 'u', 'x')),
+                    (SELECT string_agg((i.indoption[k] & 1)::text, '' ORDER BY k)
+                     FROM generate_series(0, i.indnkeyatts - 1) k)::text,
+                    (SELECT string_agg(pg_get_indexdef(i.indexrelid, k + 1, true), chr(31) ORDER BY k)
+                     FROM generate_series(i.indnkeyatts, i.indnatts - 1) k)::text,
+                    pg_get_expr(i.indpred, i.indrelid, true)::text,
+                    NULL::text
              FROM pg_index i
              JOIN pg_class ic ON ic.oid = i.indexrelid
              JOIN pg_class c ON c.oid = i.indrelid
@@ -268,29 +285,15 @@ pub async fn indexes(
              ORDER BY 1",
             vec![param(schema), param(Some(table))],
         ),
-        Engine::Mssql => (
-            "SELECT i.name,
-                    STRING_AGG(c.name, CHAR(31)) WITHIN GROUP (ORDER BY ic.key_ordinal),
-                    i.is_unique, i.is_primary_key,
-                    CAST(i.is_primary_key | i.is_unique_constraint AS bit)
-             FROM sys.indexes i
-             JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
-             JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
-             JOIN sys.objects o ON o.object_id = i.object_id
-             JOIN sys.schemas s ON s.schema_id = o.schema_id
-             WHERE s.name = COALESCE(@P1, SCHEMA_NAME()) AND o.name = @P2
-               AND i.name IS NOT NULL AND ic.is_included_column = 0
-             GROUP BY i.name, i.is_unique, i.is_primary_key, i.is_unique_constraint
-             ORDER BY i.name",
-            vec![param(schema), param(Some(table))],
-        ),
+        Engine::Mssql => (MS_INDEXES, vec![param(schema), param(Some(table))]),
         Engine::Sqlite => {
             sqlite_schema(conn, schema).await?;
             (
                 "SELECT il.name,
                         (SELECT group_concat(name, char(31))
                          FROM (SELECT name FROM pragma_index_info(il.name, ?2) ORDER BY seqno)),
-                        il.\"unique\", il.origin = 'pk', il.origin <> 'c'
+                        il.\"unique\", il.origin = 'pk', il.origin <> 'c',
+                        NULL, NULL, NULL, NULL
                  FROM pragma_index_list(?1, ?2) il ORDER BY il.name",
                 vec![param(Some(table)), param(Some(schema.unwrap_or("main")))],
             )
@@ -299,16 +302,63 @@ pub async fn indexes(
     Ok(rows(conn, sql, params)
         .await?
         .iter()
-        .filter_map(|r| {
-            Some(IndexInfo {
-                name: get_str(&r[0])?,
-                columns: split_list(&r[1]),
-                unique: get_bool(&r[2]),
-                primary: get_bool(&r[3]),
-                constraint: get_bool(&r[4]),
-            })
-        })
+        .filter_map(|r| index_info(r))
         .collect())
+}
+
+/// SQL Server indexes: name, key columns, unique, primary, constraint,
+/// descending flags ("0"/"1" per key), included columns, filter, type.
+/// Indexes without key columns (columnstore) are left out.
+const MS_INDEXES: &str = "SELECT i.name,
+        (SELECT STRING_AGG(c.name, CHAR(31)) WITHIN GROUP (ORDER BY ic.key_ordinal)
+         FROM sys.index_columns ic
+         JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+         WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 0),
+        i.is_unique, i.is_primary_key,
+        CAST(i.is_primary_key | i.is_unique_constraint AS bit),
+        (SELECT STRING_AGG(CAST(ic.is_descending_key AS varchar(1)), '') WITHIN GROUP (ORDER BY ic.key_ordinal)
+         FROM sys.index_columns ic
+         WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 0),
+        (SELECT STRING_AGG(c.name, CHAR(31)) WITHIN GROUP (ORDER BY ic.index_column_id)
+         FROM sys.index_columns ic
+         JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+         WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 1),
+        i.filter_definition, i.type_desc
+ FROM sys.indexes i
+ JOIN sys.objects o ON o.object_id = i.object_id
+ JOIN sys.schemas s ON s.schema_id = o.schema_id
+ WHERE s.name = COALESCE(@P1, SCHEMA_NAME()) AND o.name = @P2 AND i.name IS NOT NULL
+   AND EXISTS (SELECT 1 FROM sys.index_columns ic
+               WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id
+                 AND ic.is_included_column = 0)
+ ORDER BY i.name";
+
+/// One row of an index query (see [`MS_INDEXES`] for the column order).
+fn index_info(r: &[Value]) -> Option<IndexInfo> {
+    let descending: Vec<bool> = get_str(&r[5])
+        .unwrap_or_default()
+        .chars()
+        .map(|c| c == '1')
+        .collect();
+    Some(IndexInfo {
+        name: get_str(&r[0])?,
+        columns: split_list(&r[1]),
+        unique: get_bool(&r[2]),
+        primary: get_bool(&r[3]),
+        constraint: get_bool(&r[4]),
+        descending: if descending.contains(&true) {
+            descending
+        } else {
+            Vec::new()
+        },
+        include: split_list(&r[6]),
+        filter: get_str(&r[7]),
+        clustered: match get_str(&r[8]).as_deref() {
+            Some("CLUSTERED") => Some(true),
+            Some("NONCLUSTERED") => Some(false),
+            _ => None,
+        },
+    })
 }
 
 // --------------------------------------------------------- foreign keys --
@@ -338,24 +388,7 @@ pub async fn foreign_keys(
              ORDER BY 1",
             vec![param(schema), param(Some(table))],
         ),
-        Engine::Mssql => (
-            "SELECT fk.name,
-                    STRING_AGG(pc.name, CHAR(31)) WITHIN GROUP (ORDER BY fkc.constraint_column_id),
-                    rs.name, rt.name,
-                    STRING_AGG(rc.name, CHAR(31)) WITHIN GROUP (ORDER BY fkc.constraint_column_id)
-             FROM sys.foreign_keys fk
-             JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
-             JOIN sys.columns pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id
-             JOIN sys.columns rc ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id
-             JOIN sys.objects rt ON rt.object_id = fk.referenced_object_id
-             JOIN sys.schemas rs ON rs.schema_id = rt.schema_id
-             JOIN sys.objects p ON p.object_id = fk.parent_object_id
-             JOIN sys.schemas ps ON ps.schema_id = p.schema_id
-             WHERE ps.name = COALESCE(@P1, SCHEMA_NAME()) AND p.name = @P2
-             GROUP BY fk.name, rs.name, rt.name
-             ORDER BY fk.name",
-            vec![param(schema), param(Some(table))],
-        ),
+        Engine::Mssql => (MS_FOREIGN_KEYS, vec![param(schema), param(Some(table))]),
         Engine::Sqlite => {
             sqlite_schema(conn, schema).await?;
             let raw = rows(
@@ -401,6 +434,28 @@ pub async fn foreign_keys(
         })
         .collect())
 }
+
+/// SQL Server foreign keys: name, columns, referenced schema, table and
+/// columns, then (for scripting) the ON DELETE and ON UPDATE actions,
+/// whether the name is generated, and NOT FOR REPLICATION.
+const MS_FOREIGN_KEYS: &str = "SELECT fk.name,
+        STRING_AGG(pc.name, CHAR(31)) WITHIN GROUP (ORDER BY fkc.constraint_column_id),
+        rs.name, rt.name,
+        STRING_AGG(rc.name, CHAR(31)) WITHIN GROUP (ORDER BY fkc.constraint_column_id),
+        fk.delete_referential_action_desc, fk.update_referential_action_desc,
+        fk.is_system_named, fk.is_not_for_replication
+ FROM sys.foreign_keys fk
+ JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
+ JOIN sys.columns pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id
+ JOIN sys.columns rc ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id
+ JOIN sys.objects rt ON rt.object_id = fk.referenced_object_id
+ JOIN sys.schemas rs ON rs.schema_id = rt.schema_id
+ JOIN sys.objects p ON p.object_id = fk.parent_object_id
+ JOIN sys.schemas ps ON ps.schema_id = p.schema_id
+ WHERE ps.name = COALESCE(@P1, SCHEMA_NAME()) AND p.name = @P2
+ GROUP BY fk.name, rs.name, rt.name, fk.delete_referential_action_desc,
+          fk.update_referential_action_desc, fk.is_system_named, fk.is_not_for_replication
+ ORDER BY fk.name";
 
 // ------------------------------------------------------------- routines --
 
@@ -538,14 +593,17 @@ pub async fn ddl(conn: &mut dyn Conn, schema: Option<&str>, name: &str) -> Resul
             parts.join("\n\n")
         }
         Engine::Postgres => {
+            // Names are quoted by the server: its quote_ident knows every
+            // keyword the running version reserves.
             let kind = rows(
                 conn,
-                "SELECT c.relkind::text, c.oid::int8 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                "SELECT c.relkind::text, c.oid::int8, n.nspname::text,
+                        (quote_ident(n.nspname) || '.' || quote_ident(c.relname))::text
+                 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                  WHERE n.nspname = COALESCE($1, current_schema()) AND c.relname = $2",
                 vec![param(schema), param(Some(name))],
             )
             .await?;
-            let schema_name = schema.unwrap_or("public");
             match kind.first().and_then(|r| get_str(&r[0])).as_deref() {
                 Some("v" | "m") => {
                     let def = rows(
@@ -560,13 +618,15 @@ pub async fn ddl(conn: &mut dyn Conn, schema: Option<&str>, name: &str) -> Resul
                         "CREATE OR REPLACE VIEW"
                     };
                     format!(
-                        "{kw} {}.{} AS\n{}",
-                        pg_ident(schema_name),
-                        pg_ident(name),
+                        "{kw} {} AS\n{}",
+                        get_str(&kind[0][3]).unwrap_or_default(),
                         def.first().and_then(|r| get_str(&r[0])).unwrap_or_default()
                     )
                 }
-                Some(_) => pg_table_ddl(conn, schema_name, name).await?,
+                Some(_) => {
+                    let schema_name = get_str(&kind[0][2]).unwrap_or_default();
+                    pg_table_ddl(conn, &schema_name, name).await?
+                }
                 None => {
                     let defs = rows(
                         conn,
@@ -658,61 +718,123 @@ fn ms_no_definition(
     }
 }
 
-fn pg_ident(s: &str) -> String {
-    let plain = s
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
-        && s.chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
-    if plain {
-        s.to_string()
-    } else {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    }
-}
-
 fn ms_ident(s: &str) -> String {
     format!("[{}]", s.replace(']', "]]"))
 }
 
+/// The table itself: quoted name, kind, persistence, partition key, and for
+/// a partition its parent and bounds, then the table comment (as a literal).
+const PG_DDL_TABLE: &str = "SELECT (quote_ident(n.nspname) || '.' || quote_ident(c.relname))::text,
+        c.relkind::text, c.relpersistence::text,
+        CASE WHEN c.relkind = 'p' THEN pg_get_partkeydef(c.oid) END::text,
+        (SELECT quote_ident(pn.nspname) || '.' || quote_ident(p.relname)
+         FROM pg_inherits h JOIN pg_class p ON p.oid = h.inhparent
+         JOIN pg_namespace pn ON pn.oid = p.relnamespace
+         WHERE h.inhrelid = c.oid AND c.relispartition)::text,
+        CASE WHEN c.relispartition THEN pg_get_expr(c.relpartbound, c.oid) END::text,
+        quote_literal(obj_description(c.oid, 'pg_class'))::text
+ FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+ WHERE n.nspname = $1 AND c.relname = $2";
+
+/// Columns as DDL needs them: quoted name, type, NOT NULL, default (or
+/// generation) expression, attidentity, attgenerated, a collation other than
+/// the type's, identity START and INCREMENT, whether it is a serial (its
+/// default draws from a sequence the column owns), and the comment (as a
+/// literal).
+const PG_DDL_COLUMNS: &str = "SELECT quote_ident(a.attname)::text, format_type(a.atttypid, a.atttypmod)::text,
+        a.attnotnull, pg_get_expr(d.adbin, d.adrelid)::text, a.attidentity::text, a.attgenerated::text,
+        CASE WHEN a.attcollation <> 0 AND a.attcollation <> t.typcollation
+             THEN quote_ident(cn.nspname) || '.' || quote_ident(co.collname) END::text,
+        s.seqstart::int8, s.seqincrement::int8,
+        (a.attidentity = '' AND s.deptype = 'a'
+         AND pg_get_expr(d.adbin, d.adrelid) = format('nextval(%L::regclass)', s.seqoid::regclass)),
+        quote_literal(col_description(c.oid, a.attnum))::text
+ FROM pg_attribute a
+ JOIN pg_class c ON c.oid = a.attrelid
+ JOIN pg_namespace n ON n.oid = c.relnamespace
+ JOIN pg_type t ON t.oid = a.atttypid
+ LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+ LEFT JOIN pg_collation co ON co.oid = a.attcollation
+ LEFT JOIN pg_namespace cn ON cn.oid = co.collnamespace
+ LEFT JOIN LATERAL (
+     SELECT sc.oid AS seqoid, dep.deptype, sq.seqstart, sq.seqincrement
+     FROM pg_depend dep
+     JOIN pg_class sc ON sc.oid = dep.objid AND sc.relkind = 'S'
+     JOIN pg_sequence sq ON sq.seqrelid = sc.oid
+     WHERE dep.classid = 'pg_class'::regclass AND dep.refclassid = 'pg_class'::regclass
+       AND dep.refobjid = c.oid AND dep.refobjsubid = a.attnum AND dep.deptype IN ('a', 'i')
+     LIMIT 1) s ON true
+ WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped
+ ORDER BY a.attnum";
+
 async fn pg_table_ddl(conn: &mut dyn Conn, schema: &str, table: &str) -> Result<String> {
-    let cols = columns(conn, Some(schema), table).await?;
-    let mut lines: Vec<String> = cols
-        .iter()
-        .map(|c| {
-            let mut l = format!("    {} {}", pg_ident(&c.name), c.data_type);
-            if let Some(d) = &c.default {
-                l.push_str(&format!(" DEFAULT {d}"));
-            }
-            if !c.nullable {
-                l.push_str(" NOT NULL");
-            }
-            l
-        })
-        .collect();
+    let params = || vec![param(Some(schema)), param(Some(table))];
+    let t = rows(conn, PG_DDL_TABLE, params()).await?;
+    let t = t
+        .first()
+        .ok_or_else(|| DbError::Invalid(format!("table '{table}' not found")))?;
+    let qname = get_str(&t[0]).unwrap_or_default();
+    let partition_of = get_str(&t[4]);
+    let cols = rows(conn, PG_DDL_COLUMNS, params()).await?;
+    let mut lines = Vec::new();
+    let mut comments = Vec::new();
+    if let Some(c) = get_str(&t[6]) {
+        comments.push(format!("COMMENT ON TABLE {qname} IS {c};"));
+    }
+    for r in &cols {
+        let name = get_str(&r[0]).unwrap_or_default();
+        if let Some(c) = get_str(&r[10]) {
+            comments.push(format!("COMMENT ON COLUMN {qname}.{name} IS {c};"));
+        }
+        // A partition takes its columns from the parent.
+        if partition_of.is_none() {
+            lines.push(pg_column(r));
+        }
+    }
     let cons = rows(
         conn,
-        "SELECT con.conname::text, pg_get_constraintdef(con.oid, true)::text
+        "SELECT quote_ident(con.conname)::text, pg_get_constraintdef(con.oid, true)::text
          FROM pg_constraint con
          JOIN pg_class c ON c.oid = con.conrelid
          JOIN pg_namespace n ON n.oid = c.relnamespace
-         WHERE n.nspname = $1 AND c.relname = $2
+         WHERE n.nspname = $1 AND c.relname = $2 AND con.contype <> 'n'
+           AND (con.conislocal OR NOT c.relispartition)
          ORDER BY con.contype = 'f', con.conname",
-        vec![param(Some(schema)), param(Some(table))],
+        params(),
     )
     .await?;
     for r in &cons {
         if let (Some(name), Some(def)) = (get_str(&r[0]), get_str(&r[1])) {
-            lines.push(format!("    CONSTRAINT {} {def}", pg_ident(&name)));
+            lines.push(format!("    CONSTRAINT {name} {def}"));
         }
     }
-    let mut out = format!(
-        "CREATE TABLE {}.{} (\n{}\n);",
-        pg_ident(schema),
-        pg_ident(table),
-        lines.join(",\n")
-    );
+    let unlogged = if get_str(&t[2]).as_deref() == Some("u") {
+        "UNLOGGED "
+    } else {
+        ""
+    };
+    let mut out = match &partition_of {
+        Some(parent) => {
+            let body = if lines.is_empty() {
+                String::new()
+            } else {
+                format!(" (\n{}\n)", lines.join(",\n"))
+            };
+            format!(
+                "CREATE {unlogged}TABLE {qname} PARTITION OF {parent}{body}\n{};",
+                get_str(&t[5]).unwrap_or_default()
+            )
+        }
+        None => format!(
+            "CREATE {unlogged}TABLE {qname} (\n{}\n){};",
+            lines.join(",\n"),
+            get_str(&t[3])
+                .map(|k| format!(" PARTITION BY {k}"))
+                .unwrap_or_default()
+        ),
+    };
+    // Indexes of their own: not behind a constraint, not a partition's copy
+    // of its parent's index.
     let idx = rows(
         conn,
         "SELECT pg_get_indexdef(i.indexrelid)::text
@@ -721,80 +843,273 @@ async fn pg_table_ddl(conn: &mut dyn Conn, schema: &str, table: &str) -> Result<
          JOIN pg_namespace n ON n.oid = c.relnamespace
          WHERE n.nspname = $1 AND c.relname = $2
            AND NOT EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.indexrelid)
+           AND NOT EXISTS (SELECT 1 FROM pg_inherits h WHERE h.inhrelid = i.indexrelid)
          ORDER BY 1",
-        vec![param(Some(schema)), param(Some(table))],
+        params(),
     )
     .await?;
     for r in &idx {
         if let Some(def) = get_str(&r[0]) {
-            out.push_str(&format!("\n{def};"));
+            // A partitioned table's index prints as `ON ONLY`, which would
+            // leave the copy's index invalid; let it cover the partitions.
+            out.push_str(&format!("\n{};", def.replacen(" ON ONLY ", " ON ", 1)));
         }
+    }
+    for c in comments {
+        out.push('\n');
+        out.push_str(&c);
     }
     Ok(out)
 }
 
-async fn ms_table_ddl(conn: &mut dyn Conn, schema: &str, table: &str) -> Result<String> {
-    let cols = columns(conn, Some(schema), table).await?;
-    let mut lines: Vec<String> = cols
+/// One column definition from a [`PG_DDL_COLUMNS`] row.
+fn pg_column(r: &[Value]) -> String {
+    let name = get_str(&r[0]).unwrap_or_default();
+    let data_type = get_str(&r[1]).unwrap_or_default();
+    // `serial` creates the sequence (named for the new table) and the
+    // default; scripting the default would point at the original's sequence.
+    let serial = match data_type.as_str() {
+        _ if !get_bool(&r[9]) => None,
+        "integer" => Some("serial"),
+        "bigint" => Some("bigserial"),
+        "smallint" => Some("smallserial"),
+        _ => None,
+    };
+    let mut l = format!("    {name} {}", serial.unwrap_or(&data_type));
+    if let Some(c) = get_str(&r[6]) {
+        l.push_str(&format!(" COLLATE {c}"));
+    }
+    let expr = get_str(&r[3]).unwrap_or_default();
+    match (get_str(&r[4]).as_deref(), get_str(&r[5]).as_deref()) {
+        (Some(kind @ ("a" | "d")), _) => {
+            l.push_str(if kind == "a" {
+                " GENERATED ALWAYS AS IDENTITY"
+            } else {
+                " GENERATED BY DEFAULT AS IDENTITY"
+            });
+            let (start, step) = (get_i64(&r[7]), get_i64(&r[8]));
+            if (start, step) != (1, 1) {
+                l.push_str(&format!(" (START WITH {start} INCREMENT BY {step})"));
+            }
+        }
+        (_, Some("s")) => l.push_str(&format!(" GENERATED ALWAYS AS ({expr}) STORED")),
+        (_, Some("v")) => l.push_str(&format!(" GENERATED ALWAYS AS ({expr}) VIRTUAL")),
+        _ if serial.is_none() && !expr.is_empty() => l.push_str(&format!(" DEFAULT {expr}")),
+        _ => {}
+    }
+    if get_bool(&r[2]) {
+        l.push_str(" NOT NULL");
+    }
+    l
+}
+
+/// SQL Server columns as DDL needs them: name, type, nullable, identity seed,
+/// increment and NOT FOR REPLICATION, computed definition and PERSISTED,
+/// default constraint name, definition and whether its name is generated,
+/// and a collation other than the database's.
+const MS_DDL_COLUMNS: &str = concat!(
+    "SELECT c.name, ",
+    ms_type!(),
+    ", c.is_nullable, c.is_identity,
+        CAST(idc.seed_value AS nvarchar(40)), CAST(idc.increment_value AS nvarchar(40)),
+        idc.is_not_for_replication, cc.definition, cc.is_persisted,
+        dc.name, dc.definition, dc.is_system_named,
+        CASE WHEN c.collation_name COLLATE DATABASE_DEFAULT
+                  <> CAST(DATABASEPROPERTYEX(DB_NAME(), 'Collation') AS sysname) COLLATE DATABASE_DEFAULT
+             THEN c.collation_name END
+ FROM sys.columns c
+ JOIN sys.objects o ON o.object_id = c.object_id
+ JOIN sys.schemas s ON s.schema_id = o.schema_id
+ JOIN sys.types t ON t.user_type_id = c.user_type_id
+ LEFT JOIN sys.identity_columns idc ON idc.object_id = c.object_id AND idc.column_id = c.column_id
+ LEFT JOIN sys.computed_columns cc ON cc.object_id = c.object_id AND cc.column_id = c.column_id
+ LEFT JOIN sys.default_constraints dc ON dc.object_id = c.default_object_id
+ WHERE s.name = @P1 AND o.name = @P2
+ ORDER BY c.column_id"
+);
+
+/// `CONSTRAINT [name] `, or nothing for a name SQL Server generated (so the
+/// script can run next to the original).
+fn ms_constraint(name: &str, system_named: bool) -> String {
+    if system_named {
+        String::new()
+    } else {
+        format!("CONSTRAINT {} ", ms_ident(name))
+    }
+}
+
+/// Key columns with their sort order.
+fn ms_keys(i: &IndexInfo) -> String {
+    i.columns
         .iter()
-        .map(|c| {
-            let mut l = format!("    {} {}", ms_ident(&c.name), c.data_type);
-            l.push_str(if c.nullable { " NULL" } else { " NOT NULL" });
-            if let Some(d) = &c.default {
-                l.push_str(&format!(" DEFAULT {d}"));
+        .enumerate()
+        .map(|(n, c)| {
+            if i.descending.get(n) == Some(&true) {
+                format!("{} DESC", ms_ident(c))
+            } else {
+                ms_ident(c)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn ms_list(names: &[String]) -> String {
+    names
+        .iter()
+        .map(|c| ms_ident(c))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+async fn ms_table_ddl(conn: &mut dyn Conn, schema: &str, table: &str) -> Result<String> {
+    let params = || vec![param(Some(schema)), param(Some(table))];
+    let qname = format!("{}.{}", ms_ident(schema), ms_ident(table));
+    let mut lines: Vec<String> = rows(conn, MS_DDL_COLUMNS, params())
+        .await?
+        .iter()
+        .map(|r| {
+            let name = ms_ident(&get_str(&r[0]).unwrap_or_default());
+            let nullable = get_bool(&r[2]);
+            if let Some(def) = get_str(&r[7]) {
+                let persisted = get_bool(&r[8]);
+                return format!(
+                    "    {name} AS {def}{}{}",
+                    if persisted { " PERSISTED" } else { "" },
+                    if persisted && !nullable {
+                        " NOT NULL"
+                    } else {
+                        ""
+                    }
+                );
+            }
+            let mut l = format!("    {name} {}", get_str(&r[1]).unwrap_or_default());
+            if let Some(c) = get_str(&r[12]) {
+                l.push_str(&format!(" COLLATE {c}"));
+            }
+            if get_bool(&r[3]) {
+                l.push_str(&format!(
+                    " IDENTITY({}, {})",
+                    get_str(&r[4]).unwrap_or_else(|| "1".into()),
+                    get_str(&r[5]).unwrap_or_else(|| "1".into())
+                ));
+                if get_bool(&r[6]) {
+                    l.push_str(" NOT FOR REPLICATION");
+                }
+            }
+            l.push_str(if nullable { " NULL" } else { " NOT NULL" });
+            if let Some(d) = get_str(&r[10]) {
+                let df = get_str(&r[9]).unwrap_or_default();
+                l.push_str(&format!(
+                    " {}DEFAULT {d}",
+                    ms_constraint(&df, get_bool(&r[11]))
+                ));
             }
             l
         })
         .collect();
-    let idx = indexes(conn, Some(schema), table).await?;
-    if let Some(pk) = idx.iter().find(|i| i.primary) {
+    let idx_rows = rows(conn, MS_INDEXES, params()).await?;
+    let system_named: Vec<String> = rows(
+        conn,
+        "SELECT k.name FROM sys.key_constraints k
+         WHERE k.parent_object_id = OBJECT_ID(QUOTENAME(@P1) + '.' + QUOTENAME(@P2))
+           AND k.is_system_named = 1",
+        params(),
+    )
+    .await?
+    .iter()
+    .filter_map(|r| get_str(&r[0]))
+    .collect();
+    let idx: Vec<(IndexInfo, Option<String>)> = idx_rows
+        .iter()
+        .filter_map(|r| Some((index_info(r)?, get_str(&r[8]))))
+        .collect();
+    let clustering = |i: &IndexInfo| match i.clustered {
+        Some(true) => "CLUSTERED ",
+        Some(false) => "NONCLUSTERED ",
+        None => "",
+    };
+    for (i, _) in idx.iter().filter(|(i, _)| i.constraint) {
         lines.push(format!(
-            "    CONSTRAINT {} PRIMARY KEY ({})",
-            ms_ident(&pk.name),
-            pk.columns
-                .iter()
-                .map(|c| ms_ident(c))
-                .collect::<Vec<_>>()
-                .join(", ")
+            "    {}{} {}({})",
+            ms_constraint(&i.name, system_named.contains(&i.name)),
+            if i.primary { "PRIMARY KEY" } else { "UNIQUE" },
+            clustering(i),
+            ms_keys(i)
         ));
     }
-    for fk in foreign_keys(conn, Some(schema), table).await? {
+    let checks = rows(
+        conn,
+        "SELECT name, definition, is_system_named, is_not_for_replication
+         FROM sys.check_constraints
+         WHERE parent_object_id = OBJECT_ID(QUOTENAME(@P1) + '.' + QUOTENAME(@P2))
+         ORDER BY name",
+        params(),
+    )
+    .await?;
+    for r in &checks {
         lines.push(format!(
-            "    CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}.{} ({})",
-            ms_ident(&fk.name),
-            fk.columns
-                .iter()
-                .map(|c| ms_ident(c))
-                .collect::<Vec<_>>()
-                .join(", "),
-            ms_ident(fk.ref_schema.as_deref().unwrap_or("dbo")),
-            ms_ident(&fk.ref_table),
-            fk.ref_columns
-                .iter()
-                .map(|c| ms_ident(c))
-                .collect::<Vec<_>>()
-                .join(", ")
+            "    {}CHECK {}{}",
+            ms_constraint(&get_str(&r[0]).unwrap_or_default(), get_bool(&r[2])),
+            if get_bool(&r[3]) {
+                "NOT FOR REPLICATION "
+            } else {
+                ""
+            },
+            get_str(&r[1]).unwrap_or_default()
         ));
     }
-    let mut out = format!(
-        "CREATE TABLE {}.{} (\n{}\n);",
-        ms_ident(schema),
-        ms_ident(table),
-        lines.join(",\n")
-    );
-    for i in idx.iter().filter(|i| !i.primary) {
+    let action = |v: &Value, on: &str| match get_str(v).as_deref() {
+        Some("CASCADE") => format!(" ON {on} CASCADE"),
+        Some("SET_NULL") => format!(" ON {on} SET NULL"),
+        Some("SET_DEFAULT") => format!(" ON {on} SET DEFAULT"),
+        _ => String::new(),
+    };
+    for r in rows(conn, MS_FOREIGN_KEYS, params()).await? {
+        lines.push(format!(
+            "    {}FOREIGN KEY ({}) REFERENCES {}.{} ({}){}{}{}",
+            ms_constraint(&get_str(&r[0]).unwrap_or_default(), get_bool(&r[7])),
+            ms_list(&split_list(&r[1])),
+            ms_ident(&get_str(&r[2]).unwrap_or_else(|| "dbo".into())),
+            ms_ident(&get_str(&r[3]).unwrap_or_default()),
+            ms_list(&split_list(&r[4])),
+            action(&r[5], "DELETE"),
+            action(&r[6], "UPDATE"),
+            if get_bool(&r[8]) {
+                " NOT FOR REPLICATION"
+            } else {
+                ""
+            }
+        ));
+    }
+    let mut out = format!("CREATE TABLE {qname} (\n{}\n);", lines.join(",\n"));
+    for (i, kind) in idx.iter().filter(|(i, _)| !i.constraint) {
+        if i.clustered.is_none() {
+            out.push_str(&format!(
+                "\n-- {} ({}) is not scripted",
+                ms_ident(&i.name),
+                kind.as_deref().unwrap_or("index").to_lowercase()
+            ));
+            continue;
+        }
         out.push_str(&format!(
-            "\nCREATE {}INDEX {} ON {}.{} ({});",
+            "\nCREATE {}{}INDEX {} ON {qname} ({})",
             if i.unique { "UNIQUE " } else { "" },
+            if i.clustered == Some(true) {
+                "CLUSTERED "
+            } else {
+                ""
+            },
             ms_ident(&i.name),
-            ms_ident(schema),
-            ms_ident(table),
-            i.columns
-                .iter()
-                .map(|c| ms_ident(c))
-                .collect::<Vec<_>>()
-                .join(", ")
+            ms_keys(i)
         ));
+        if !i.include.is_empty() {
+            out.push_str(&format!(" INCLUDE ({})", ms_list(&i.include)));
+        }
+        if let Some(f) = &i.filter {
+            out.push_str(&format!(" WHERE {f}"));
+        }
+        out.push(';');
     }
     Ok(out)
 }
@@ -805,9 +1120,6 @@ mod tests {
 
     #[test]
     fn identifier_quoting() {
-        assert_eq!(pg_ident("orders"), "orders");
-        assert_eq!(pg_ident("Orders"), "\"Orders\"");
-        assert_eq!(pg_ident("a\"b"), "\"a\"\"b\"");
         assert_eq!(ms_ident("a]b"), "[a]]b]");
     }
 

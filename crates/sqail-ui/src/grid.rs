@@ -6,8 +6,8 @@ use sqail_client::proto::LogicalType;
 
 use crate::editing::EditState;
 use crate::results::{
-    COPY_ROW_LIMIT, GridHit, Pane, ResultSet, Run, Selection, Severity, fmt_duration,
-    selection_tsv_with,
+    COPY_ROW_LIMIT, GridHit, Move, Pane, ResultSet, Run, Selection, Severity, fmt_duration,
+    parse_tsv, selection_tsv_with,
 };
 
 #[derive(Default)]
@@ -766,24 +766,85 @@ fn grid_ui(
         }
     }
 
+    // Keyboard navigation while the grid has focus (#169). The focus lock
+    // keeps the arrow keys (and, while editing data, Tab) in the grid
+    // instead of letting egui move the focus to another widget.
+    let in_edit = edit.is_some();
+    let mut scroll_to_focus = false;
+    // Editing data: text typed into the selected cell, and a paste.
+    let mut typed: Option<String> = None;
+    let mut paste: Option<String> = None;
+    if grid_active && !typing && total_rows > 0 {
+        ui.memory_mut(|m| {
+            m.set_focus_lock_filter(
+                grid_focus,
+                egui::EventFilter {
+                    tab: in_edit,
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    escape: false,
+                },
+            );
+        });
+        // Rows in view, less the header and a partly shown row.
+        let page = ((ui.available_height() / row_h) as usize)
+            .saturating_sub(2)
+            .max(1);
+        if let Some((mv, extend)) = ui.input_mut(|i| nav_key(i, in_edit)) {
+            *selection = Some(Selection::moved(
+                *selection,
+                mv,
+                extend,
+                total_rows,
+                rs.columns.len(),
+                page,
+            ));
+            scroll_to_focus = true;
+        }
+        if in_edit {
+            ui.input(|i| {
+                for e in &i.events {
+                    match e {
+                        egui::Event::Text(t) if !i.modifiers.command => {
+                            typed.get_or_insert_with(String::new).push_str(t);
+                        }
+                        egui::Event::Paste(t) => paste = Some(t.clone()),
+                        _ => {}
+                    }
+                }
+            });
+        }
+    }
+
     let mut clicked_sort = None;
     let mut clicked_col: Option<(usize, bool)> = None;
     let mut clicked_row: Option<(usize, bool)> = None;
     let mut select_all = false;
     let mut clicked_cell: Option<(usize, usize, bool)> = None;
     let mut dbl_cell = None;
-    // F2 edits the selected cell, like a spreadsheet.
+    // F2 or Enter edits the selected cell, like a spreadsheet.
     if grid_active
         && !typing
         && edit.is_some()
         && let Some(sel) = selection.as_ref()
-        && ui.input(|i| i.key_pressed(egui::Key::F2))
+        && sel.focus.0 < total_rows
+        && ui.input_mut(|i| {
+            i.consume_key(egui::Modifiers::NONE, egui::Key::F2)
+                || i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+        })
     {
         dbl_cell = Some(sel.focus);
     }
     let mut ctx_action: Option<(CellAction, usize, usize)> = None;
-    // Inline editor result: Some(Some(text)) = commit, Some(None) = cancel.
-    let mut finished_edit: Option<Option<String>> = None;
+    // Inline editor result: (Some(text) = commit, None = cancel; the key
+    // that also moves to another cell: Enter, Tab or Shift+Tab).
+    let mut finished_edit: Option<(Option<String>, Option<Move>)> = None;
+    // The cell to scroll into view (sideways too) this frame.
+    let scroll_cell = if scroll_to_focus {
+        selection.map(|s| s.focus)
+    } else {
+        None
+    };
     let sel_fill = ui.visuals().selection.bg_fill;
     let null_color = ui.visuals().weak_text_color();
     let changed_fill = Color32::from_rgba_unmultiplied(0xe6, 0xa2, 0x3c, 50);
@@ -825,6 +886,9 @@ fn grid_ui(
                 .column(Column::exact(num_w));
             if reset {
                 table.reset();
+            }
+            if let Some((r, _)) = scroll_cell {
+                table = table.scroll_to_row(r, None);
             }
             for w in &widths {
                 table = table.column(
@@ -998,18 +1062,39 @@ fn grid_ui(
                                 if let Some(f) = fill {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, f);
                                 }
+                                if scroll_cell == Some((pos, c)) {
+                                    ui.scroll_to_rect(ui.max_rect(), None);
+                                }
                                 if editing_here && let Some(e) = edit.as_deref_mut() {
                                     let focus = std::mem::take(&mut e.focus_editor);
                                     let Some((_, _, buf)) = e.editing.as_mut() else { return };
-                                    let r = ui.add(egui::TextEdit::singleline(buf).font(mono.clone()).desired_width(f32::INFINITY));
+                                    // Tab stays in the editor: it commits and moves on.
+                                    let r = ui.add(egui::TextEdit::singleline(buf).font(mono.clone()).desired_width(f32::INFINITY).lock_focus(true));
                                     e.edit_dirty |= r.changed();
                                     if focus {
                                         r.request_focus();
                                     }
+                                    // A single-line editor gives up the focus on Enter itself.
+                                    let active = r.has_focus() || r.lost_focus();
+                                    let key = ui.input_mut(|i| {
+                                        if !active {
+                                            None
+                                        } else if i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab) {
+                                            Some(Move::Prev)
+                                        } else if i.consume_key(egui::Modifiers::NONE, egui::Key::Tab) {
+                                            Some(Move::Next)
+                                        } else if i.key_pressed(egui::Key::Enter) {
+                                            Some(Move::Down)
+                                        } else {
+                                            None
+                                        }
+                                    });
                                     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                                        finished_edit = Some(None);
-                                    } else if r.lost_focus() || (r.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
-                                        finished_edit = Some(Some(buf.clone()));
+                                        finished_edit = Some((None, None));
+                                    } else if key.is_some() {
+                                        finished_edit = Some((Some(buf.clone()), key));
+                                    } else if r.lost_focus() {
+                                        finished_edit = Some((Some(buf.clone()), None));
                                     }
                                     return;
                                 }
@@ -1187,16 +1272,40 @@ fn grid_ui(
     };
 
     // Finish an inline edit.
-    // An editor left without typing records nothing (#164): a NULL cell
-    // opens empty and must not become ''.
-    if let (Some(done), Some(e)) = (finished_edit, edit.as_deref_mut())
+    if let (Some((done, key)), Some(e)) = (finished_edit, edit.as_deref_mut())
         && let Some((pos, c, _)) = e.editing.take()
-        && let Some(text) = done
-        && std::mem::take(&mut e.edit_dirty)
     {
-        match row_ref(rs, pos) {
-            RowRef::Existing(r) => e.set(r, c, Some(text), rs),
-            RowRef::New(i) => e.inserted[i][c] = Some(Some(text)),
+        let cancelled = done.is_none();
+        // An editor left without typing records nothing (#164): a NULL cell
+        // opens empty and must not become ''.
+        if let Some(text) = done
+            && std::mem::take(&mut e.edit_dirty)
+        {
+            match row_ref(rs, pos) {
+                RowRef::Existing(r) => e.set(r, c, Some(text), rs),
+                RowRef::New(i) => e.inserted[i][c] = Some(Some(text)),
+            }
+        }
+        // Enter, Tab and Esc hand the keyboard back to the grid; Enter and
+        // Tab also move on to the next cell (#169).
+        if cancelled || key.is_some() {
+            let here = Some(Selection {
+                anchor: (pos, c),
+                focus: (pos, c),
+            });
+            *selection = match key {
+                Some(m) => Some(Selection::moved(
+                    here,
+                    m,
+                    false,
+                    total_rows,
+                    rs.columns.len(),
+                    1,
+                )),
+                None => here,
+            };
+            ui.memory_mut(|m| m.request_focus(grid_focus));
+            ui.ctx().request_repaint();
         }
     }
 
@@ -1217,6 +1326,28 @@ fn grid_ui(
             }
             _ => out.view = Some(view(rs, edit.as_deref(), pos, c)),
         }
+    }
+    // Typing into the selected cell starts editing it with that text.
+    if let (Some(text), Some(e), Some(sel)) = (typed, edit.as_deref_mut(), *selection)
+        && e.editing.is_none()
+        && dbl_cell.is_none()
+    {
+        let (pos, c) = sel.focus;
+        if pos < total_rows
+            && e.editable(c)
+            && !matches!(row_ref(rs, pos), RowRef::Existing(r) if e.deleted.contains(&r))
+        {
+            e.editing = Some((pos, c, text));
+            e.focus_editor = true;
+            e.edit_dirty = true;
+        }
+    }
+    // Paste a block (from a spreadsheet or this grid) into the selected cells.
+    if let (Some(text), Some(e), Some(sel)) = (paste, edit.as_deref_mut(), *selection)
+        && let Some(pasted) = paste_block(e, rs, &sel, &text)
+    {
+        *selection = Some(pasted);
+        ui.ctx().request_repaint();
     }
     if let Some((action, r, c)) = ctx_action {
         // Right-clicking outside the selection selects that cell first.
@@ -1326,6 +1457,111 @@ fn copy_selection(
             fmt_count(COPY_ROW_LIMIT)
         ));
     }
+}
+
+/// The first navigation key pressed this frame, taken out of the input: the
+/// move, and whether Shift extends the selection. Tab and Shift+Tab only
+/// when `tab`. The key event's own modifiers count, so Shift+arrow extends.
+fn nav_key(i: &mut egui::InputState, tab: bool) -> Option<(Move, bool)> {
+    use egui::Key;
+    let mut found = None;
+    i.events.retain(|e| {
+        let egui::Event::Key {
+            key,
+            pressed: true,
+            modifiers: m,
+            ..
+        } = e
+        else {
+            return true;
+        };
+        if found.is_some() || m.alt {
+            return true;
+        }
+        let mv = match (key, m.command) {
+            (Key::Home | Key::ArrowUp, true) => Move::Top,
+            (Key::End | Key::ArrowDown, true) => Move::Bottom,
+            (Key::ArrowLeft, true) => Move::RowStart,
+            (Key::ArrowRight, true) => Move::RowEnd,
+            (Key::ArrowUp, false) => Move::Up,
+            (Key::ArrowDown, false) => Move::Down,
+            (Key::ArrowLeft, false) => Move::Left,
+            (Key::ArrowRight, false) => Move::Right,
+            (Key::PageUp, false) => Move::PageUp,
+            (Key::PageDown, false) => Move::PageDown,
+            (Key::Home, false) => Move::RowStart,
+            (Key::End, false) => Move::RowEnd,
+            (Key::Tab, false) if tab => {
+                found = Some((if m.shift { Move::Prev } else { Move::Next }, false));
+                return false;
+            }
+            _ => return true,
+        };
+        found = Some((mv, m.shift));
+        false
+    });
+    found
+}
+
+/// Paste tab-separated text while editing (#169). One value fills every
+/// selected cell; a block lands at the selection's top-left cell, adding
+/// new rows past the end. Read-only columns, deleted rows and fields past
+/// the last column are skipped. An empty field is NULL, or DEFAULT in a new
+/// row. Returns the cells pasted into.
+fn paste_block(
+    e: &mut EditState,
+    rs: &ResultSet,
+    sel: &Selection,
+    text: &str,
+) -> Option<Selection> {
+    let block = parse_tsv(text);
+    let width = block.iter().map(Vec::len).max().unwrap_or(0);
+    if width == 0 {
+        return None;
+    }
+    let n_cols = rs.columns.len();
+    let (top, left) = (*sel.rows().start(), *sel.cols().start());
+    let single = block.len() == 1 && width == 1;
+    let (rows, cols) = if single {
+        (sel.rows(), sel.cols())
+    } else {
+        (
+            top..=top + block.len() - 1,
+            left..=(left + width - 1).min(n_cols.saturating_sub(1)),
+        )
+    };
+    if cols.is_empty() {
+        return None;
+    }
+    for pos in rows.clone() {
+        let line = &block[if single { 0 } else { pos - top }];
+        if let RowRef::New(i) = row_ref(rs, pos) {
+            while e.inserted.len() <= i {
+                e.inserted.push(vec![None; n_cols]);
+            }
+        }
+        for c in cols.clone() {
+            let field = if single {
+                line.first()
+            } else {
+                line.get(c - left)
+            };
+            let Some(field) = field else { continue };
+            if !e.editable(c) {
+                continue;
+            }
+            let value = (!field.is_empty()).then(|| field.clone());
+            match row_ref(rs, pos) {
+                RowRef::Existing(r) if e.deleted.contains(&r) => {}
+                RowRef::Existing(r) => e.set(r, c, value, rs),
+                RowRef::New(i) => e.inserted[i][c] = value.map(Some),
+            }
+        }
+    }
+    Some(Selection {
+        anchor: (*rows.start(), *cols.start()),
+        focus: (*rows.end(), *cols.end()),
+    })
 }
 
 /// Edit actions apply to every selected row (and, for values, selected cell).
@@ -1910,5 +2146,149 @@ mod tests {
         h.event(egui::Event::Copy);
         h.step();
         assert_eq!(clipboard_text(&h), vec!["changed".to_string()]);
+    }
+
+    fn focus_of(h: &egui_kittest::Harness<'_, Run>) -> (usize, usize) {
+        h.state().selection.expect("a selection").focus
+    }
+
+    /// Arrows, Page and Home/End keys move the selected cell while the grid
+    /// has focus, and the view follows it (#169).
+    #[test]
+    fn keys_move_the_selected_cell_and_scroll_to_it() {
+        use egui::{Key, Modifiers};
+        use egui_kittest::kittest::Queryable;
+
+        let rows = (0..300)
+            .map(|i| vec![format!("a{i}").into(), format!("b{i}").into()])
+            .collect();
+        let mut h = harness(text_run(&["x", "y"], rows), 0.25);
+        h.run();
+        h.key_press(Key::ArrowDown);
+        h.run();
+        assert!(h.state().selection.is_none(), "the grid has no focus yet");
+
+        h.get_by_label("a0").click();
+        h.run();
+        h.key_press(Key::ArrowDown);
+        h.run();
+        assert_eq!(focus_of(&h), (1, 0));
+        h.key_press(Key::ArrowRight);
+        h.run();
+        assert_eq!(focus_of(&h), (1, 1));
+        h.key_press_modifiers(Modifiers::SHIFT, Key::ArrowUp);
+        h.run();
+        let sel = h.state().selection.unwrap();
+        assert_eq!((sel.anchor, sel.focus), ((1, 1), (0, 1)), "Shift extends");
+        h.key_press(Key::PageDown);
+        h.run();
+        let (r, _) = focus_of(&h);
+        assert!(r > 5 && r < 40, "a page down: {r}");
+        assert_eq!(h.state().selection.unwrap().anchor, (r, 1));
+
+        h.key_press_modifiers(Modifiers::COMMAND, Key::End);
+        h.run();
+        assert_eq!(focus_of(&h), (299, 1));
+        let last = h.get_by_label("b299").rect();
+        assert!(last.bottom() <= 500.0, "scrolled into view: {last:?}");
+        h.key_press(Key::Home);
+        h.run();
+        assert_eq!(focus_of(&h), (299, 0));
+        h.key_press(Key::End);
+        h.run();
+        assert_eq!(focus_of(&h), (299, 1));
+        h.key_press_modifiers(Modifiers::COMMAND, Key::Home);
+        h.run();
+        assert_eq!(focus_of(&h), (0, 1));
+        assert!(h.get_by_label("b0").rect().top() >= 0.0);
+    }
+
+    /// While editing: typing starts the editor, Enter commits and moves
+    /// down, Tab and Shift+Tab move along the row, Esc cancels (#169).
+    #[test]
+    fn edit_keys_type_commit_and_move() {
+        use egui::{Key, Modifiers};
+        use egui_kittest::kittest::Queryable;
+
+        let mut h = harness(edit_run(), 0.25);
+        h.run();
+        h.get_by_label("NULL").click();
+        h.run();
+        h.event(egui::Event::Text("x".into()));
+        h.run();
+        assert_eq!(edits(&h).editing, Some((0, 1, "x".to_string())));
+        h.event(egui::Event::Text("y".into()));
+        h.run();
+        h.key_press(Key::Enter);
+        h.run();
+        assert!(edits(&h).editing.is_none());
+        assert_eq!(edits(&h).changes[&0][&1], Some("xy".to_string()));
+        assert_eq!(focus_of(&h), (1, 1), "Enter moves down");
+
+        // The grid kept the keyboard: Shift+Tab, type, Tab.
+        h.key_press_modifiers(Modifiers::SHIFT, Key::Tab);
+        h.run();
+        assert_eq!(focus_of(&h), (1, 0));
+        h.event(egui::Event::Text("7".into()));
+        h.run();
+        h.key_press(Key::Tab);
+        h.run();
+        assert_eq!(edits(&h).changes[&1][&0], Some("7".to_string()));
+        assert_eq!(focus_of(&h), (1, 1), "Tab moves right");
+
+        // Enter on a cell opens its editor; Esc cancels and keeps the cell.
+        h.key_press(Key::Enter);
+        h.run();
+        assert_eq!(edits(&h).editing, Some((1, 1, "b".to_string())));
+        h.event(egui::Event::Text("zz".into()));
+        h.run();
+        h.key_press(Key::Escape);
+        h.run();
+        assert!(edits(&h).editing.is_none());
+        assert!(!edits(&h).changes[&1].contains_key(&1), "cancelled");
+        h.key_press(Key::ArrowUp);
+        h.run();
+        assert_eq!(focus_of(&h), (0, 1), "the grid has the keyboard again");
+    }
+
+    /// Pasting TSV while editing fills the cells from the selected one and
+    /// adds rows; one value fills the whole selection (#169).
+    #[test]
+    fn paste_fills_cells_and_adds_rows() {
+        use egui_kittest::kittest::Queryable;
+
+        let mut h = harness(edit_run(), 0.25);
+        h.run();
+        h.get_by_label("20").click();
+        h.run();
+        h.event(egui::Event::Paste(
+            "21\tq\r\n\"\"\t\"two\nlines\"\r\n30\t\r\n".into(),
+        ));
+        h.run();
+        let e = edits(&h);
+        assert_eq!(e.changes[&1][&0], Some("21".to_string()));
+        assert_eq!(e.changes[&1][&1], Some("q".to_string()));
+        assert_eq!(
+            e.inserted,
+            vec![
+                vec![None, Some(Some("two\nlines".to_string()))],
+                vec![Some(Some("30".to_string())), None],
+            ],
+            "empty fields leave a new row's DEFAULT"
+        );
+        let sel = h.state().selection.unwrap();
+        assert_eq!((sel.anchor, sel.focus), ((1, 0), (3, 1)));
+
+        // One value into a selected column fills every cell of it.
+        h.get_by_label("name").click();
+        h.run();
+        h.event(egui::Event::Paste("z".into()));
+        h.run();
+        let e = edits(&h);
+        assert_eq!(e.changes[&0][&1], Some("z".to_string()));
+        assert_eq!(e.changes[&1][&1], Some("z".to_string()));
+        assert_eq!(e.inserted[0][1], Some(Some("z".to_string())));
+        assert_eq!(e.inserted[1][1], Some(Some("z".to_string())));
+        assert_eq!(e.inserted.len(), 2, "no rows added");
     }
 }

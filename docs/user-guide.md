@@ -279,7 +279,12 @@ or XML plan.
   TSV, which pastes straight into a spreadsheet: a value holding a tab, a
   line break or a `"` is wrapped in double quotes (with `"` doubled), the way
   Excel and LibreOffice expect, and NULL is an empty field. Ctrl+Shift+C
-  includes the column names. Right-click for *Copy*, *Copy with headers*, *Copy row*,
+  includes the column names.
+* Once you have clicked into the grid, the keyboard moves the selected
+  cell: the arrow keys, PageUp/PageDown, Home/End (first/last column) and
+  Ctrl+Home/Ctrl+End (first/last row; Ctrl+arrow keys jump to the edge too).
+  Hold Shift to extend the selection. The grid scrolls to keep the cell in
+  view. Right-click for *Copy*, *Copy with headers*, *Copy row*,
   *Copy column* or *Copy table*. A copy stops after 50 000 rows and says so;
   export the result for the rest.
 * Click the **▲▼** on a column header to sort (ascending, then descending,
@@ -318,7 +323,13 @@ or XML plan.
   first. A session runs one query at a time, so runs in that tab wait until
   the export finishes.
 * **✎ Edit data** is available when a result comes from a single table with a
-  primary key. Edit cells (double-click or F2), add rows and delete rows. The
+  primary key. Edit cells (double-click, F2 or Enter, or just start typing),
+  add rows and delete rows. In a cell's editor, Enter commits and moves down,
+  Tab and Shift+Tab commit and move to the next or previous cell, and Esc
+  cancels. Ctrl+V pastes a block copied from a spreadsheet or the grid into
+  the cells from the selected one on, adding rows when it runs past the
+  end; a single value fills every selected cell. Pasted empty fields become
+  NULL (DEFAULT in a new row), and read-only columns are skipped. The
   changes are shown as SQL before **Apply** runs them, all or none, in the
   tab's session: the same table the result came from, even after
   `SET search_path`, `USE` or with a temp table of the same name, and with

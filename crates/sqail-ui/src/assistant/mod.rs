@@ -223,9 +223,60 @@ fn instructions(engine: Engine, connection: &str, max_rows: u64) -> String {
 
 const EDITOR_CONTEXT_CHARS: usize = 8000;
 
+/// Whether `tab` is on the chat's connection: only then does its SQL go
+/// with a question, and does Insert put an answer into it.
+pub fn same_connection(tab: Option<&crate::editor::Tab>, conversation: &Conversation) -> bool {
+    tab.and_then(|t| t.connection) == Some(conversation.connection)
+}
+
+/// What goes with the question besides itself (appended to the prompt),
+/// and a note for the conversation about what was left out.
+fn editor_context(
+    tab: Option<&crate::editor::Tab>,
+    conversation: &Conversation,
+    include_editor: bool,
+) -> (String, Option<String>) {
+    let Some(sql) = tab
+        .map(|t| t.text.trim())
+        .filter(|s| include_editor && !s.is_empty())
+    else {
+        return (String::new(), None);
+    };
+    if !same_connection(tab, conversation) {
+        return (
+            String::new(),
+            Some(format!(
+                "The active tab is not on this chat's connection “{}”, so its SQL was not sent.",
+                conversation.connection_name
+            )),
+        );
+    }
+    let mut shown: String = sql.chars().take(EDITOR_CONTEXT_CHARS).collect();
+    let cut = shown.len() < sql.len();
+    if cut {
+        shown.push_str("\n-- …");
+    }
+    let mut context = format!("\n\nThe SQL in my editor:\n```sql\n{shown}\n```");
+    if cut {
+        context.push_str(&format!(
+            "\n(Truncated: this is only the first {EDITOR_CONTEXT_CHARS} characters of the editor.)"
+        ));
+    }
+    (context, None)
+}
+
 impl SqailApp {
     pub fn assistant_update(&mut self, run: u64, update: Update) {
         self.assistant.apply(run, update);
+    }
+
+    /// Whether the active tab is on the chat's connection (true before a
+    /// chat has started: it will be).
+    pub fn assistant_tab_matches(&self) -> bool {
+        self.assistant
+            .conversation
+            .as_ref()
+            .is_none_or(|c| same_connection(self.tabs.get(self.active), c))
     }
 
     /// Send the text in the input box as the next turn.
@@ -283,13 +334,8 @@ impl SqailApp {
                     .join(Uuid::new_v4().to_string()),
                 session: None,
             });
-        let mut prompt = question.clone();
-        if settings.include_editor
-            && let Some(sql) = tab.map(|t| t.text.trim()).filter(|s| !s.is_empty())
-        {
-            let sql: String = sql.chars().take(EDITOR_CONTEXT_CHARS).collect();
-            prompt.push_str(&format!("\n\nThe SQL in my editor:\n```sql\n{sql}\n```"));
-        }
+        let (context, note) = editor_context(tab, conversation, settings.include_editor);
+        let prompt = format!("{question}{context}");
         let mut env = vec![
             (mcp::Env::URL.to_string(), profile.url.clone()),
             (mcp::Env::TOKEN.to_string(), token),
@@ -332,6 +378,7 @@ impl SqailApp {
             limits: cli::Limits::default(),
         };
         self.assistant.entries.push(Entry::User(question));
+        self.assistant.entries.extend(note.map(Entry::Note));
         self.assistant.input.clear();
         let run = self.assistant.next_run;
         self.assistant.next_run += 1;
@@ -435,6 +482,48 @@ mod tests {
             }),
         );
         assert_eq!(a.entries.last(), Some(&Entry::Answer("Answer".into())));
+    }
+
+    #[test]
+    fn editor_sql_goes_only_from_a_tab_on_the_chats_connection() {
+        let chat = Uuid::new_v4();
+        let conversation = Conversation {
+            provider: Provider::ClaudeCode,
+            connection: chat,
+            connection_name: "pg".into(),
+            engine: Engine::Postgres,
+            workdir: PathBuf::new(),
+            session: None,
+        };
+        let mut tab = crate::editor::Tab::new(1, "t".into(), Some(chat));
+        tab.text = "SELECT 1".into();
+        assert_eq!(
+            editor_context(Some(&tab), &conversation, true),
+            (
+                "\n\nThe SQL in my editor:\n```sql\nSELECT 1\n```".into(),
+                None
+            )
+        );
+        assert_eq!(
+            editor_context(Some(&tab), &conversation, false),
+            (String::new(), None)
+        );
+
+        for other in [Some(Uuid::new_v4()), None] {
+            tab.connection = other;
+            let (context, note) = editor_context(Some(&tab), &conversation, true);
+            assert_eq!(context, "");
+            assert!(note.unwrap().contains("not on this chat's connection “pg”"));
+        }
+
+        tab.connection = Some(chat);
+        tab.text = "x".repeat(EDITOR_CONTEXT_CHARS + 10);
+        let (context, _) = editor_context(Some(&tab), &conversation, true);
+        assert!(context.contains("\n-- …\n```"), "{context}");
+        assert!(
+            context.ends_with("(Truncated: this is only the first 8000 characters of the editor.)")
+        );
+        assert_eq!(context.matches('x').count(), EDITOR_CONTEXT_CHARS);
     }
 
     #[test]

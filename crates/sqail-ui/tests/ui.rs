@@ -1234,6 +1234,11 @@ fn editor_runs_queries_end_to_end() {
         }
     }
     h.run_steps(4);
+    // The sniffed delimiter and encoding are shown and can be changed.
+    let value =
+        |h: &Harness<'_, SqailApp>, label: &str| h.get_by_label(label).accesskit_node().value();
+    assert_eq!(value(&h, "Delimiter").as_deref(), Some("semicolon (;)"));
+    assert_eq!(value(&h, "Encoding").as_deref(), Some("UTF-8"));
     shot(&mut h, "07-import");
     h.get_by_label("Import").click();
     for _ in 0..300 {

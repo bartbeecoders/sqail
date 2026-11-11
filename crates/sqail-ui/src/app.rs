@@ -210,7 +210,8 @@ pub struct SqailApp {
 impl SqailApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::install(&cc.egui_ctx);
-        let settings = Settings::load();
+        let (settings, settings_error) = Settings::load();
+        let (snippets, snippets_error) = crate::local::Snippets::load();
         let theme_error = theme::apply(&cc.egui_ctx, settings.theme).err();
         // The UI scale is a setting; egui's own Ctrl+0 would bypass it.
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
@@ -234,7 +235,7 @@ impl SqailApp {
             notice: None,
             viewer: None,
             history: crate::local::History::load(),
-            snippets: crate::local::Snippets::load(),
+            snippets,
             sidebar: Default::default(),
             history_filter: String::new(),
             snippet_filter: String::new(),
@@ -249,17 +250,35 @@ impl SqailApp {
             theme_checked: Instant::now(),
             settings,
         };
-        app.restore_workspace();
+        let workspace_error = app.restore_workspace();
         if let Some(w) = app.keymap.warnings.first().cloned() {
             app.notify(w, true);
         }
         if let Some(e) = theme_error {
             app.notify(e, true);
         }
+        // Damaged local files were set aside, not lost: say so (last, so no
+        // other notice hides it).
+        let damaged: Vec<&str> = [&settings_error, &workspace_error, &snippets_error]
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .collect();
+        if !damaged.is_empty() {
+            app.notify(damaged.join(" · "), true);
+        }
         match app.settings.active().cloned() {
             Some(profile) => app.connect(profile),
             None => {
-                let mut form = WelcomeForm::default();
+                let mut form = WelcomeForm {
+                    error: settings_error.map(|e| {
+                        format!(
+                            "{e}. Your services are in that file: fix it and rename it back \
+                             to settings.toml, or set up a service again here."
+                        )
+                    }),
+                    ..Default::default()
+                };
                 // Development convenience (scripts/dev.sh): skip the first-run
                 // choice and set up the local service directly.
                 if std::env::var_os("SQAIL_AUTO_LOCAL").is_some()
@@ -368,11 +387,16 @@ impl SqailApp {
 
     // ---------------------------------------------------------- workspace --
 
-    fn restore_workspace(&mut self) {
-        let ws = crate::local::Workspace::load().filter(|w| !w.tabs.is_empty());
+    /// Reopen the saved tabs. Returns why `workspace.json` could not be read
+    /// (it is then kept as `workspace.json.bad`, not overwritten).
+    fn restore_workspace(&mut self) -> Option<String> {
+        let (ws, error) = match crate::local::Workspace::load() {
+            Ok(ws) => (ws.filter(|w| !w.tabs.is_empty()), None),
+            Err(e) => (None, Some(e)),
+        };
         let Some(ws) = ws else {
             self.new_tab(None);
-            return;
+            return error;
         };
         for saved in &ws.tabs {
             let id = self.next_tab;
@@ -385,6 +409,7 @@ impl SqailApp {
         self.tabs.sort_by_key(|t| !t.pinned);
         self.active = self.tab_index(active).unwrap_or(0);
         self.saved_workspace = Some(ws);
+        None
     }
 
     fn tab_index(&self, id: u64) -> Option<usize> {
@@ -1051,8 +1076,26 @@ impl SqailApp {
             }
             Msg::EditsApplied { tab, result } => match result {
                 Ok(n) => {
+                    let committed = matches!(
+                        &self.dialog,
+                        Dialog::ApplyEdits(d) if d.tx == crate::editing::EditTx::Commit
+                    );
                     self.dialog = Dialog::None;
-                    self.notify(format!("Applied {n} change(s)."), false);
+                    if committed {
+                        self.notify(format!("Applied {n} change(s)."), false);
+                    } else {
+                        // They are part of the tab's transaction now.
+                        if let Some(t) = self.tab_mut(tab) {
+                            t.in_transaction = true;
+                        }
+                        self.notify(
+                            format!(
+                                "Applied {n} change(s), not committed yet: \
+                                 Commit or Rollback in the toolbar."
+                            ),
+                            false,
+                        );
+                    }
                     if let Some(idx) = self.tabs.iter().position(|t| t.id == tab) {
                         let sql = self.tabs[idx].run.as_ref().map(|r| r.sql.clone());
                         if let Some(sql) = sql {
@@ -1210,6 +1253,10 @@ impl SqailApp {
         if run.results.len() != 1 {
             return Err("Only a query with a single result can be edited".into());
         }
+        // Edits run on the session the result came from, never a fresh one.
+        tab.session
+            .filter(|(c, _)| Some(*c) == tab.connection)
+            .ok_or("The tab's session was closed; run the query again to edit")?;
         crate::editing::source_table(&run.sql, conn.engine)
             .map(|_| ())
             .ok_or_else(|| {
@@ -1224,7 +1271,12 @@ impl SqailApp {
         let Some(tab) = self.tabs.get_mut(idx) else {
             return;
         };
-        let (Some(conn), Some(run)) = (tab.connection, tab.run.as_mut()) else {
+        let session = tab
+            .session
+            .filter(|(c, _)| Some(*c) == tab.connection)
+            .map(|(_, s)| s);
+        let (Some(conn), Some(session), Some(run)) = (tab.connection, session, tab.run.as_mut())
+        else {
             return;
         };
         let Some(engine) = self.service.connection(conn).map(|c| c.engine) else {
@@ -1237,8 +1289,10 @@ impl SqailApp {
         let columns = run.results[0].columns.clone();
         let (tab_id, run_id) = (tab.id, run.id);
         self.worker.run(async move {
+            // Look the table up where the query ran: the session's search
+            // path, database and temporary tables decide which table it is.
             let state = match client
-                .columns(conn, source.schema.as_deref(), &source.table)
+                .session_columns(session, source.schema.as_deref(), &source.table)
                 .await
             {
                 Ok(cols) if cols.is_empty() => Err(format!("table {} not found", source.table)),
@@ -1260,20 +1314,41 @@ impl SqailApp {
         let Some(tab) = self.tabs.get(idx) else {
             return;
         };
-        let (Some(conn), Some(run)) = (tab.connection, tab.run.as_ref()) else {
+        let session = tab
+            .session
+            .filter(|(c, _)| Some(*c) == tab.connection)
+            .map(|(_, s)| s);
+        let (Some(session), Some(run)) = (session, tab.run.as_ref()) else {
+            self.notify(
+                "The tab's session was closed; run the query again to edit.",
+                true,
+            );
             return;
         };
+        if tab.session_busy {
+            return self.notify(
+                "Wait for the export to finish; it uses this tab's session.",
+                true,
+            );
+        }
         let Some((ri, e)) = run.edit.as_ref() else {
             return;
         };
-        let stmts = e.statements(&run.results[*ri]);
+        let stmts = match e.statements(&run.results[*ri]) {
+            Ok(s) => s,
+            Err(err) => {
+                self.notify(format!("Cannot apply the edits: {err}"), true);
+                return;
+            }
+        };
         let previews = stmts
             .iter()
             .map(|(sql, params)| crate::editing::preview(e.engine, sql, params))
             .collect();
         self.dialog = Dialog::ApplyEdits(Box::new(crate::dialogs::ApplyEdits {
             tab: tab.id,
-            connection: conn,
+            session,
+            tx: crate::editing::EditTx::for_tab(tab.autocommit, tab.in_transaction),
             engine: e.engine,
             statements: stmts,
             previews,

@@ -799,7 +799,15 @@
       },
       "IndexInfo": {
         "properties": {
+          "clustered": {
+            "description": "SQL Server: `CLUSTERED` (true) or `NONCLUSTERED` (false). None for\nother engines and for SQL Server's other index types (columnstore,\nXML, spatial).",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "columns": {
+            "description": "Key columns (or expressions, on PostgreSQL) in key order.",
             "items": {
               "type": "string"
             },
@@ -808,6 +816,27 @@
           "constraint": {
             "description": "Backs a `PRIMARY KEY` or `UNIQUE` constraint, so it is dropped with\n`ALTER TABLE … DROP CONSTRAINT` rather than `DROP INDEX`.",
             "type": "boolean"
+          },
+          "descending": {
+            "description": "Per key column, whether it is sorted descending. Empty when every key\nis ascending (or the service is older than this field).",
+            "items": {
+              "type": "boolean"
+            },
+            "type": "array"
+          },
+          "filter": {
+            "description": "The predicate of a filtered (partial) index, as the engine prints it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "include": {
+            "description": "Non-key columns stored in the index (`INCLUDE (…)`).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "name": {
             "type": "string"
@@ -3347,6 +3376,70 @@
           }
         },
         "summary": "Run a script on the session's connection. One query at a time per session.",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/{id}/schema/columns": {
+      "get": {
+        "operationId": "session_columns",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Defaults to the connection's current schema.",
+            "in": "query",
+            "name": "schema",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Table, view or routine name.",
+            "in": "query",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ColumnInfo"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Columns of a table as a session sees it: its search path, current\ndatabase and temporary tables. Without `schema`, the table is resolved\nthe way an unqualified name in a statement on the session would be.",
         "tags": [
           "sessions"
         ]

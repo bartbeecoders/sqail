@@ -222,6 +222,50 @@ fn workspace_history_and_snippets_survive_a_restart() {
     drop(e.dir);
 }
 
+/// A `workspace.json` that does not parse (torn write, hand edit) is kept as
+/// `workspace.json.bad` and reported, not replaced by the next autosave.
+#[test]
+fn a_damaged_workspace_is_kept_and_reported() {
+    let e = env();
+    let damaged = r#"{"tabs":[{"title":"x""#;
+    std::fs::write(e.ui_dir.join("workspace.json"), damaged).unwrap();
+
+    let mut h = app([1280.0, 800.0]);
+    assert_eq!(h.state().tabs.len(), 1, "starts with one empty tab");
+    h.state_mut().tabs[0].text = "SELECT 'new work'".into();
+    // Autosave runs about once a second.
+    std::thread::sleep(Duration::from_millis(1100));
+    h.run_steps(3);
+    assert!(
+        h.query_by_label_contains("workspace.json could not be read")
+            .is_some(),
+        "the user is told"
+    );
+    shot(&mut h, "damaged-workspace");
+
+    assert_eq!(
+        std::fs::read_to_string(e.ui_dir.join("workspace.json.bad")).unwrap(),
+        damaged,
+        "the damaged file is kept"
+    );
+    let saved = std::fs::read_to_string(e.ui_dir.join("workspace.json")).unwrap();
+    assert!(saved.contains("new work"), "{saved}");
+    drop(h);
+
+    // The next start is clean and keeps the earlier .bad file.
+    let h = app([1280.0, 800.0]);
+    assert_eq!(h.state().tabs[0].text, "SELECT 'new work'");
+    assert!(
+        h.query_by_label_contains("could not be read").is_none(),
+        "no notice for a good file"
+    );
+    assert!(!e.ui_dir.join("workspace.json.1.bad").exists());
+    drop(h);
+    e.server.shutdown();
+    drop(e.rt);
+    drop(e.dir);
+}
+
 /// The Azure discovery dialog with a canned result (no Azure needed): add
 /// the new databases, and see the existing one marked as added.
 #[test]
@@ -1521,6 +1565,103 @@ fn lost_session_does_not_auto_commit() {
 
     drop(h);
     e.server.shutdown();
+}
+
+/// ✎ Edit data applies on the tab's own session (#162): a temp table there
+/// shadows `people`, and that is the table edited. With Auto-commit off the
+/// edits join the tab's transaction and stay uncommitted.
+#[test]
+fn grid_edits_apply_on_the_tabs_session() {
+    use sqail_ui::dialogs::Dialog;
+    use sqail_ui::editing::EditTx;
+    use sqail_ui::results::Cell;
+
+    let e = env();
+    let mut h = app([1280.0, 800.0]);
+    let conn = h.state().tabs[0].connection.expect("people db");
+    let client = Client::new(&Target {
+        url: format!("https://{}", e.server.addr),
+        token: e.server.bootstrap_token.clone().unwrap(),
+        trust: Trust::Pinned(e.server.fingerprint.clone()),
+        identity: None,
+    })
+    .unwrap();
+    let main_name = |id: i64| {
+        let ev =
+            e.rt.block_on(client.query_all(
+                On::Connection(conn),
+                &QueryRequest::new(format!("SELECT name FROM main.people WHERE id = {id}")),
+            ))
+            .unwrap();
+        format!("{ev:?}")
+    };
+    let edit_first_name = |h: &mut Harness<'_, SqailApp>, value: &str| {
+        h.get_by_label("✎ Edit data").click();
+        wait(h, "edit mode", |a| {
+            a.tabs[0].run.as_ref().is_some_and(|r| r.edit.is_some())
+        });
+        let run = h.state_mut().tabs[0].run.as_mut().unwrap();
+        let (ri, ed) = run.edit.as_mut().unwrap();
+        ed.set(0, 1, Some(value.into()), &run.results[*ri]);
+        h.step();
+        h.get_by_label("Review & apply (1)").click();
+        h.run_steps(4);
+    };
+    let apply = |h: &mut Harness<'_, SqailApp>| {
+        let before = run_id(h);
+        h.get_by_label("Apply").click();
+        wait(h, "re-run after apply", |a| {
+            a.tabs[0]
+                .run
+                .as_ref()
+                .is_some_and(|r| r.id != before && !r.running)
+        });
+    };
+    let first_name = |h: &Harness<'_, SqailApp>| {
+        h.state().tabs[0].run.as_ref().unwrap().results[0].row(0)[1].clone()
+    };
+
+    h.state_mut().tabs[0].text =
+        "CREATE TEMP TABLE people (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+         INSERT INTO people VALUES (2, 'Shadow')"
+            .into();
+    h.step();
+    run_with(&mut h, "temp table", |h| h.key_press(Key::F5));
+    h.state_mut().tabs[0].text = "SELECT id, name FROM people".into();
+    h.step();
+    run_with(&mut h, "select the temp table", |h| h.key_press(Key::F5));
+    assert_eq!(first_name(&h), Cell::Text("Shadow".into()));
+
+    // Auto-commit: the temp table is edited and committed.
+    edit_first_name(&mut h, "Edited");
+    assert!(matches!(&h.state().dialog, Dialog::ApplyEdits(d) if d.tx == EditTx::Commit));
+    apply(&mut h);
+    assert_eq!(first_name(&h), Cell::Text("Edited".into()));
+    assert!(!h.state().tabs[0].in_transaction);
+    assert!(
+        main_name(2).contains("Linus"),
+        "main.people untouched: {}",
+        main_name(2)
+    );
+
+    // Manual commit: the edits join the tab's transaction.
+    h.get_by_label("Auto-commit").click();
+    h.step();
+    run_with(&mut h, "select in a transaction", |h| h.key_press(Key::F5));
+    assert!(h.state().tabs[0].in_transaction);
+    edit_first_name(&mut h, "Uncommitted");
+    assert!(matches!(&h.state().dialog, Dialog::ApplyEdits(d) if d.tx == EditTx::Join));
+    h.get_by_label_contains("not committed until you click Commit");
+    apply(&mut h);
+    assert_eq!(first_name(&h), Cell::Text("Uncommitted".into()));
+    assert!(h.state().tabs[0].in_transaction, "still open");
+    h.get_by_label("Transaction open");
+    h.get_by_label_contains("not committed yet");
+    run_with(&mut h, "rollback", |h| h.get_by_label("Rollback").click());
+    assert!(!h.state().tabs[0].in_transaction);
+    h.state_mut().tabs[0].autocommit = true;
+    run_with(&mut h, "select after rollback", |h| h.key_press(Key::F5));
+    assert_eq!(first_name(&h), Cell::Text("Edited".into()));
 }
 
 // ============================================================ big + engines ==

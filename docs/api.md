@@ -188,8 +188,10 @@ open transaction.
 `label`, `object`, `cost`, `rows` and, when analysed, `actual_rows` and
 `actual_ms`, plus engine-specific `props`. `raw` holds the engine's own plan
 (Postgres JSON, SQL Server showplan XML, SQLite rows). With `analyze: true`,
-Postgres and SQL Server execute the statement inside a transaction that is
-always rolled back.
+Postgres and SQL Server execute the statement and always roll it back: in a
+transaction of its own or, on a session with a transaction open, to a
+savepoint, so the rest of that transaction stays. A Postgres transaction that
+already failed (or a SQL Server one that can no longer commit) gets 400.
 
 ## Schema
 
@@ -203,6 +205,11 @@ its owner (Postgres) and the roles and users that could be granted
 privileges; `supported` is `false` on SQLite. `GET
 /v1/connections/{id}/ddl?schema=&name=` returns a best-effort `CREATE`
 script for a table, view or routine. `read` tokens may browse every profile.
+
+`GET /v1/sessions/{id}/schema/columns?schema=&name=` reads a table's columns
+as a session sees it: its search path, current database and temp tables.
+Without `schema`, the table is the one an unqualified name in a statement on
+that session resolves to (an empty list when there is none).
 
 ## Administration
 

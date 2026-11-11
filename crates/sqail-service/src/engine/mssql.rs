@@ -203,11 +203,12 @@ impl Driver for MssqlDriver {
             .into_row()
             .await
             .map_err(db_err)?
-            .and_then(|r| r.get::<i32, _>(0))
+            .and_then(|r| int_cell(&r, 0))
             .unwrap_or(0);
         let attention = client.attention_handle();
         Ok(Box::new(MssqlConn {
             client,
+            in_tx: false,
             cancel: Arc::new(MssqlCancel {
                 driver: self.clone(),
                 spid,
@@ -225,6 +226,17 @@ impl Driver for MssqlDriver {
 struct MssqlConn {
     client: Client,
     cancel: Arc<MssqlCancel>,
+    /// The last transaction state the probe could read. With SHOWPLAN on
+    /// the server answers the probe with a plan instead of running it; it
+    /// does not run BEGIN/COMMIT either then, so the state stays as it was.
+    in_tx: bool,
+}
+
+/// An `int` cell, or `None` for NULL or anything else. Probes get a plan
+/// instead of their value when SHOWPLAN_XML/TEXT/ALL is on, so the shape
+/// of their result is never trusted (`Row::get` would panic on it).
+fn int_cell(row: &tiberius::Row, idx: usize) -> Option<i32> {
+    row.try_get::<i32, _>(idx).ok().flatten()
 }
 
 impl Drop for MssqlConn {
@@ -375,7 +387,13 @@ impl MssqlConn {
             .into_row()
             .await
             .map_err(db_err)?;
-        Ok(row.is_some_and(|r| r.get::<i32, _>(0) == Some(0) || r.get::<i32, _>(1) == Some(0)))
+        // Anything but two ints (a plan, under SHOWPLAN) means unknown: no.
+        Ok(
+            row.is_some_and(|r| match (int_cell(&r, 0), int_cell(&r, 1)) {
+                (Some(trancount), Some(xact_abort)) => trancount == 0 || xact_abort == 0,
+                _ => false,
+            }),
+        )
     }
 
     async fn run_batch(
@@ -486,7 +504,13 @@ impl Conn for MssqlConn {
             .into_row()
             .await
             .map_err(db_err)?;
-        Ok(row.and_then(|r| r.get::<i32, _>(0)).unwrap_or(0) > 0)
+        match row.as_ref().and_then(|r| int_cell(r, 0)) {
+            Some(n) => self.in_tx = n > 0,
+            None => tracing::debug!(
+                "@@TRANCOUNT probe returned no int (SHOWPLAN on?); keeping the last known state"
+            ),
+        }
+        Ok(self.in_tx)
     }
 
     async fn ping(&mut self) -> Result<()> {
@@ -510,7 +534,7 @@ impl Conn for MssqlConn {
             .await
             .map_err(db_err)?;
         Ok(row
-            .and_then(|r| r.get::<&str, _>(0).map(str::to_string))
+            .and_then(|r| r.try_get::<&str, _>(0).ok().flatten().map(str::to_string))
             .unwrap_or_default())
     }
 

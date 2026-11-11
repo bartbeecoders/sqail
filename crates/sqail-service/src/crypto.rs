@@ -14,13 +14,14 @@ const PREFIX: &str = "v1:";
 const NONCE_LEN: usize = 12;
 
 /// The key that encrypts every stored secret. Loaded from `SQAIL_MASTER_KEY`
-/// (base64, 32 bytes) or `<data_dir>/master.key`, created on first start with
-/// owner-only permissions.
+/// (base64, 32 bytes; only when `use_env`) or `<data_dir>/master.key`,
+/// created on first start with owner-only permissions.
 pub struct MasterKey(Aes256Gcm);
 
 impl MasterKey {
-    pub fn load_or_create(data_dir: &Path) -> Result<Self> {
-        let bytes = if let Ok(b64) = std::env::var("SQAIL_MASTER_KEY") {
+    pub fn load_or_create(data_dir: &Path, use_env: bool) -> Result<Self> {
+        let from_env = use_env.then(|| std::env::var("SQAIL_MASTER_KEY"));
+        let bytes = if let Some(Ok(b64)) = from_env {
             B64.decode(b64.trim())
                 .context("SQAIL_MASTER_KEY is not valid base64")?
         } else {

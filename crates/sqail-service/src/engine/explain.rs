@@ -5,8 +5,13 @@ use sqail_proto::{Engine, Plan, PlanNode, PlanProp};
 
 use super::{Conn, DbError, Result, fetch_results};
 
-/// Explain `sql` on `conn`. With `analyze`, the statement runs inside a
-/// transaction that is always rolled back (SQLite has no actual plans).
+/// Savepoint that undoes an analyzed statement inside an open transaction.
+const SAVEPOINT: &str = "sqail_explain";
+
+/// Explain `sql` on `conn`. With `analyze`, the statement's effects are always
+/// rolled back: in a transaction of its own or, when the session already has
+/// one open, to a savepoint so the rest of that transaction survives. SQLite
+/// has no actual plans and never executes the statement.
 pub async fn explain(conn: &mut dyn Conn, sql: &str, analyze: bool) -> Result<Plan> {
     let sql = sql.trim().trim_end_matches(';');
     if sql.is_empty() {
@@ -20,13 +25,34 @@ pub async fn explain(conn: &mut dyn Conn, sql: &str, analyze: bool) -> Result<Pl
             } else {
                 "FORMAT JSON"
             };
-            let script = if analyze {
-                format!("BEGIN; EXPLAIN ({opts}) {sql}; ROLLBACK")
-            } else {
+            let open_tx = analyze && pg_open_transaction(conn).await?;
+            if open_tx {
+                // Only the explained statement is undone; the caller's
+                // transaction and its earlier work stay. The savepoint goes
+                // first on its own, so it exists even when the script below
+                // fails to parse (which aborts the transaction too).
+                fetch_results(conn, &format!("SAVEPOINT {SAVEPOINT}")).await?;
+            }
+            let script = if !analyze {
                 format!("EXPLAIN ({opts}) {sql}")
+            } else if open_tx {
+                format!(
+                    "EXPLAIN ({opts}) {sql}; \
+                     ROLLBACK TO SAVEPOINT {SAVEPOINT}; RELEASE SAVEPOINT {SAVEPOINT}"
+                )
+            } else {
+                format!("BEGIN; EXPLAIN ({opts}) {sql}; ROLLBACK")
             };
             let res = fetch_results(conn, &script).await;
-            if analyze && res.is_err() {
+            if res.is_err() && open_tx {
+                // The failed statement aborted the transaction; going back to
+                // the savepoint makes it usable again.
+                let _ = fetch_results(
+                    conn,
+                    &format!("ROLLBACK TO SAVEPOINT {SAVEPOINT}; RELEASE SAVEPOINT {SAVEPOINT}"),
+                )
+                .await;
+            } else if res.is_err() && analyze {
                 // Leave no transaction behind on this connection.
                 let _ = fetch_results(conn, "ROLLBACK").await;
             }
@@ -57,7 +83,12 @@ pub async fn explain(conn: &mut dyn Conn, sql: &str, analyze: bool) -> Result<Pl
             } else {
                 "SHOWPLAN_XML"
             };
-            if analyze {
+            let open_tx = analyze && mssql_open_transaction(conn).await?;
+            if open_tx {
+                // Actual plans execute the statement: undo just that and keep
+                // the caller's transaction.
+                fetch_results(conn, &format!("SAVE TRANSACTION {SAVEPOINT}")).await?;
+            } else if analyze {
                 // Actual plans execute the statement: never keep its effects.
                 fetch_results(conn, "BEGIN TRANSACTION").await?;
             }
@@ -67,7 +98,15 @@ pub async fn explain(conn: &mut dyn Conn, sql: &str, analyze: bool) -> Result<Pl
             let res = fetch_results(conn, &format!("SET NOCOUNT ON; {sql}")).await;
             // Always switch it back off; this connection goes back to a pool.
             let _ = fetch_results(conn, &format!("SET {set} OFF")).await;
-            if analyze {
+            if open_tx {
+                // An error that doomed or ended the transaction leaves no
+                // savepoint to go back to; the session reports that state.
+                let _ = fetch_results(
+                    conn,
+                    &format!("IF XACT_STATE() = 1 ROLLBACK TRANSACTION {SAVEPOINT}"),
+                )
+                .await;
+            } else if analyze {
                 let _ = fetch_results(conn, "IF @@TRANCOUNT > 0 ROLLBACK").await;
             }
             let res = res?;
@@ -118,6 +157,42 @@ pub async fn explain(conn: &mut dyn Conn, sql: &str, analyze: bool) -> Result<Pl
             })
         }
     }
+}
+
+/// Whether a PostgreSQL session has a transaction open. An aborted one is an
+/// error: it rejects every statement until it is rolled back.
+async fn pg_open_transaction(conn: &mut dyn Conn) -> Result<bool> {
+    // In a transaction block, now() is the transaction start.
+    match fetch_results(conn, "SELECT now() <> statement_timestamp()").await {
+        Ok(res) => Ok(first_cell(&res) == Some(&Value::Bool(true))),
+        Err(DbError::Database { code, .. }) if code.as_deref() == Some("25P02") => {
+            Err(DbError::Invalid(
+                "the current transaction is aborted: roll it back before running Explain analyze"
+                    .into(),
+            ))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether a SQL Server session has a transaction open. One that can no
+/// longer be committed (`XACT_STATE() = -1`) is an error.
+async fn mssql_open_transaction(conn: &mut dyn Conn) -> Result<bool> {
+    let res = fetch_results(conn, "SELECT CAST(XACT_STATE() AS int)").await?;
+    match first_cell(&res).and_then(Value::as_i64).unwrap_or(0) {
+        s if s < 0 => Err(DbError::Invalid(
+            "the current transaction cannot be committed: roll it back before running \
+             Explain analyze"
+                .into(),
+        )),
+        s => Ok(s > 0),
+    }
+}
+
+fn first_cell(res: &[(Vec<sqail_proto::Column>, Vec<Vec<Value>>)]) -> Option<&Value> {
+    res.first()
+        .and_then(|(_, rows)| rows.first())
+        .and_then(|r| r.first())
 }
 
 fn first_text(res: &[(Vec<sqail_proto::Column>, Vec<Vec<Value>>)]) -> Option<String> {

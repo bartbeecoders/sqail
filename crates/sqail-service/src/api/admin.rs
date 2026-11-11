@@ -161,7 +161,9 @@ pub async fn settings(
     require(&state, &p)?;
     Ok(Json(AdminSettings {
         settings: state.config.file_settings()?,
-        env_overrides: Config::env_overrides()
+        env_overrides: state
+            .config
+            .overridden_keys()
             .into_iter()
             .map(String::from)
             .collect(),

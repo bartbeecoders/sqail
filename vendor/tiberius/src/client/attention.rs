@@ -9,7 +9,7 @@
 //! runs on to the acknowledging DONE as usual, so nothing is dropped
 //! mid-message.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Waker;
 
@@ -17,6 +17,9 @@ use std::task::Waker;
 pub(crate) struct AttentionShared {
     requested: AtomicBool,
     waker: Mutex<Option<Waker>>,
+    /// Packets read on the connection, so that a canceller can tell a
+    /// response still arriving from a server that went quiet.
+    packets: AtomicU64,
 }
 
 impl AttentionShared {
@@ -26,6 +29,10 @@ impl AttentionShared {
 
     pub(crate) fn clear(&self) {
         self.requested.store(false, Ordering::Release);
+    }
+
+    pub(crate) fn note_packet(&self) {
+        self.packets.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn register(&self, waker: &Waker) {
@@ -64,6 +71,14 @@ impl AttentionHandle {
     /// Whether an Attention was requested and not yet finished.
     pub fn is_requested(&self) -> bool {
         self.0.is_requested()
+    }
+
+    /// How many packets the connection has read so far. While it grows the
+    /// server is still sending: after an Attention, the rest of what it sent
+    /// before the Attention reached it, read on the way to the
+    /// acknowledgement.
+    pub fn packets_read(&self) -> u64 {
+        self.0.packets.load(Ordering::Relaxed)
     }
 }
 

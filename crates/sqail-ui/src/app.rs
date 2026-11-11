@@ -81,6 +81,9 @@ pub enum Msg {
         tab: u64,
         run: u64,
         error: String,
+        /// The tab's session is gone on the service (404, or 409 "lost"), and
+        /// with it any open transaction.
+        session_gone: bool,
     },
     Schema(SchemaMsg),
     OpenInTab {
@@ -587,6 +590,16 @@ impl SqailApp {
         tab.run = Some(Run::new(run_id, sql.clone()));
         let session = tab.session.filter(|(c, _)| *c == conn).map(|(_, s)| s);
         let tab_id = tab.id;
+        let in_tx = tab.in_transaction;
+        if in_tx && session.is_none() {
+            // The transaction lived on a session this tab no longer has.
+            return self.handle(Msg::QueryFailed {
+                tab: tab_id,
+                run: run_id,
+                error: TRANSACTION_LOST.into(),
+                session_gone: true,
+            });
+        }
         let req = QueryRequest {
             sql,
             params: Vec::new(),
@@ -599,9 +612,23 @@ impl SqailApp {
                 tab: tab_id,
                 run: run_id,
                 error,
+                session_gone: false,
+            };
+            let gone = |e: &sqail_client::Error| Msg::QueryFailed {
+                tab: tab_id,
+                run: run_id,
+                error: if in_tx {
+                    TRANSACTION_LOST.into()
+                } else {
+                    e.to_string()
+                },
+                session_gone: true,
             };
             let mut session = session;
             // One retry: the session may have expired or lost its connection.
+            // Not inside a transaction, though: the service rolled it back
+            // with the session, and running the statement on a new session
+            // would auto-commit it. The user re-runs it deliberately.
             for attempt in 0..2 {
                 let sid = match session {
                     Some(s) => s,
@@ -630,11 +657,10 @@ impl SqailApp {
                                 return sink.send(fail(format!("{begin}: {message}")));
                             }
                         }
-                        Err(e)
-                            if attempt == 0
-                                && matches!(e.status(), Some(404 | 409))
-                                && is_session_gone(&e) =>
-                        {
+                        Err(e) if is_session_gone(&e) => {
+                            if attempt > 0 || in_tx {
+                                return sink.send(gone(&e));
+                            }
                             session = None;
                             continue;
                         }
@@ -655,11 +681,11 @@ impl SqailApp {
                         }
                         return;
                     }
-                    Err(e)
-                        if attempt == 0
-                            && matches!(e.status(), Some(404 | 409))
-                            && is_session_gone(&e) =>
-                    {
+                    Err(e) if is_session_gone(&e) => {
+                        if attempt > 0 || in_tx {
+                            return sink.send(gone(&e));
+                        }
+                        // A manual-commit tab sends BEGIN again on the new one.
                         session = None;
                     }
                     Err(e) => return sink.send(fail(e.to_string())),
@@ -864,10 +890,18 @@ impl SqailApp {
                     }
                 }
             }
-            Msg::QueryFailed { tab, run, error } => {
+            Msg::QueryFailed {
+                tab,
+                run,
+                error,
+                session_gone,
+            } => {
                 if let Some(t) = self.tab_mut(tab) {
                     // The session may be broken; start fresh next time.
                     t.session = None;
+                    if session_gone {
+                        t.in_transaction = false;
+                    }
                     if let Some(r) = t.run.as_mut().filter(|r| r.id == run) {
                         r.fail(error);
                         self.record_history(tab);
@@ -2243,10 +2277,19 @@ impl SqailApp {
     }
 }
 
+/// Shown instead of running a statement when the tab's transaction is gone.
+const TRANSACTION_LOST: &str = "The session was lost, so its open transaction was rolled back. \
+     The statement was not run; run it again to start a new transaction.";
+
+/// The tab's session no longer exists on the service (expired, the service
+/// restarted, or its database connection dropped).
 fn is_session_gone(e: &sqail_client::Error) -> bool {
     match e {
         sqail_client::Error::Api { status: 404, .. } => true,
-        sqail_client::Error::Api { problem, .. } => problem
+        sqail_client::Error::Api {
+            status: 409,
+            problem,
+        } => problem
             .detail
             .as_deref()
             .is_some_and(|d| d.contains("lost")),

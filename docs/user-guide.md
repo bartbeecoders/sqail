@@ -229,6 +229,11 @@ next run whenever no transaction is open. Finish with **Commit** or
 **Rollback** in the toolbar.
 Closing a tab with an open transaction asks whether to commit or roll back.
 Idle sessions close after 30 minutes on the service, which rolls them back.
+If a tab's session is gone (it expired, the service restarted, or its database
+connection dropped), the next run opens a new session. When a transaction was
+open, sqail doesn't run the statement: it reports that the session was lost
+and the transaction rolled back, and clears **Transaction open**. Run the
+statement again to start over in a new transaction.
 
 **Plans:** *Explain* (Ctrl+E) shows the estimated plan as a tree, with cost
 and row estimates and the most expensive nodes highlighted. *Explain analyze*

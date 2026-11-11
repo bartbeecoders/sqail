@@ -274,9 +274,12 @@ or XML plan.
 * Click a cell to select it; Shift+click extends that to a rectangle. Click a
   row number to select the row, a column name to select the column, and the
   **#** corner (or Ctrl+A) to select the whole table. Shift+click on a row
-  number or a column name extends that selection. Ctrl+C copies the selection
-  as TSV, which pastes straight into a spreadsheet; Ctrl+Shift+C includes the
-  column names. Right-click for *Copy*, *Copy with headers*, *Copy row*,
+  number or a column name extends that selection. Ctrl+C on a single cell
+  copies its exact value, line breaks and tabs included. On a range it copies
+  TSV, which pastes straight into a spreadsheet: a value holding a tab, a
+  line break or a `"` is wrapped in double quotes (with `"` doubled), the way
+  Excel and LibreOffice expect, and NULL is an empty field. Ctrl+Shift+C
+  includes the column names. Right-click for *Copy*, *Copy with headers*, *Copy row*,
   *Copy column* or *Copy table*. A copy stops after 50 000 rows and says so;
   export the result for the rest.
 * Click the **▲▼** on a column header to sort (ascending, then descending,

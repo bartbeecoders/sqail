@@ -1904,5 +1904,11 @@ mod tests {
             clipboard_text(&h),
             vec!["10\t\n20\tchanged\n\tadded\n".to_string()]
         );
+        // One cell copies its value alone, without a line break (#166).
+        h.get_by_label("changed").click();
+        h.run();
+        h.event(egui::Event::Copy);
+        h.step();
+        assert_eq!(clipboard_text(&h), vec!["changed".to_string()]);
     }
 }

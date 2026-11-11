@@ -726,6 +726,10 @@ pub fn selection_tsv_capped(
 /// each value (`None` = NULL) from `value(position, column)`, so a grid
 /// being edited copies what it shows. At most `max_rows` data rows; the bool
 /// is `true` when more were selected.
+///
+/// A single cell (without headers) copies its exact value. A range is TSV as
+/// spreadsheets read it: a field holding a tab, line break or `"` is quoted
+/// (see [`tsv_field`]); NULL is an empty field.
 pub fn selection_tsv_with(
     rs: &ResultSet,
     sel: &Selection,
@@ -735,9 +739,17 @@ pub fn selection_tsv_with(
     value: impl Fn(usize, usize) -> Option<String>,
 ) -> (String, bool) {
     let cols: Vec<usize> = sel.cols().filter(|&c| c < rs.columns.len()).collect();
+    if !headers && cols.len() == 1 && sel.rows().count() == 1 {
+        let r = *sel.rows().start();
+        let v = if r < n_rows { value(r, cols[0]) } else { None };
+        return (v.unwrap_or_default(), false);
+    }
     let mut out = String::new();
     if headers {
-        let names: Vec<&str> = cols.iter().map(|&c| rs.columns[c].name.as_str()).collect();
+        let names: Vec<std::borrow::Cow<'_, str>> = cols
+            .iter()
+            .map(|&c| tsv_field(&rs.columns[c].name))
+            .collect();
         out.push_str(&names.join("\t"));
         out.push('\n');
     }
@@ -751,7 +763,7 @@ pub fn selection_tsv_with(
             .iter()
             .map(|&c| {
                 value(r, c)
-                    .map(|v| v.replace(['\t', '\n', '\r'], " "))
+                    .map(|v| tsv_field(&v).into_owned())
                     .unwrap_or_default()
             })
             .collect();
@@ -759,6 +771,17 @@ pub fn selection_tsv_with(
         out.push('\n');
     }
     (out, truncated)
+}
+
+/// One field of tab-separated text, as Excel and LibreOffice write and read
+/// it: a value holding a tab, a line break or a double quote is wrapped in
+/// double quotes, with each `"` doubled; any other value is left as it is.
+pub fn tsv_field(v: &str) -> std::borrow::Cow<'_, str> {
+    if v.contains(['\t', '\n', '\r', '"']) {
+        format!("\"{}\"", v.replace('"', "\"\"")).into()
+    } else {
+        v.into()
+    }
 }
 
 #[cfg(test)]
@@ -1045,18 +1068,35 @@ mod tests {
         let run = run_with(vec![
             vec![json!(1), json!("a\tb")],
             vec![json!(2), Value::Null],
+            vec![json!(3), json!("line1\r\nline2 \"q\"")],
+            vec![json!(4), json!("")],
         ]);
+        let rs = &run.results[0];
         let sel = Selection {
             anchor: (0, 0),
-            focus: (1, 1),
+            focus: (3, 1),
         };
+        // A range quotes fields with tabs, line breaks or quotes (#166);
+        // NULL and '' are both empty fields.
         assert_eq!(
-            selection_tsv(&run.results[0], &sel, true),
-            "n\ts\n1\ta b\n2\t\n"
+            selection_tsv(rs, &sel, true),
+            "n\ts\n1\t\"a\tb\"\n2\t\n3\t\"line1\r\nline2 \"\"q\"\"\"\n4\t\n"
         );
-        let (capped, truncated) = selection_tsv_capped(&run.results[0], &sel, false, 1);
-        assert_eq!(capped, "1\ta b\n");
+        let (capped, truncated) = selection_tsv_capped(rs, &sel, false, 1);
+        assert_eq!(capped, "1\t\"a\tb\"\n");
         assert!(truncated);
+        // A single cell copies its exact value.
+        let cell = |r: usize| Selection {
+            anchor: (r, 1),
+            focus: (r, 1),
+        };
+        assert_eq!(selection_tsv(rs, &cell(0), false), "a\tb");
+        assert_eq!(selection_tsv(rs, &cell(2), false), "line1\r\nline2 \"q\"");
+        assert_eq!(selection_tsv(rs, &cell(1), false), "");
+        // With headers it is a range again.
+        assert_eq!(selection_tsv(rs, &cell(0), true), "s\n\"a\tb\"\n");
+        assert_eq!(tsv_field("plain"), "plain");
+        assert_eq!(tsv_field("say \"hi\""), "\"say \"\"hi\"\"\"");
     }
 
     #[test]

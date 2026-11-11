@@ -182,7 +182,7 @@ impl Command {
             Command::OpenFile => &["Ctrl+O"],
             Command::Save => &["Ctrl+S"],
             Command::SaveAs => &["Ctrl+Shift+S"],
-            Command::Find => &["Ctrl+F"],
+            Command::Find => &["Ctrl+F", "Ctrl+H"],
             Command::FindNext => &["F3"],
             Command::FindPrevious => &["Shift+F3"],
             Command::Format => &["Ctrl+Shift+F"],

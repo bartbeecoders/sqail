@@ -799,7 +799,15 @@
       },
       "IndexInfo": {
         "properties": {
+          "clustered": {
+            "description": "SQL Server: `CLUSTERED` (true) or `NONCLUSTERED` (false). None for\nother engines and for SQL Server's other index types (columnstore,\nXML, spatial).",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "columns": {
+            "description": "Key columns (or expressions, on PostgreSQL) in key order.",
             "items": {
               "type": "string"
             },
@@ -808,6 +816,27 @@
           "constraint": {
             "description": "Backs a `PRIMARY KEY` or `UNIQUE` constraint, so it is dropped with\n`ALTER TABLE … DROP CONSTRAINT` rather than `DROP INDEX`.",
             "type": "boolean"
+          },
+          "descending": {
+            "description": "Per key column, whether it is sorted descending. Empty when every key\nis ascending (or the service is older than this field).",
+            "items": {
+              "type": "boolean"
+            },
+            "type": "array"
+          },
+          "filter": {
+            "description": "The predicate of a filtered (partial) index, as the engine prints it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "include": {
+            "description": "Non-key columns stored in the index (`INCLUDE (…)`).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "name": {
             "type": "string"

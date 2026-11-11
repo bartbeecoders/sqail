@@ -208,6 +208,17 @@ them. Untick *Pinned tabs on a separate row* (in the same menu, or Settings →
 Tabs) to keep them at the front of the one tab row instead. Pins are
 remembered with the open tabs.
 
+**File encodings.** sqail opens UTF-8 files with or without a byte-order
+mark, UTF-16 (LE or BE, with a byte-order mark, as older SSMS versions
+save), and treats any other file that isn't valid UTF-8 as Windows-1252
+("ANSI"). Windows line endings (CRLF) become plain line breaks in the
+editor. Saving writes the file back with its own encoding, byte-order mark
+and line endings (CRLF or LF, whichever the file mostly used), so saving an
+untouched file leaves it unchanged. New files are UTF-8 without a
+byte-order mark, with LF line endings on Linux and CRLF on Windows. If you
+type a character a Windows-1252 file can't hold, sqail saves that file as
+UTF-8 and says so.
+
 The script splitter understands comments, string and identifier quoting,
 Postgres dollar quotes and SQL Server `GO` lines, so *Run statement* picks
 exactly the statement you're in. On SQL Server a `CREATE`/`ALTER`

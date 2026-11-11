@@ -320,6 +320,10 @@ pub struct SavedTab {
     pub cursor: usize,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pinned: bool,
+    /// How `path` is written (encoding, BOM, line endings); used when the
+    /// file cannot be read back on restore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<crate::textfile::FileFormat>,
 }
 
 impl Workspace {

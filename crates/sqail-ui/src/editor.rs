@@ -83,6 +83,8 @@ pub struct Tab {
     pub path: Option<PathBuf>,
     pub text: String,
     saved: String,
+    /// How the file is written on save: encoding, BOM, line endings.
+    pub format: crate::textfile::FileFormat,
     pub connection: Option<Uuid>,
     /// (connection, session) — a dedicated server connection for this tab.
     pub session: Option<(Uuid, Uuid)>,
@@ -123,6 +125,7 @@ impl Tab {
             path: None,
             text: String::new(),
             saved: String::new(),
+            format: Default::default(),
             connection,
             session: None,
             run: None,
@@ -150,10 +153,13 @@ impl Tab {
         t.text = saved.text.clone();
         t.pinned = saved.pinned;
         // Dirty relative to the file on disk (or to nothing for scratch tabs).
-        t.saved = match &saved.path {
-            Some(p) => std::fs::read_to_string(p).unwrap_or_default(),
-            None => String::new(),
-        };
+        match saved.path.as_deref().map(crate::textfile::read) {
+            Some(Ok((text, format))) => {
+                t.saved = text;
+                t.format = format;
+            }
+            _ => t.format = saved.format.unwrap_or_default(),
+        }
         let at = saved.cursor.min(t.text.chars().count());
         t.cursor = CCursorRange::one(CCursor::new(at));
         t.pending_select = Some(t.cursor);
@@ -168,6 +174,7 @@ impl Tab {
             connection: self.connection,
             cursor: self.cursor.primary.index.0,
             pinned: self.pinned,
+            format: self.path.as_ref().map(|_| self.format),
         }
     }
 

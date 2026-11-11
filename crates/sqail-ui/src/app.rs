@@ -96,7 +96,7 @@ pub enum Msg {
         text: String,
         run: bool,
     },
-    FileOpened(Result<(PathBuf, String), String>),
+    FileOpened(Result<(PathBuf, String, crate::textfile::FileFormat), String>),
     FileSaved {
         tab: u64,
         result: Result<PathBuf, String>,
@@ -1022,7 +1022,7 @@ impl SqailApp {
                     self.run_sql(idx, text);
                 }
             }
-            Msg::FileOpened(Ok((path, text))) => {
+            Msg::FileOpened(Ok((path, text, format))) => {
                 let conn = self.tabs.get(self.active).and_then(|t| t.connection);
                 // Reuse an untouched empty tab.
                 let idx = match self.tabs.get(self.active) {
@@ -1033,6 +1033,7 @@ impl SqailApp {
                 };
                 let tab = &mut self.tabs[idx];
                 tab.set_file(path, text);
+                tab.format = format;
             }
             Msg::FileOpened(Err(e)) => self.notify(format!("Open failed: {e}"), true),
             Msg::FileSaved { tab, result, close } => match result {
@@ -1515,13 +1516,17 @@ impl SqailApp {
                     error: false,
                 };
             };
-            let path = file.path().to_path_buf();
-            Msg::FileOpened(
-                std::fs::read_to_string(&path)
-                    .map(|t| (path, t))
-                    .map_err(|e| e.to_string()),
-            )
+            Self::read_file(file.path().to_path_buf())
         });
+    }
+
+    /// Open `path` in a tab (read off the UI thread).
+    pub fn open_path(&mut self, path: PathBuf) {
+        self.worker.run(async move { Self::read_file(path) });
+    }
+
+    fn read_file(path: PathBuf) -> Msg {
+        Msg::FileOpened(crate::textfile::read(&path).map(|(t, f)| (path, t, f)))
     }
 
     pub fn save_tab(&mut self, idx: usize, save_as: bool) {
@@ -1535,8 +1540,19 @@ impl SqailApp {
     }
 
     fn save_tab_then(&mut self, idx: usize, save_as: bool, close: bool) {
+        let tab = &mut self.tabs[idx];
+        if !crate::textfile::can_encode(&tab.text, &tab.format) {
+            let from = tab.format.encoding.label();
+            tab.format.encoding = crate::textfile::Encoding::Utf8;
+            tab.format.bom = false;
+            let title = tab.title.clone();
+            self.notify(
+                format!("{title} has characters that {from} cannot hold, so it is saved as UTF-8"),
+                false,
+            );
+        }
         let tab = &self.tabs[idx];
-        let (id, text) = (tab.id, tab.text.clone());
+        let (id, text, format) = (tab.id, tab.text.clone(), tab.format);
         let known = tab.path.clone().filter(|_| !save_as);
         let suggested = format!("{}.sql", tab.title.trim_end_matches(".sql"));
         self.worker.run(async move {
@@ -1557,7 +1573,7 @@ impl SqailApp {
                     }
                 },
             };
-            let result = std::fs::write(&path, text)
+            let result = std::fs::write(&path, crate::textfile::encode(&text, &format))
                 .map(|_| path)
                 .map_err(|e| e.to_string());
             Msg::FileSaved {

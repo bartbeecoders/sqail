@@ -746,10 +746,11 @@ pub struct ColumnInfo {
     pub primary_key: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct IndexInfo {
     pub name: String,
+    /// Key columns (or expressions, on PostgreSQL) in key order.
     pub columns: Vec<String>,
     pub unique: bool,
     pub primary: bool,
@@ -757,6 +758,21 @@ pub struct IndexInfo {
     /// `ALTER TABLE … DROP CONSTRAINT` rather than `DROP INDEX`.
     #[serde(default)]
     pub constraint: bool,
+    /// Per key column, whether it is sorted descending. Empty when every key
+    /// is ascending (or the service is older than this field).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub descending: Vec<bool>,
+    /// Non-key columns stored in the index (`INCLUDE (…)`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
+    /// The predicate of a filtered (partial) index, as the engine prints it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
+    /// SQL Server: `CLUSTERED` (true) or `NONCLUSTERED` (false). None for
+    /// other engines and for SQL Server's other index types (columnstore,
+    /// XML, spatial).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clustered: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

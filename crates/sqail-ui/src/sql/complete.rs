@@ -6,7 +6,7 @@ use std::ops::Range;
 
 use sqail_client::proto::{ColumnInfo, Engine, ForeignKeyInfo, TableInfo, TableKind};
 
-use super::lex::{Kind, Token, is_keyword, keywords, tokenize};
+use super::lex::{Kind, Token, is_keyword, keywords, tokenize, tokenize_checked};
 use super::{quote_ident, statements};
 
 /// What the completer may look up. `None` = not loaded (yet).
@@ -53,6 +53,9 @@ pub struct Completion {
     /// Byte range of `text` the chosen candidate replaces (the typed prefix).
     pub range: Range<usize>,
     pub items: Vec<Candidate>,
+    /// Worth opening by itself while typing: the typed word is not already a
+    /// whole name or keyword, and some candidate starts with it.
+    pub auto_open: bool,
 }
 
 pub fn default_schema(engine: Engine) -> &'static str {
@@ -576,16 +579,12 @@ pub fn complete(
     let end = stmt.end.max(cursor);
     let sql = &text[start..end];
     let rel = cursor - start;
-    let toks = tokenize(sql, Some(engine));
-
-    // No completion inside strings or comments.
-    if toks.iter().any(|t| {
-        matches!(t.kind, Kind::String | Kind::Comment | Kind::QuotedIdent)
-            && t.range.start < rel
-            && rel < t.range.end
-    }) {
+    // No completion inside strings or comments. Checked on the whole text: a
+    // trailing comment may belong to no statement.
+    if in_literal(text, cursor, engine) {
         return None;
     }
+    let toks = tokenize(sql, Some(engine));
 
     // The word being typed.
     let bytes = sql.as_bytes();
@@ -736,6 +735,7 @@ pub fn complete(
     }
 
     let lower = prefix.to_lowercase();
+    let mut exact = false;
     let mut scored: Vec<(u8, Candidate)> = items
         .into_iter()
         .filter_map(|c| {
@@ -745,6 +745,9 @@ pub fn complete(
                 CandKind::Column => l.rsplit('.').next().unwrap_or(&l),
                 _ => &l,
             };
+            if !lower.is_empty() && name == lower {
+                exact = true;
+            }
             let rank = if lower.is_empty() || name.starts_with(&lower) {
                 0
             } else if name.contains(&lower) {
@@ -756,6 +759,7 @@ pub fn complete(
             (l != lower).then_some((rank, c))
         })
         .collect();
+    let starts = scored.iter().any(|(rank, _)| *rank == 0);
     scored.sort_by(|a, b| (a.0, a.1.kind, &a.1.label).cmp(&(b.0, b.1.kind, &b.1.label)));
     scored.dedup_by(|a, b| a.1.label == b.1.label && a.1.kind == b.1.kind);
     let items: Vec<Candidate> = scored.into_iter().map(|(_, c)| c).take(60).collect();
@@ -763,6 +767,27 @@ pub fn complete(
     (!items.is_empty()).then(|| Completion {
         range: start + name_start..end,
         items,
+        auto_open: starts && !exact,
+    })
+}
+
+/// Is byte `cursor` inside a string, comment or quoted name? Also at the very
+/// end of one that is still open: a line comment (it runs to the newline) or
+/// a string or block comment that is never closed.
+fn in_literal(text: &str, cursor: usize, engine: Engine) -> bool {
+    tokenize(text, Some(engine)).iter().any(|t| {
+        let r = &t.range;
+        if !matches!(t.kind, Kind::String | Kind::Comment | Kind::QuotedIdent)
+            || r.start >= cursor
+            || r.end < cursor
+        {
+            return false;
+        }
+        if cursor < r.end {
+            return true;
+        }
+        let body = &text[r.clone()];
+        body.starts_with("--") || tokenize_checked(body, Some(engine)).1
     })
 }
 
@@ -1223,6 +1248,46 @@ mod tests {
     #[test]
     fn nothing_inside_strings() {
         assert!(labels("SELECT 'o.|' FROM sales.orders o").is_empty());
+    }
+
+    /// At the end of a line comment, or of a string or block comment that is
+    /// not closed yet, the cursor is still inside it (#140).
+    #[test]
+    fn nothing_at_the_end_of_open_comments_and_strings() {
+        for t in [
+            "SELECT * FROM sales.orders -- get ord|",
+            "SELECT * FROM sales.orders -- get ord|\nSELECT 1",
+            "SELECT 1; -- ord|",
+            "SELECT * FROM sales.orders WHERE status = 'cust|",
+            "SELECT * FROM sales.orders /* cust|",
+            "SELECT * FROM sales.orders WHERE status = E'a\\'cu|",
+        ] {
+            assert!(labels(t).is_empty(), "{t}");
+        }
+        // Right after a closed string or comment, completion works.
+        assert!(!in_literal("SELECT 'a'", 10, Engine::Postgres));
+        assert!(!in_literal("SELECT /* a */", 14, Engine::Postgres));
+        assert!(in_literal("SELECT 'a''", 11, Engine::Postgres));
+    }
+
+    /// Typing must not open the popup for a word that is already whole, or
+    /// that only matches inside other names (#140).
+    #[test]
+    fn auto_open_only_for_new_prefixes() {
+        let auto = |text: &str| {
+            let cursor = text.find('|').unwrap();
+            let t = text.replace('|', "");
+            complete(&t, cursor, Engine::Postgres, &Fake).map(|c| c.auto_open)
+        };
+        assert_eq!(auto("SELECT * FROM sales.orders ORDER BY id|"), Some(false));
+        assert_eq!(auto("SELECT count(*) AS|"), Some(false));
+        assert_ne!(
+            auto("SELECT * FROM sales.customers WHERE name|"),
+            Some(true)
+        );
+        assert_eq!(auto("SELECT * FROM sales.orders WHERE omer|"), Some(false));
+        assert_eq!(auto("SELECT * FROM sales.orders WHERE cust|"), Some(true));
+        assert_eq!(auto("SELECT o.| FROM sales.orders o"), Some(true));
     }
 
     #[test]

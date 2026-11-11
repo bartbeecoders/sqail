@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Result, bail};
-use sqail_client::proto::{ColumnInfo, Engine, Param, QueryEvent, QueryRequest};
+use sqail_client::proto::{ColumnInfo, Engine, LogicalType, Param, QueryEvent, QueryRequest};
 use sqail_client::{Client, On};
 use uuid::Uuid;
 
@@ -261,6 +261,61 @@ fn map_columns(
     rcols.next().is_none().then_some(out)
 }
 
+/// Whether a table column type, as the column list reports it, holds bytes.
+pub fn is_binary_type(engine: Engine, data_type: &str) -> bool {
+    let t = data_type.trim().to_ascii_lowercase();
+    let base = t.split('(').next().unwrap_or("").trim();
+    match engine {
+        Engine::Postgres => base == "bytea",
+        Engine::Mssql => matches!(base, "binary" | "varbinary" | "image"),
+        Engine::Sqlite => t.contains("blob"),
+        Engine::Unknown => false,
+    }
+}
+
+/// A binary value as the grid and CSV export show it (`0x` + hex; psql's
+/// `\x` prefix is accepted too) → lowercase hex digits without the prefix.
+pub fn parse_hex(s: &str) -> std::result::Result<String, String> {
+    let t = s.trim();
+    let bad = |why: &str| {
+        let shown: String = t.chars().take(40).collect();
+        let more = if t.chars().count() > 40 { "…" } else { "" };
+        format!(
+            "'{shown}{more}' is not a binary value ({why}); write 0x followed by hex digits, e.g. 0xdeadbeef"
+        )
+    };
+    let Some(hex) = ["0x", "0X", "\\x"].iter().find_map(|p| t.strip_prefix(p)) else {
+        return Err(bad("no 0x prefix"));
+    };
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(bad("not a hex digit"));
+    }
+    if hex.len() % 2 != 0 {
+        return Err(bad("odd number of hex digits"));
+    }
+    Ok(hex.to_ascii_lowercase())
+}
+
+/// The parameter that carries the bytes `hex` (bare hex digits) to a
+/// [`binary_placeholder`].
+pub fn binary_param(engine: Engine, hex: &str) -> Param {
+    match engine {
+        // CONVERT style 1 wants the 0x prefix.
+        Engine::Mssql => Param::Text(format!("0x{hex}")),
+        _ => Param::Text(hex.to_string()),
+    }
+}
+
+/// Placeholder `n` for a binary column: the hex text is decoded to bytes by
+/// the database, so the column gets the real bytes, not the ASCII of `0x…`.
+pub fn binary_placeholder(engine: Engine, n: usize) -> String {
+    match engine {
+        Engine::Postgres => format!("decode(${n}::text, 'hex')"),
+        Engine::Mssql => format!("CONVERT(varbinary(max), @P{n}, 1)"),
+        Engine::Sqlite | Engine::Unknown => format!("unhex(?{n})"),
+    }
+}
+
 /// A new value for a cell: `None` = NULL.
 pub type Value = Option<String>;
 
@@ -391,9 +446,14 @@ impl EditState {
         }
     }
 
-    fn ph(&self, n: usize, col: &ColumnInfo) -> String {
+    /// Placeholder `n` for result column `c`. Binary columns (shown as
+    /// `0x…`) are bound as hex and decoded by the database.
+    fn ph(&self, rs: &ResultSet, n: usize, c: usize) -> String {
+        if is_binary(rs, c) {
+            return binary_placeholder(self.engine, n);
+        }
         match self.engine {
-            Engine::Postgres => format!("${n}::text::{}", col.data_type),
+            Engine::Postgres => format!("${n}::text::{}", self.col(c).data_type),
             Engine::Mssql => format!("@P{n}"),
             Engine::Sqlite | Engine::Unknown => format!("?{n}"),
         }
@@ -403,6 +463,19 @@ impl EditState {
         self.target[i].as_ref().expect("editable column")
     }
 
+    /// The parameter for a new value of result column `c`; binary values
+    /// must be valid `0x` hex.
+    fn value(&self, rs: &ResultSet, c: usize, v: &Value) -> Result<Param> {
+        Ok(match v {
+            None => Param::Null,
+            Some(t) if is_binary(rs, c) => {
+                let hex = parse_hex(t).map_err(|e| anyhow::anyhow!("{}: {e}", self.col(c).name))?;
+                binary_param(self.engine, &hex)
+            }
+            Some(t) => Param::Text(t.clone()),
+        })
+    }
+
     /// WHERE clause matching the original primary key of `row`.
     fn key(&self, rs: &ResultSet, row: usize, n: &mut usize, params: &mut Vec<Param>) -> String {
         self.pk
@@ -410,26 +483,28 @@ impl EditState {
             .map(|&c| {
                 *n += 1;
                 let col = self.col(c);
-                params.push(Param::Text(
-                    rs.raw_row(row)[c]
-                        .display(rs.columns[c].logical)
-                        .into_owned(),
-                ));
+                let cell = &rs.raw_row(row)[c];
+                params.push(match cell {
+                    // Binary cells hold the bytes as bare hex already.
+                    Cell::Text(hex) if is_binary(rs, c) => binary_param(self.engine, hex),
+                    _ => Param::Text(cell.display(rs.columns[c].logical).into_owned()),
+                });
                 format!(
                     "{} = {}",
                     quote_ident(self.engine, &col.name),
-                    self.ph(*n, col)
+                    self.ph(rs, *n, c)
                 )
             })
             .collect::<Vec<_>>()
             .join(" AND ")
     }
 
-    /// The statements to run, in order: deletes, updates, inserts.
-    pub fn statements(&self, rs: &ResultSet) -> Vec<(String, Vec<Param>)> {
+    /// The statements to run, in order: deletes, updates, inserts. Fails,
+    /// before anything is sent, on a value a column cannot take (a binary
+    /// value that is not `0x` hex).
+    pub fn statements(&self, rs: &ResultSet) -> Result<Vec<(String, Vec<Param>)>> {
         let table = self.table_sql();
         let mut out = Vec::new();
-        let value = |v: &Value| v.clone().map_or(Param::Null, Param::Text);
         for &row in &self.deleted {
             let (mut n, mut params) = (0, Vec::new());
             let key = self.key(rs, row, &mut n, &mut params);
@@ -440,19 +515,16 @@ impl EditState {
                 continue;
             }
             let (mut n, mut params) = (0, Vec::new());
-            let sets: Vec<String> = cols
-                .iter()
-                .map(|(&c, v)| {
-                    n += 1;
-                    params.push(value(v));
-                    let col = self.col(c);
-                    format!(
-                        "{} = {}",
-                        quote_ident(self.engine, &col.name),
-                        self.ph(n, col)
-                    )
-                })
-                .collect();
+            let mut sets = Vec::new();
+            for (&c, v) in cols {
+                n += 1;
+                params.push(self.value(rs, c, v)?);
+                sets.push(format!(
+                    "{} = {}",
+                    quote_ident(self.engine, &self.col(c).name),
+                    self.ph(rs, n, c)
+                ));
+            }
             let key = self.key(rs, row, &mut n, &mut params);
             out.push((
                 format!("UPDATE {table} SET {} WHERE {key}", sets.join(", ")),
@@ -464,10 +536,9 @@ impl EditState {
             for (c, v) in row.iter().enumerate() {
                 if let (Some(v), true) = (v, self.editable(c)) {
                     n += 1;
-                    params.push(value(v));
-                    let col = self.col(c);
-                    names.push(quote_ident(self.engine, &col.name));
-                    phs.push(self.ph(n, col));
+                    params.push(self.value(rs, c, v)?);
+                    names.push(quote_ident(self.engine, &self.col(c).name));
+                    phs.push(self.ph(rs, n, c));
                 }
             }
             let sql = if names.is_empty() {
@@ -481,8 +552,13 @@ impl EditState {
             };
             out.push((sql, params));
         }
-        out
+        Ok(out)
     }
+}
+
+/// Result column `c` holds bytes, shown as `0x` + hex.
+fn is_binary(rs: &ResultSet, c: usize) -> bool {
+    rs.columns[c].logical == LogicalType::Bytes
 }
 
 /// Show a statement with its parameters inlined, for the review dialog.
@@ -505,6 +581,10 @@ pub fn preview(engine: Engine, sql: &str, params: &[Param]) -> String {
             Param::Float(v) => v.to_string(),
             Param::Bool(v) => v.to_string(),
         };
+        if engine == Engine::Postgres {
+            // `decode($n::text, 'hex')` → `decode('value', 'hex')`
+            s = s.replace(&format!("decode(${n}::text,"), &format!("decode({lit},"));
+        }
         let (pat, rep) = match engine {
             // `$n::text::type` → `'value'::type`
             Engine::Postgres => (format!("${n}::text::"), format!("{lit}::")),
@@ -865,7 +945,7 @@ mod tests {
         e.set(0, 1, Some("5.00".into()), &rs);
         e.inserted
             .push(vec![Some(Some("99".into())), Some(None), None]);
-        let st = e.statements(&rs);
+        let st = e.statements(&rs).unwrap();
         assert_eq!(
             st[0].0,
             "UPDATE sales.products SET price = $1::text::numeric(10,2) WHERE id = $2::text::integer"
@@ -887,7 +967,7 @@ mod tests {
         let (mut e, rs) = setup(Engine::Mssql);
         e.deleted.insert(0);
         e.set(0, 1, Some("1".into()), &rs); // ignored: the row is deleted
-        let st = e.statements(&rs);
+        let st = e.statements(&rs).unwrap();
         assert_eq!(st.len(), 1);
         assert_eq!(st[0].0, "DELETE FROM [sales].[products] WHERE [id] = @P1");
         assert_eq!(
@@ -903,5 +983,114 @@ mod tests {
         assert_eq!(e.pending(), 1);
         e.set(0, 1, Some("4.11".into()), &rs);
         assert_eq!(e.pending(), 0);
+    }
+
+    #[test]
+    fn hex_values_parse_strictly() {
+        assert_eq!(parse_hex("0xDEADbeef").unwrap(), "deadbeef");
+        assert_eq!(parse_hex(" 0x ").unwrap(), "", "0x alone is empty");
+        assert_eq!(parse_hex("\\x0a").unwrap(), "0a");
+        assert!(parse_hex("deadbeef").unwrap_err().contains("no 0x prefix"));
+        assert!(parse_hex("0xabc").unwrap_err().contains("odd number"));
+        assert!(parse_hex("0xzz").unwrap_err().contains("hex digit"));
+        assert!(parse_hex("").is_err());
+        assert!(is_binary_type(Engine::Postgres, "bytea"));
+        assert!(!is_binary_type(Engine::Postgres, "bytea[]"));
+        assert!(is_binary_type(Engine::Mssql, "varbinary(max)"));
+        assert!(is_binary_type(Engine::Mssql, "binary(4)"));
+        assert!(!is_binary_type(Engine::Mssql, "nvarchar(10)"));
+        assert!(is_binary_type(Engine::Sqlite, "BLOB"));
+        assert!(!is_binary_type(Engine::Sqlite, "TEXT"));
+    }
+
+    /// A table keyed by a binary column with a binary value column.
+    fn binary_setup(engine: Engine) -> (EditState, ResultSet) {
+        let rcols: Vec<Column> = ["k", "b"]
+            .iter()
+            .map(|n| Column {
+                name: (*n).into(),
+                type_name: "bytea".into(),
+                logical: LogicalType::Bytes,
+            })
+            .collect();
+        let tcols: Vec<ColumnInfo> = ["k", "b"]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| ColumnInfo {
+                name: (*n).into(),
+                ordinal: i as i64 + 1,
+                data_type: "bytea".into(),
+                nullable: i == 1,
+                default: None,
+                primary_key: i == 0,
+            })
+            .collect();
+        let source = source_table("SELECT k, b FROM t", engine).unwrap();
+        let e = EditState::new(engine, source, &rcols, &tcols).unwrap();
+        let rs = ResultSet::for_test(
+            rcols,
+            vec![vec![
+                Cell::Text("0102".into()),
+                Cell::Text("deadbeef".into()),
+            ]],
+        );
+        (e, rs)
+    }
+
+    #[test]
+    fn binary_columns_bind_bytes() {
+        let (mut e, rs) = binary_setup(Engine::Postgres);
+        e.set(0, 1, Some("0xDEADBEEE".into()), &rs);
+        e.inserted
+            .push(vec![Some(Some("0xff".into())), Some(Some("0x".into()))]);
+        let st = e.statements(&rs).unwrap();
+        assert_eq!(
+            st[0].0,
+            "UPDATE t SET b = decode($1::text, 'hex') WHERE k = decode($2::text, 'hex')"
+        );
+        assert_eq!(
+            st[0].1,
+            vec![Param::Text("deadbeee".into()), Param::Text("0102".into())]
+        );
+        assert_eq!(
+            preview(Engine::Postgres, &st[0].0, &st[0].1),
+            "UPDATE t SET b = decode('deadbeee', 'hex') WHERE k = decode('0102', 'hex')"
+        );
+        assert_eq!(
+            st[1].0,
+            "INSERT INTO t (k, b) VALUES (decode($1::text, 'hex'), decode($2::text, 'hex'))"
+        );
+        assert_eq!(
+            st[1].1,
+            vec![Param::Text("ff".into()), Param::Text("".into())]
+        );
+
+        let (mut e, rs) = binary_setup(Engine::Mssql);
+        e.set(0, 1, Some("0xdeadbeee".into()), &rs);
+        let st = e.statements(&rs).unwrap();
+        assert_eq!(
+            st[0].0,
+            "UPDATE [t] SET [b] = CONVERT(varbinary(max), @P1, 1) \
+             WHERE [k] = CONVERT(varbinary(max), @P2, 1)"
+        );
+        assert_eq!(
+            st[0].1,
+            vec![
+                Param::Text("0xdeadbeee".into()),
+                Param::Text("0x0102".into())
+            ]
+        );
+
+        let (mut e, rs) = binary_setup(Engine::Sqlite);
+        e.deleted.insert(0);
+        let st = e.statements(&rs).unwrap();
+        assert_eq!(st[0].0, "DELETE FROM t WHERE k = unhex(?1)");
+        assert_eq!(st[0].1, vec![Param::Text("0102".into())]);
+
+        // Invalid hex is refused before anything is sent.
+        let (mut e, rs) = binary_setup(Engine::Postgres);
+        e.set(0, 1, Some("hello".into()), &rs);
+        let err = e.statements(&rs).unwrap_err().to_string();
+        assert!(err.starts_with("b: 'hello' is not a binary value"), "{err}");
     }
 }

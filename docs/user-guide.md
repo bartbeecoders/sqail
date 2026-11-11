@@ -232,9 +232,14 @@ Idle sessions close after 30 minutes on the service, which rolls them back.
 
 **Plans:** *Explain* (Ctrl+E) shows the estimated plan as a tree, with cost
 and row estimates and the most expensive nodes highlighted. *Explain analyze*
-actually runs the statement to get real timings and row counts, inside a
-transaction that is **always rolled back**, so it is safe for `UPDATE` and
-`DELETE` as well. The *Raw* toggle shows the engine's own JSON or XML plan.
+actually runs the statement to get real timings and row counts, and its
+effects are **always rolled back**, so it is safe for `UPDATE` and `DELETE` as
+well. When the tab has a transaction open, only the explained statement is
+undone (to a savepoint): the transaction and your earlier changes in it stay
+open for **Commit** or **Rollback**. A PostgreSQL transaction that already
+failed must be rolled back first. On SQLite, *Explain analyze* shows the
+estimated plan and runs nothing. The *Raw* toggle shows the engine's own JSON
+or XML plan.
 
 ## Results
 

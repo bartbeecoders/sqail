@@ -2065,7 +2065,11 @@ fn connection_lost(ev: &[QueryEvent]) -> bool {
 
 /// Cancelling on SQL Server sends an Attention, which aborts the batch only:
 /// the session keeps its connection, transaction and #temp tables, whether
-/// or not the login may KILL (#148).
+/// or not the login may KILL (#148). The checks are behaviour, not timing
+/// (#215): a KILL fallback (`sa` may KILL) or a dropped connection
+/// (`sqail` may not) would end the session, so the same spid with its
+/// transaction and #temp table shows that the Attention stopped the query,
+/// however long draining the rows already sent took on a busy machine.
 #[tokio::test]
 #[ignore = "needs podman test databases (scripts/db.sh up)"]
 async fn mssql_cancel_keeps_the_session() {
@@ -2105,8 +2109,8 @@ async fn mssql_cancel_keeps_the_session() {
         assert_eq!(error(&ev).unwrap().0, "cancelled", "{user}: {ev:?}");
         assert_eq!(done(&ev).1, Some(true), "{user}: {ev:?}");
         assert!(!connection_lost(&ev), "{user}: {ev:?}");
-        // well before the KILL fallback (3 s)
-        assert!(took < Duration::from_millis(2500), "{user}: took {took:?}");
+        // stopped, not run to its end
+        assert!(took < Duration::from_secs(20), "{user}: took {took:?}");
         still_there("after waitfor").await;
 
         // a large result mid-stream: two statements, so that max_rows does
@@ -2124,7 +2128,9 @@ async fn mssql_cancel_keeps_the_session() {
         assert!(done(&ev).0, "{user}: {:?}", ev.last());
         assert!(!rows(&ev, 1).is_empty(), "{user}: cancelled mid-stream");
         assert!(!connection_lost(&ev), "{user}");
-        assert!(took < Duration::from_secs(4), "{user}: took {took:?}");
+        // stopped (the query would run for hours); reading the rows the
+        // server sent before the Attention reached it may take a while
+        assert!(took < Duration::from_secs(30), "{user}: took {took:?}");
         still_there("after a large result").await;
 
         // the timeout cancels the same way

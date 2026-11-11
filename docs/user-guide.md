@@ -183,7 +183,7 @@ an admin token.
 | F5 / Ctrl+Shift+Enter | Run the whole script |
 | Esc | Cancel the running query |
 | Ctrl+E | Show the plan of the statement under the cursor |
-| Ctrl+Space | Completion (also opens by itself while you type; a space, comma or other punctuation closes it, so Enter and Tab go to the text) |
+| Ctrl+Space | Completion (also opens by itself while you type a name it can finish, but not when the word is already a whole name or keyword, nor in comments and strings; a space, comma or other punctuation closes it, so Enter and Tab go to the text) |
 | Ctrl+Shift+F | Format the selection or the whole tab |
 | Ctrl+Shift+P | Command palette: every action, searchable |
 | Ctrl+P | Quick open: jump to a table or snippet |

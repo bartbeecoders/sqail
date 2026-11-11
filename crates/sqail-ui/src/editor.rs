@@ -51,6 +51,9 @@ pub struct Popup {
     scroll: bool,
     /// The user moved the selection; keep it across refreshes.
     moved: bool,
+    /// Opened with Ctrl+Space: kept even when the typed word is already a
+    /// whole name, until the next edit or cursor move.
+    explicit: bool,
 }
 
 /// Drag-and-drop payload: a schema object from the sidebar. What it inserts
@@ -579,8 +582,13 @@ pub fn editor_ui(ui: &mut egui::Ui, tab: &mut Tab, env: &EditorEnv<'_>) {
                         .filter(|p| p.moved)
                         .and_then(|p| p.items.get(p.selected))
                         .map(|c| c.label.clone());
-                    let fresh = complete::complete(&tab.text, cursor_now, eng, cat)
-                        .filter(|c| explicit || !moved || keeps_popup(&tab.text, &c.range));
+                    let was_explicit = !moved && tab.completion.as_ref().is_some_and(|p| p.explicit);
+                    // Opened by typing, it must offer something new: not for a
+                    // word that is already a whole name or keyword (Enter would
+                    // replace it), nor for matches only inside other names.
+                    let fresh = complete::complete(&tab.text, cursor_now, eng, cat).filter(|c| {
+                        explicit || was_explicit || ((!moved || keeps_popup(&tab.text, &c.range)) && c.auto_open)
+                    });
                     tab.completion = fresh.map(|c| {
                         let kept = prev
                             .as_ref()
@@ -592,6 +600,7 @@ pub fn editor_ui(ui: &mut egui::Ui, tab: &mut Tab, env: &EditorEnv<'_>) {
                             range: c.range,
                             selected,
                             scroll: true,
+                            explicit: explicit || was_explicit,
                         }
                     });
                     tab.completion_pending = Some(cursor_now);
@@ -1030,6 +1039,7 @@ mod tests {
             selected: 0,
             scroll: false,
             moved: false,
+            explicit: false,
         });
         accept(&mut t, 0);
         assert_eq!(t.text, "SELECT status FROM t");

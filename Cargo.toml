@@ -32,7 +32,8 @@ strip = true
 panic = "abort"
 
 # tokio-postgres with the column type OID exposed on simple-query results and
-# row-limited execution; tiberius with a fix for cancelling a query mid-result.
+# row-limited execution; tiberius with a fix for cancelling a query mid-result
+# and an Attention that can be sent while a query runs.
 # See vendor/*/SQAIL-PATCH.md.
 [patch.crates-io]
 tokio-postgres = { path = "vendor/tokio-postgres" }

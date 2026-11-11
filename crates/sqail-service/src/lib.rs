@@ -202,7 +202,7 @@ fn save_settings(effective: &Config, file: &Config) -> Result<()> {
 async fn start_with(config: Config, control: Arc<Control>) -> Result<Server> {
     let tls = tls::load(&config)?;
     let store = Store::open(&config.db_path())?;
-    let key = MasterKey::load_or_create(&config.data_dir)?;
+    let key = MasterKey::load_or_create(&config.data_dir, config.use_env)?;
 
     let bootstrap_token = if config.bootstrap_admin_token && store.active_admin_tokens()? == 0 {
         let created = store.token_create("bootstrap-admin", Scope::Admin)?;

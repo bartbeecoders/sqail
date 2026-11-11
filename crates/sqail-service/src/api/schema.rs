@@ -43,7 +43,10 @@ async fn conn(state: &AppState, p: &Principal, id: Uuid) -> ApiResult<Pooled> {
 /// Map a catalog result and hand the connection back. Catalog SQL leaves no
 /// session state, so it goes back as it is unless it was lost or cut off.
 fn finish<T>(c: Pooled, (r, broken): (crate::engine::Result<T>, bool)) -> ApiResult<Json<T>> {
-    if broken || matches!(r, Err(DbError::Connect(_) | DbError::Timeout)) {
+    if broken
+        || matches!(r, Err(DbError::Timeout))
+        || r.as_ref().is_err_and(DbError::is_connection_gone)
+    {
         c.discard();
     } else {
         c.release();

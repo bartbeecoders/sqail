@@ -259,7 +259,94 @@ pub fn check_single_statement(sql: &str) -> Result<(), String> {
             "expected a single statement; {w} would start another one"
         ));
     }
+    if let Some(w) = hidden_statement(&qtokens(sql).0) {
+        return Err(format!(
+            "expected a single statement; {w} would start another one"
+        ));
+    }
     Ok(())
+}
+
+/// Words that may follow a column or alias in a query; after one of them,
+/// `RECEIVE` is a name rather than the start of a `RECEIVE … FROM queue`.
+const CLAUSE_WORDS: &[&str] = &[
+    "AND",
+    "AS",
+    "CROSS",
+    "ELSE",
+    "END",
+    "EXCEPT",
+    "FOR",
+    "FROM",
+    "FULL",
+    "GROUP",
+    "HAVING",
+    "IN",
+    "INNER",
+    "INTERSECT",
+    "IS",
+    "JOIN",
+    "LEFT",
+    "LIKE",
+    "NOT",
+    "ON",
+    "OPTION",
+    "OR",
+    "ORDER",
+    "OUTER",
+    "RIGHT",
+    "THEN",
+    "UNION",
+    "WHEN",
+    "WHERE",
+    "WITH",
+];
+
+/// A statement after the first word that hides behind a word that is not
+/// reserved, or not only a statement word, and so is not in
+/// [`STATEMENT_WORDS`]: `END` outside `CASE … END`, `FETCH` outside
+/// `OFFSET … ROWS FETCH`, `DISABLE`/`ENABLE TRIGGER`, `SEND ON
+/// CONVERSATION`, `MOVE`/`GET CONVERSATION`, and `RECEIVE` followed by what
+/// it reads. The assistant's guard has the same rules.
+fn hidden_statement(toks: &[(QTok, u32)]) -> Option<String> {
+    let word = |i: usize| match toks.get(i) {
+        Some((QTok::Word(w), _)) => w.as_str(),
+        _ => "",
+    };
+    let mut cases = 0usize;
+    for (i, (tok, _)) in toks.iter().enumerate() {
+        let QTok::Word(w) = tok else { continue };
+        if w == "CASE" {
+            cases += 1;
+            continue;
+        }
+        if i == 0 {
+            continue;
+        }
+        let hidden = match w.as_str() {
+            "END" => match cases.checked_sub(1) {
+                Some(n) => {
+                    cases = n;
+                    false
+                }
+                None => true,
+            },
+            "FETCH" => !matches!(word(i - 1), "ROW" | "ROWS"),
+            "DISABLE" | "ENABLE" => word(i + 1) == "TRIGGER",
+            "SEND" => word(i + 1) == "ON" && word(i + 2) == "CONVERSATION",
+            "MOVE" | "GET" => word(i + 1) == "CONVERSATION",
+            "RECEIVE" => match toks.get(i + 1) {
+                Some((QTok::Punct('*'), _)) => true,
+                Some((QTok::Word(n), _)) => !CLAUSE_WORDS.contains(&n.as_str()),
+                _ => false,
+            },
+            _ => false,
+        };
+        if hidden {
+            return Some(w.clone());
+        }
+    }
+    None
 }
 
 /// Words that start a statement other than a query (beyond
@@ -310,15 +397,12 @@ enum QTok {
     Open,
     Close,
     Semi,
-    Punct,
+    Punct(char),
 }
 
-/// Conservative check that a batch is exactly one query (`SELECT ...` or
-/// `WITH ... SELECT ...`) and nothing after it. T-SQL needs no separator
-/// between statements, so anything that might begin a second statement
-/// fails the check. Such a batch can be stopped once its rows reach
-/// `max_rows` without skipping work the script still had to do.
-pub fn single_query(sql: &str) -> bool {
+/// `sql` as words, parentheses and punctuation, each with its depth, plus
+/// the depth at the end; strings, names and comments are left out.
+fn qtokens(sql: &str) -> (Vec<(QTok, u32)>, u32) {
     // The code with strings, names and comments blanked out.
     let mut code = String::with_capacity(sql.len());
     let mut st = St::Code;
@@ -356,11 +440,20 @@ pub fn single_query(sql: &str) -> bool {
             }
             ';' => toks.push((QTok::Semi, depth)),
             _ if c.is_whitespace() => {}
-            _ => toks.push((QTok::Punct, depth)),
+            c => toks.push((QTok::Punct(c), depth)),
         }
     }
     flush(&mut word, &mut toks, depth);
+    (toks, depth)
+}
 
+/// Conservative check that a batch is exactly one query (`SELECT ...` or
+/// `WITH ... SELECT ...`) and nothing after it. T-SQL needs no separator
+/// between statements, so anything that might begin a second statement
+/// fails the check. Such a batch can be stopped once its rows reach
+/// `max_rows` without skipping work the script still had to do.
+pub fn single_query(sql: &str) -> bool {
+    let (toks, depth) = qtokens(sql);
     let w = |i: usize| match toks.get(i) {
         Some((QTok::Word(w), _)) => Some(w.as_str()),
         _ => None,
@@ -385,7 +478,7 @@ pub fn single_query(sql: &str) -> bool {
                 let subquery = matches!(w(i + 1), Some("SELECT" | "WITH"));
                 let ok = match prev {
                     QTok::Word(p) => PAREN_OK_AFTER.contains(&p.as_str()),
-                    QTok::Punct | QTok::Open => true,
+                    QTok::Punct(_) | QTok::Open => true,
                     QTok::Close | QTok::Semi => false,
                 };
                 if subquery && !ok {
@@ -416,7 +509,7 @@ pub fn single_query(sql: &str) -> bool {
                     _ => {}
                 }
             }
-            QTok::Close | QTok::Punct => {}
+            QTok::Close | QTok::Punct(_) => {}
         }
     }
     selects == 1 && depth == 0
@@ -565,8 +658,27 @@ mod tests {
             "SELECT 1 IF 1 = 1 PRINT 'x'",
             "SELECT 'a''' COMMIT",
             "SELECT 1 /* /* */ */ COMMIT",
+            "SELECT 1 DISABLE TRIGGER ALL ON dbo.orders",
+            "SELECT 1 ENABLE TRIGGER t ON dbo.orders",
+            "SELECT 1 END CONVERSATION @h",
+            "SELECT CASE WHEN 1 = 1 THEN 1 END END",
+            "SELECT 1 FETCH NEXT FROM c",
+            "SELECT 1 RECEIVE * FROM q",
+            "SELECT 1 RECEIVE TOP (1) message_body FROM q",
+            "SELECT 1 SEND ON CONVERSATION @h",
+            "SELECT 1 MOVE CONVERSATION @h TO @g",
+            "SELECT 1 GET CONVERSATION GROUP @g FROM q",
         ] {
             assert!(check_single_statement(bad).is_err(), "{bad}");
+        }
+        for ok in [
+            "SELECT CASE WHEN a = 1 THEN CASE b WHEN 2 THEN 'x' END END AS c FROM t",
+            "SELECT a FROM t ORDER BY a OFFSET 0 ROWS FETCH NEXT 5 ROWS ONLY",
+            "SELECT receive, send, enable FROM t WHERE receive > 1",
+            "SELECT a receive FROM t",
+            "FETCH NEXT FROM c",
+        ] {
+            assert_eq!(check_single_statement(ok), Ok(()), "{ok}");
         }
     }
 }

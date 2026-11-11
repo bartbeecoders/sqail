@@ -174,6 +174,9 @@ pub enum ReceivedToken {
 pub(crate) struct TokenStream<'a, S: AsyncRead + AsyncWrite + Unpin + Send> {
     conn: &'a mut Connection<S>,
     last_error: Option<Error>,
+    /// sqail patch: the consumer handles ERROR tokens where they arrive, so
+    /// the stream does not fail with the first one at its end.
+    messages: bool,
 }
 
 impl<'a, S> TokenStream<'a, S>
@@ -184,7 +187,14 @@ where
         Self {
             conn,
             last_error: None,
+            messages: false,
         }
+    }
+
+    /// sqail patch: see the `messages` field.
+    pub(crate) fn with_messages(mut self, messages: bool) -> Self {
+        self.messages = messages;
+        self
     }
 
     pub(crate) async fn flush_done(self) -> crate::Result<TokenDone> {
@@ -322,7 +332,7 @@ where
     async fn get_error(&mut self) -> crate::Result<ReceivedToken> {
         let err = TokenError::decode(self.conn).await?;
 
-        if self.last_error.is_none() {
+        if self.last_error.is_none() && !self.messages {
             self.last_error = Some(Error::Server(err.clone()));
         }
 

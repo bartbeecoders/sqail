@@ -1,3 +1,4 @@
+use crate::tds::codec::{TokenDone, TokenError, TokenInfo};
 use crate::tds::stream::ReceivedToken;
 use crate::{row::ColumnType, Column, Row};
 use futures_util::{
@@ -92,6 +93,9 @@ pub struct QueryStream<'a> {
     token_stream: Peekable<BoxStream<'a, crate::Result<ReceivedToken>>>,
     columns: Option<Arc<Vec<Column>>>,
     result_set_index: Option<usize>,
+    /// sqail patch: also yield INFO, DONE and ERROR tokens
+    /// (`Client::set_messages`).
+    messages: bool,
 }
 
 impl<'a> Debug for QueryStream<'a> {
@@ -111,7 +115,27 @@ impl<'a> QueryStream<'a> {
             token_stream: token_stream.peekable(),
             columns: None,
             result_set_index: None,
+            messages: false,
         }
+    }
+
+    /// sqail patch: see `Client::set_messages`.
+    pub(crate) fn with_messages(mut self, messages: bool) -> Self {
+        self.messages = messages;
+        self
+    }
+
+    /// sqail patch: whether `token` is yielded as a [`QueryItem`] of its own.
+    fn is_message(messages: bool, token: &ReceivedToken) -> bool {
+        messages
+            && matches!(
+                token,
+                ReceivedToken::Info(_)
+                    | ReceivedToken::Error(_)
+                    | ReceivedToken::Done(_)
+                    | ReceivedToken::DoneInProc(_)
+                    | ReceivedToken::DoneProc(_)
+            )
     }
 
     /// Moves the stream forward until having result metadata, stream end or an
@@ -126,6 +150,8 @@ impl<'a> QueryStream<'a> {
 
             match item {
                 Some(ReceivedToken::NewResultset(_)) => break,
+                // sqail patch: left for the consumer, in order.
+                Some(token) if Self::is_message(self.messages, token) => break,
                 Some(_) => {
                     self.token_stream.try_next().await?;
                 }
@@ -204,6 +230,12 @@ impl<'a> QueryStream<'a> {
                     Row(_) => {
                         break;
                     }
+                    // sqail patch: an error is not skipped silently.
+                    Error(e) if self.messages => {
+                        let e = crate::Error::Server(e.clone());
+                        self.token_stream.try_next().await?;
+                        return Err(e);
+                    }
                     _ => {
                         self.token_stream.try_next().await?;
                         continue;
@@ -246,7 +278,8 @@ impl<'a> QueryStream<'a> {
         let s = self.try_filter_map(|item| async {
             match item {
                 QueryItem::Row(row) => Ok(Some(row)),
-                QueryItem::Metadata(_) => Ok(None),
+                QueryItem::Error(e) => Err(crate::Error::Server(e)),
+                _ => Ok(None),
             }
         });
 
@@ -274,6 +307,9 @@ where
 {
     let mut results: Vec<Vec<Row>> = Vec::new();
     let mut current: Option<Vec<Row>> = None;
+    // sqail patch: with messages on, errors come as items; fail with the
+    // first one after reading the rest, as the token stream does without.
+    let mut first_error = None;
 
     while let Some(item) = stream.try_next().await? {
         match item {
@@ -292,7 +328,14 @@ where
                 // a result set on the fly rather than discard a leading row.
                 current.get_or_insert_with(Vec::new).push(row);
             }
+            QueryItem::Error(e) => {
+                first_error.get_or_insert(e);
+            }
+            QueryItem::Message(_) | QueryItem::Done(_) => {}
         }
+    }
+    if let Some(e) = first_error {
+        return Err(crate::Error::Server(e));
     }
 
     if let Some(last) = current.take() {
@@ -330,6 +373,92 @@ pub enum QueryItem {
     Row(Row),
     /// Information of the upcoming row data.
     Metadata(ResultMetadata),
+    /// sqail patch, only with `Client::set_messages`: an informational
+    /// message (INFO token: `PRINT`, `RAISERROR` up to severity 10). It has
+    /// the same fields as an error.
+    Message(TokenError),
+    /// sqail patch, only with `Client::set_messages`: an error, where the
+    /// server sent it. The response goes on; the server decides whether the
+    /// rest of the batch runs.
+    Error(TokenError),
+    /// sqail patch, only with `Client::set_messages`: the end of a
+    /// statement, procedure or batch (DONE, DONEINPROC, DONEPROC).
+    Done(StatementDone),
+}
+
+/// sqail patch: a DONE, DONEINPROC or DONEPROC token
+/// ([`QueryItem::Done`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatementDone {
+    kind: DoneKind,
+    rows: Option<u64>,
+    more: bool,
+    error: bool,
+    attention: bool,
+}
+
+/// sqail patch: which token a [`StatementDone`] came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DoneKind {
+    /// DONE: a statement of the batch, or the batch.
+    Done,
+    /// DONEINPROC: a statement inside a procedure.
+    InProc,
+    /// DONEPROC: a procedure (or RPC) call.
+    Proc,
+}
+
+impl StatementDone {
+    fn new(kind: DoneKind, done: &TokenDone) -> Self {
+        Self {
+            kind,
+            rows: done.count(),
+            more: done.has_more(),
+            error: done.is_error(),
+            attention: done.is_attention(),
+        }
+    }
+
+    /// Which token this is.
+    pub fn kind(&self) -> DoneKind {
+        self.kind
+    }
+
+    /// The statement's row count (rows affected, or rows returned by a
+    /// SELECT), when the server sent one: not with `SET NOCOUNT ON`, and not
+    /// for statements that do not count rows.
+    pub fn rows(&self) -> Option<u64> {
+        self.rows
+    }
+
+    /// More DONE tokens follow in this response.
+    pub fn has_more(&self) -> bool {
+        self.more
+    }
+
+    /// The statement ended with an error.
+    pub fn is_error(&self) -> bool {
+        self.error
+    }
+
+    /// The token acknowledges an Attention.
+    pub fn is_attention(&self) -> bool {
+        self.attention
+    }
+}
+
+impl From<TokenInfo> for TokenError {
+    fn from(i: TokenInfo) -> Self {
+        TokenError {
+            code: i.number,
+            state: i.state,
+            class: i.class,
+            message: i.message,
+            server: i.server,
+            procedure: i.procedure,
+            line: i.line,
+        }
+    }
 }
 
 impl QueryItem {
@@ -343,8 +472,8 @@ impl QueryItem {
     /// Returns a reference to the metadata, if the item is of a correct variant.
     pub fn as_metadata(&self) -> Option<&ResultMetadata> {
         match self {
-            QueryItem::Row(_) => None,
             QueryItem::Metadata(ref metadata) => Some(metadata),
+            _ => None,
         }
     }
 
@@ -352,15 +481,15 @@ impl QueryItem {
     pub fn as_row(&self) -> Option<&Row> {
         match self {
             QueryItem::Row(ref row) => Some(row),
-            QueryItem::Metadata(_) => None,
+            _ => None,
         }
     }
 
     /// Returns the metadata, if the item is of a correct variant.
     pub fn into_metadata(self) -> Option<ResultMetadata> {
         match self {
-            QueryItem::Row(_) => None,
             QueryItem::Metadata(metadata) => Some(metadata),
+            _ => None,
         }
     }
 
@@ -368,7 +497,7 @@ impl QueryItem {
     pub fn into_row(self) -> Option<Row> {
         match self {
             QueryItem::Row(row) => Some(row),
-            QueryItem::Metadata(_) => None,
+            _ => None,
         }
     }
 }
@@ -423,6 +552,22 @@ impl<'a> Stream for QueryStream<'a> {
 
                     Poll::Ready(Some(Ok(QueryItem::Row(row))))
                 }
+                // sqail patch: messages, row counts and errors in order.
+                ReceivedToken::Info(info) if this.messages => {
+                    Poll::Ready(Some(Ok(QueryItem::Message(info.into()))))
+                }
+                ReceivedToken::Error(e) if this.messages => {
+                    Poll::Ready(Some(Ok(QueryItem::Error(e))))
+                }
+                ReceivedToken::Done(d) if this.messages => Poll::Ready(Some(Ok(
+                    QueryItem::Done(StatementDone::new(DoneKind::Done, &d)),
+                ))),
+                ReceivedToken::DoneInProc(d) if this.messages => Poll::Ready(Some(Ok(
+                    QueryItem::Done(StatementDone::new(DoneKind::InProc, &d)),
+                ))),
+                ReceivedToken::DoneProc(d) if this.messages => Poll::Ready(Some(Ok(
+                    QueryItem::Done(StatementDone::new(DoneKind::Proc, &d)),
+                ))),
                 _ => continue,
             };
         }
@@ -700,5 +845,109 @@ mod tests {
         .await
         .expect("into_row_stream");
         assert_eq!(rows.len(), 3);
+    }
+
+    // --- sqail patch: messages, row counts and errors in order -----------
+
+    fn token_info(message: &str) -> ReceivedToken {
+        ReceivedToken::Info(TokenInfo {
+            number: 0,
+            state: 1,
+            class: 0,
+            message: message.into(),
+            server: String::new(),
+            procedure: String::new(),
+            line: 1,
+        })
+    }
+
+    fn token_error(message: &str) -> ReceivedToken {
+        ReceivedToken::Error(TokenError {
+            code: 50000,
+            state: 1,
+            class: 16,
+            message: message.into(),
+            server: String::new(),
+            procedure: String::new(),
+            line: 2,
+        })
+    }
+
+    const DONE_MORE: u16 = 0x1;
+    const DONE_COUNT: u16 = 0x10;
+
+    fn script() -> Vec<ReceivedToken> {
+        vec![
+            token_info("hello"),
+            token_meta("a"),
+            token_row(),
+            ReceivedToken::Done(TokenDone::test_new(DONE_MORE | DONE_COUNT, 1)),
+            token_error("boom"),
+            ReceivedToken::DoneInProc(TokenDone::test_new(DONE_MORE | DONE_COUNT, 3)),
+            token_meta("b"),
+            ReceivedToken::Done(TokenDone::test_new(0, 0)),
+        ]
+    }
+
+    fn outline(item: &QueryItem) -> String {
+        match item {
+            QueryItem::Metadata(m) => format!("meta:{}", m.columns()[0].name()),
+            QueryItem::Row(_) => "row".into(),
+            QueryItem::Message(m) => format!("msg:{}", m.message()),
+            QueryItem::Error(e) => format!("error:{}:{}", e.code(), e.message()),
+            QueryItem::Done(d) => format!("done:{:?}:{:?}", d.kind(), d.rows()),
+        }
+    }
+
+    #[tokio::test]
+    async fn with_messages_infos_dones_and_errors_come_in_order() {
+        let mut stream = query_stream(script()).with_messages(true);
+        // As the clients do before handing the stream out.
+        stream.forward_to_metadata().await.unwrap();
+        let items: Vec<String> = stream
+            .map(|i| outline(&i.unwrap()))
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(
+            items,
+            [
+                "msg:hello",
+                "meta:a",
+                "row",
+                "done:Done:Some(1)",
+                "error:50000:boom",
+                "done:InProc:Some(3)",
+                "meta:b",
+                "done:Done:None",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn without_messages_only_results_come() {
+        let mut stream = query_stream(script());
+        stream.forward_to_metadata().await.unwrap();
+        let items: Vec<String> = stream
+            .map(|i| outline(&i.unwrap()))
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(items, ["meta:a", "row", "meta:b"]);
+    }
+
+    #[tokio::test]
+    async fn with_messages_collecting_still_fails_with_the_first_error() {
+        let err = query_stream(script())
+            .with_messages(true)
+            .into_results()
+            .await
+            .expect_err("the error token");
+        assert!(matches!(err, crate::Error::Server(e) if e.message() == "boom"));
+        let err = query_stream(script())
+            .with_messages(true)
+            .into_row_stream()
+            .try_collect::<Vec<_>>()
+            .await
+            .expect_err("the error token");
+        assert!(matches!(err, crate::Error::Server(_)));
     }
 }

@@ -100,6 +100,21 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
         })
     }
 
+    /// sqail patch: with `on`, the result streams of `query` and
+    /// `simple_query` yield [`QueryItem::Message`] (INFO tokens: `PRINT`,
+    /// `RAISERROR` up to severity 10), [`QueryItem::Done`] (with row counts)
+    /// and [`QueryItem::Error`] where the server sends them, instead of
+    /// dropping the first two and failing with the first error at the end.
+    /// `into_results`, `into_row` and friends still fail with the first
+    /// error.
+    ///
+    /// [`QueryItem::Message`]: crate::QueryItem::Message
+    /// [`QueryItem::Done`]: crate::QueryItem::Done
+    /// [`QueryItem::Error`]: crate::QueryItem::Error
+    pub fn set_messages(&mut self, on: bool) {
+        self.connection.set_messages(on);
+    }
+
     /// Executes SQL statements in the SQL Server, returning the number rows
     /// affected. Useful for `INSERT`, `UPDATE` and `DELETE` statements. The
     /// `query` can define the parameter placement by annotating them with
@@ -230,8 +245,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
         self.rpc_perform_query(RpcProcId::ExecuteSQL, rpc_params, params)
             .await?;
 
-        let ts = TokenStream::new(&mut self.connection);
-        let mut result = QueryStream::new(ts.try_unfold());
+        let messages = self.connection.messages();
+        let mut result = QueryStream::new(self.connection.query_tokens()).with_messages(messages);
         result.forward_to_metadata().await?;
 
         Ok(result)
@@ -288,9 +303,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
         let id = self.connection.context_mut().next_packet_id();
         self.connection.send(PacketHeader::batch(id), req).await?;
 
-        let ts = TokenStream::new(&mut self.connection);
-
-        let mut result = QueryStream::new(ts.try_unfold());
+        let messages = self.connection.messages();
+        let mut result = QueryStream::new(self.connection.query_tokens()).with_messages(messages);
         result.forward_to_metadata().await?;
 
         Ok(result)

@@ -249,7 +249,7 @@ pub use tds::{
     },
     collation::Collation,
     numeric,
-    stream::{CommandReturnValue, CommandStream, QueryStream},
+    stream::{CommandReturnValue, CommandStream, DoneKind, QueryStream, StatementDone},
     time, xml, EncryptionLevel,
 };
 pub use to_sql::{IntoSql, ToSql};

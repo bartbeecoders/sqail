@@ -258,6 +258,7 @@ fn run_targets(rng: &mut Rng, s: &str) {
     for b in sqail_service::engine::split::split_go(s) {
         check(s.contains(b.sql.trim()), "GO batch comes from the script");
         check(b.repeat > 0, "GO count positive");
+        check(b.line >= 1, "GO batch lines are 1-based");
     }
     let _ = sqail_service::engine::split::shape(s);
 

@@ -62,3 +62,32 @@ Unit tests: `requested_attention_goes_out_on_the_next_read`,
   `Datetime4`/`Datetime` (`src/row.rs`). Upstream reports `Money` and
   `Datetimen`, so a nullable `smallmoney` or `smalldatetime` column looked
   like `money` or `datetime`.
+
+## 4. Messages, row counts and errors in order (#150)
+
+Upstream's `QueryStream` drops INFO tokens (`PRINT`, `RAISERROR` up to
+severity 10) and DONE row counts, and the token stream holds back the first
+ERROR until the response ends, so an error mid-batch surfaces after the
+result sets that followed it.
+
+* `Client::set_messages(true)` (flag on `Connection`, read in
+  `Connection::query_tokens`) makes the streams of `query`, `simple_query`
+  and `Query::query` yield three more `QueryItem` variants where the server
+  sent the tokens: `Message(TokenError)` (an INFO token, same fields),
+  `Error(TokenError)` and `Done(StatementDone)` (DONE, DONEINPROC or
+  DONEPROC: `kind`, `rows` when DONE_COUNT is set, `has_more`, `is_error`,
+  `is_attention`). Off by default; then nothing changes.
+* With it on, `TokenStream::with_messages` does not keep the first ERROR to
+  fail with at the end of the response, `forward_to_metadata` stops at those
+  tokens instead of skipping them, and `columns` fails on an ERROR instead of
+  skipping it. `into_results`/`into_row`/`into_first_result` still fail with
+  the first error (after reading the response) and `into_row_stream` fails
+  at it.
+* `QueryItem`'s accessors use wildcard arms; `StatementDone` and `DoneKind`
+  are re-exported from the crate root; `TokenDone` gains `count`,
+  `has_more` and `is_error`.
+
+Unit tests: `with_messages_infos_dones_and_errors_come_in_order`,
+`without_messages_only_results_come` and
+`with_messages_collecting_still_fails_with_the_first_error` in
+`src/tds/stream/query.rs`.

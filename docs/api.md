@@ -128,8 +128,18 @@ api $URL/v1/connections/$ID/query -d '{"sql": "SELECT id, name FROM customers; U
 
 * Order: `started`, then for each statement either `result_start` →
   `rows`\* → `result_end`, or `rows_affected`. `message` events (notices,
-  `PRINT`) may appear anywhere. The stream always ends with exactly one `done`,
-  and an `error` stops the script but is still followed by `done`.
+  `PRINT`) may appear anywhere, where the server sent them. The stream always
+  ends with exactly one `done`, and an `error` stops the script but is still
+  followed by `done`.
+* **SQL Server** reports server errors where they happen, as SSMS does: the
+  server decides whether the rest of the batch runs, and the next `GO` batch
+  runs after a failed one, so a stream can hold several `error` events with
+  results between them. Every statement reports its row count as
+  `rows_affected` (not with `SET NOCOUNT ON`; a `SELECT`'s count is its
+  `result_end`). `PRINT` and `RAISERROR` up to severity 10 are `message`
+  events with severity `info`. The `Line` in an error message counts from the
+  start of the script, or, with `Procedure <name>`, from the start of that
+  procedure.
 * Once the stream has started, the HTTP status is 200. Failures inside the
   script arrive as `error` events (`code`, `message` and `db_code`, which holds
   the SQLSTATE or SQL Server error number).

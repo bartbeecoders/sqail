@@ -50,6 +50,10 @@ pub enum DbError {
     Unsupported(String),
     #[error("internal error: {0}")]
     Internal(String),
+    /// The script failed, and its errors have been sent as `error` events
+    /// already (SQL Server goes on after an error, as SSMS does).
+    #[error("the script reported errors")]
+    Reported,
 }
 
 impl DbError {
@@ -68,6 +72,7 @@ impl DbError {
             DbError::Invalid(_) => "invalid_request",
             DbError::Unsupported(_) => "unsupported",
             DbError::Internal(_) => "internal",
+            DbError::Reported => "db_error",
         }
     }
 
@@ -128,6 +133,7 @@ pub struct ResultWriter<'a> {
     max_rows: u64,
     next_index: u32,
     current: Option<OpenResult>,
+    errors: bool,
 }
 
 struct OpenResult {
@@ -144,6 +150,7 @@ impl<'a> ResultWriter<'a> {
             max_rows,
             next_index: 0,
             current: None,
+            errors: false,
         }
     }
 
@@ -236,6 +243,19 @@ impl<'a> ResultWriter<'a> {
         self.sink.send(QueryEvent::RowsAffected { count }).await
     }
 
+    /// An error that does not end the script: SQL Server goes on with the
+    /// batch or the next one, and reports each error where it happens.
+    pub async fn error(&mut self, e: &DbError) -> Result<()> {
+        self.errors = true;
+        self.end().await?;
+        self.sink.send(e.to_event()).await
+    }
+
+    /// Whether [`error`](Self::error) was called.
+    pub fn reported_errors(&self) -> bool {
+        self.errors
+    }
+
     pub async fn message(&mut self, severity: &str, text: impl Into<String>) -> Result<()> {
         self.sink
             .send(QueryEvent::Message {
@@ -323,7 +343,11 @@ pub async fn fetch_results(
         max_rows: u64::MAX,
         single_statement: false,
     };
-    conn.execute(&req, &sink).await?;
+    match conn.execute(&req, &sink).await {
+        // The error is among the events.
+        Ok(()) | Err(DbError::Reported) => {}
+        Err(e) => return Err(e),
+    }
     let EventSink::Collect(buf) = sink else {
         unreachable!()
     };
@@ -363,7 +387,11 @@ pub async fn fetch_rows(
         max_rows: u64::MAX,
         single_statement: false,
     };
-    conn.execute(&req, &sink).await?;
+    match conn.execute(&req, &sink).await {
+        // The error is among the events.
+        Ok(()) | Err(DbError::Reported) => {}
+        Err(e) => return Err(e),
+    }
     let EventSink::Collect(buf) = sink else {
         unreachable!()
     };

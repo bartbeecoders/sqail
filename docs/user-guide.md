@@ -330,7 +330,12 @@ or XML plan.
   shown (`0x` alone is an empty value); sqail writes the bytes themselves,
   and refuses a value that isn't valid hex before anything is sent.
 * Messages (`RAISERROR`, `RAISE NOTICE`, `PRINT`) and row counts appear in the
-  *Messages* tab.
+  *Messages* tab, in the order the server sent them, between the results.
+  On SQL Server every statement reports its row count (unless
+  `SET NOCOUNT ON`), and, as in SSMS, an error does not stop a script with
+  `GO` batches: the next batch still runs. Error line numbers count from the
+  start of the script (inside a procedure, from the start of the procedure,
+  which the message names).
 
 ## Sidebar
 

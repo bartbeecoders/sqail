@@ -1848,6 +1848,66 @@ async fn mssql_stops_reading_at_max_rows() {
     assert_eq!(done(&ev).1, Some(false));
 }
 
+/// The first column of result set `index` holds a showplan.
+fn is_showplan(events: &[QueryEvent], index: u32) -> bool {
+    rows(events, index)
+        .first()
+        .and_then(|r| r.first())
+        .and_then(Value::as_str)
+        .is_some_and(|s| s.starts_with("<ShowPlanXML"))
+}
+
+/// With SHOWPLAN_XML on, the server answers the service's own probes
+/// (@@TRANCOUNT, @@OPTIONS) with a plan; that must not panic (#147).
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn mssql_showplan_xml_does_not_break_the_probes() {
+    let h = harness().await;
+    let c = profile(&h, &mssql(), false).await;
+    let path = format!("/v1/connections/{c}/query");
+    // pooled; a lone query also runs the Attention probe
+    for sql in [
+        "SET SHOWPLAN_XML ON\nGO\nselect 1 a",
+        "SET SHOWPLAN_XML ON\nGO\nselect 1 a; select 2 b",
+    ] {
+        let (ev, _) = timed(&h, &path, sql, json!([]), 100).await;
+        assert!(error(&ev).is_none(), "{ev:?}");
+        assert!(is_showplan(&ev, 0), "{ev:?}");
+        assert_eq!(done(&ev), (false, None), "{ev:?}");
+    }
+    assert!(h.get("/v1/health").await.status().is_success());
+
+    // a session keeps its connection and its transaction state
+    let s: SessionInfo = h
+        .post("/v1/sessions", &json!({"connection_id": c}), &h.admin)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let sp = format!("/v1/sessions/{}/query", s.id);
+    let (ev, _) = timed(&h, &sp, "BEGIN TRANSACTION", json!([]), 100).await;
+    assert_eq!(done(&ev).1, Some(true), "{ev:?}");
+    let (ev, _) = timed(&h, &sp, "SET SHOWPLAN_XML ON", json!([]), 100).await;
+    assert_eq!(done(&ev).1, Some(true), "{ev:?}");
+    for sql in ["select 1 a", "SELECT @@TRANCOUNT"] {
+        let (ev, _) = timed(&h, &sp, sql, json!([]), 100).await;
+        assert!(error(&ev).is_none(), "{ev:?}");
+        assert!(is_showplan(&ev, 0), "{ev:?}");
+        assert!(
+            !ev.iter()
+                .any(|e| matches!(e, QueryEvent::Message { severity, .. } if severity == "error")),
+            "{ev:?}"
+        );
+        assert_eq!(done(&ev).1, Some(true), "{ev:?}");
+    }
+    let (ev, _) = timed(&h, &sp, "SET SHOWPLAN_XML OFF", json!([]), 100).await;
+    assert_eq!(done(&ev).1, Some(true), "{ev:?}");
+    let (ev, _) = timed(&h, &sp, "SELECT @@TRANCOUNT", json!([]), 100).await;
+    assert_eq!(rows(&ev, 0), vec![vec![json!(1)]], "{ev:?}");
+    let (ev, _) = timed(&h, &sp, "ROLLBACK", json!([]), 100).await;
+    assert_eq!(done(&ev).1, Some(false), "{ev:?}");
+}
+
 #[tokio::test]
 #[ignore = "needs podman test databases (scripts/db.sh up)"]
 async fn postgres_types_and_notices() {

@@ -497,8 +497,16 @@ allowed to share with them.
 | `claude_model`, `grok_model` | the CLI's default | e.g. `"sonnet"` |
 | `max_rows` | `100` | Most rows one assistant query returns to the model |
 
-On Windows, sqail uses the native `grok.exe` behind npm's `grok.cmd`. If it
-can't find it, set `grok_path`.
+On Windows, sqail starts what npm's `.cmd` shims run (the native `grok.exe`
+behind `grok.cmd`; `node … cli.js` behind `claude.cmd`), so **Stop** ends
+the CLI itself. If it can't find them, set `grok_path` / `claude_path`.
+
+The CLI runs with sqail's context only: Claude Code without your own
+settings, hooks, plugins, skills, CLAUDE.md files or memory (your sign-in
+still works). Your question goes to Claude Code on stdin and to Grok in a
+file only you can read, not on the command line. **New chat** and quitting
+sqail delete the conversation, including the transcript the CLI keeps (see
+[security](security.md) for the details and what stays).
 
 **When a turn fails** the conversation shows why, in red:
 

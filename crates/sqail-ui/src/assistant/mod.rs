@@ -116,11 +116,11 @@ impl Assistant {
         self.running.is_some()
     }
 
-    /// Forget the conversation (and its CLI session folder).
+    /// Forget the conversation, with its folder and the CLI's transcript.
     pub fn new_chat(&mut self) {
         self.stop();
         if let Some(c) = self.conversation.take() {
-            let _ = std::fs::remove_dir_all(&c.workdir);
+            cli::remove_conversation_data(&c.workdir);
         }
         self.entries.clear();
     }
@@ -204,6 +204,20 @@ impl Assistant {
             }
         }
     }
+}
+
+/// Where conversations keep their private folders.
+fn conversations_dir() -> PathBuf {
+    crate::settings::config_dir().join("assistant")
+}
+
+/// Remove, in the background, conversations an earlier run left behind
+/// (conversations do not outlive sqail, but a crash skips the clean-up).
+pub fn sweep_stale_conversations() {
+    let root = conversations_dir();
+    std::thread::spawn(move || {
+        cli::sweep_stale(&root, std::time::Duration::from_secs(24 * 3600));
+    });
 }
 
 /// Instructions for the model: one line, so they survive any command line.
@@ -329,9 +343,7 @@ impl SqailApp {
                 connection: conn.id,
                 connection_name: conn.name.clone(),
                 engine: conn.engine,
-                workdir: crate::settings::config_dir()
-                    .join("assistant")
-                    .join(Uuid::new_v4().to_string()),
+                workdir: conversations_dir().join(Uuid::new_v4().to_string()),
                 session: None,
             });
         let (context, note) = editor_context(tab, conversation, settings.include_editor);

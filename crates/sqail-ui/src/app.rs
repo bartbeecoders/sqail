@@ -211,6 +211,7 @@ impl SqailApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::install(&cc.egui_ctx);
         let (settings, settings_error) = Settings::load();
+        crate::assistant::sweep_stale_conversations();
         let (snippets, snippets_error) = crate::local::Snippets::load();
         let theme_error = theme::apply(&cc.egui_ctx, settings.theme).err();
         // The UI scale is a setting; egui's own Ctrl+0 would bypass it.
@@ -2464,6 +2465,8 @@ impl eframe::App for SqailApp {
         // Don't leave sessions (and their transactions and locks) behind
         // until the service's idle timeout; don't hang the quit either.
         self.close_sessions(Duration::from_secs(2));
+        // Stop the assistant's CLI and remove its transcript.
+        self.assistant.new_chat();
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

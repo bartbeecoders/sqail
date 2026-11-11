@@ -55,7 +55,7 @@ sqail ──TLS 1.3 + bearer token (+ optional client cert)──▶ sqail-servi
 | Crashes on hostile input | Lexers, splitters, completer, formatter and the NDJSON decoder are fuzzed | `cargo run --profile fuzz -p sqail-fuzz -- <secs>` (10 min: 13.2M inputs, 0 crashes; one real bug found and fixed; 2 min in every nightly and release build) |
 | Abandoned transactions holding locks | A transaction left open outside a session is rolled back and reported; idle sessions close (rollback); the UI asks before closing a tab or quitting with one open | `open_transaction_outside_session_is_rolled_back`, UI test |
 | EXPLAIN ANALYZE changing data | Runs inside a transaction that is always rolled back | engine matrix (`sum(price)` unchanged) |
-| The AI assistant changing data, or doing more than read | The CLI runs with no built-in tools (Claude Code `--tools ""` + `--strict-mcp-config`; Grok `--tools search_tool,use_tool` + `--permission-mode dontAsk` + an allow list of sqail's tools, which also denies the user's other MCP servers). `run_query` accepts one `SELECT`/`WITH`/`VALUES` statement without writing, transaction-control, DDL or admin keywords, side-effect functions (bare, quoted or schema-qualified; `U&"…"` names are refused) or unterminated strings/comments; the service then refuses anything but a single statement (`single_statement`: Postgres parses it as a prepared statement, SQLite checks the prepared statement's tail, SQL Server is best effort); and it runs in a transaction that is always rolled back (`BEGIN READ ONLY` on Postgres). The service token reaches `sqail mcp` through the environment, never arguments or files | `assistant::guard` tests (adversarial inputs per engine), `adversarial_queries_on_*_change_nothing`, `single_statement_check`, `mcp_tools_on_sql_server` (a forced `INSERT` is rolled back), `postgres_assistant_transactions_are_read_only`, `assistant_panel_streams_an_answer_and_inserts_sql` |
+| The AI assistant changing data, or doing more than read | The CLI runs with no built-in tools (Claude Code `--tools ""` + `--strict-mcp-config` + `--setting-sources ""`; Grok `--tools search_tool,use_tool` + `--permission-mode dontAsk` + an allow list of sqail's tools, which also denies the user's other MCP servers). `run_query` accepts one `SELECT`/`WITH`/`VALUES` statement without writing, transaction-control, DDL or admin keywords, side-effect functions (bare, quoted or schema-qualified; `U&"…"` names are refused) or unterminated strings/comments; the service then refuses anything but a single statement (`single_statement`: Postgres parses it as a prepared statement, SQLite checks the prepared statement's tail, SQL Server is best effort); and it runs in a transaction that is always rolled back (`BEGIN READ ONLY` on Postgres). The service token reaches `sqail mcp` through the environment, never arguments or files | `assistant::guard` tests (adversarial inputs per engine), `adversarial_queries_on_*_change_nothing`, `single_statement_check`, `mcp_tools_on_sql_server` (a forced `INSERT` is rolled back), `postgres_assistant_transactions_are_read_only`, `assistant_panel_streams_an_answer_and_inserts_sql` |
 | Vulnerable or non-permissive dependencies | `cargo audit` and `cargo deny` (advisories, licences, sources) in the gate | `scripts/check.sh` |
 | Tampered or swapped downloads | Every release and nightly carries one `SHA256SUMS`, a GitHub build provenance attestation per file (signed through Sigstore by the workflow that built it) and CycloneDX SBOMs; the portal's `current.json` lists the same hashes | `gh attestation verify`, `sha256sum -c SHA256SUMS` (see below) |
 
@@ -119,6 +119,34 @@ the attestation is what catches a swapped one.
   replay), but an extension's function it doesn't know passes it, and a
   read-only transaction doesn't stop non-transactional effects. The
   low-privilege login is what closes that gap.
+
+* **What the assistant's CLI sees and keeps.** The question and the editor
+  SQL never go on the command line: Claude Code reads them from stdin, Grok
+  from `prompt.txt` (mode 0600) in the conversation's folder, removed after
+  the turn. The instructions (engine and connection name) are an argument
+  (`--append-system-prompt` / `--rules`). Each conversation has a private
+  folder `<config dir>/assistant/<uuid>` (mode 0700 on Linux). Claude Code
+  runs with `--setting-sources ""` and `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`:
+  none of the user's settings, hooks, plugins, skills, CLAUDE.md files or
+  auto-memory; sign-in, admin-managed policy settings and Claude Code's
+  built-in skills still apply. Grok still reads the user's own Grok
+  configuration; its `dontAsk` mode and allow list keep it to sqail's tools.
+  The CLIs store each conversation, including the query results they saw,
+  in their own data folder: `~/.claude/projects/<path of the folder>`
+  (or under `CLAUDE_CONFIG_DIR`) and `~/.grok/sessions/<path of the folder>`.
+  sqail removes that folder and its own on **New chat** and on exit, and at
+  start removes conversations not used for 24 hours (left by a crash). What
+  stays: a transcript left by a crash until the next start a day later, any
+  history the CLI keeps elsewhere (e.g. its own logs), and a transcript
+  written in the moment between **New chat** during a running turn and the
+  CLI stopping. A conversation folder older sqail versions left behind is
+  removed, but their CLI transcripts are not: on Linux, delete
+  `~/.claude/projects/*-sqail-assistant-*` and
+  `~/.grok/sessions/*sqail%2Fassistant%2F*` to clear those. On Windows,
+  **Stop** and **New chat** end the CLI's whole process tree with
+  `taskkill /T`, and an npm `claude.cmd` shim is started as `node cli.js`
+  (not `cmd.exe`); quitting sqail mid-turn may end only the CLI process
+  itself. The Windows behaviour is untested.
 
 * **SQL Server read-only profiles** use `ApplicationIntent=ReadOnly`, which is
   only enforced on availability-group secondaries. Use a login with read-only

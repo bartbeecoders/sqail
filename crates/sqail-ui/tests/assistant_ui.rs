@@ -233,4 +233,19 @@ fn assistant_panel_streams_an_answer_and_inserts_sql() {
         "{:?}",
         h.state().assistant.entries.last()
     );
+
+    // New chat removes the conversation's folder.
+    let workdir = h
+        .state()
+        .assistant
+        .conversation
+        .as_ref()
+        .unwrap()
+        .workdir
+        .clone();
+    assert!(workdir.exists());
+    h.get_by_label("New chat").click();
+    h.step();
+    assert!(h.state().assistant.conversation.is_none());
+    assert!(!workdir.exists());
 }

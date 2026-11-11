@@ -5,7 +5,8 @@
 //! (`QueryRequest::single_statement`), so a boundary this lexer misreads
 //! cannot smuggle in a second statement. The third is that every assistant
 //! query runs in a transaction that is always rolled back (read-only on
-//! Postgres), see [`super::mcp::ServiceBackend`]. None of them replaces a
+//! Postgres; on SQL Server with a lock timeout and an isolation level that
+//! takes no shared locks), see [`super::mcp::ServiceBackend`]. None of them replaces a
 //! low-privilege login for the assistant's connection (docs/security.md).
 
 use sqail_client::proto::Engine;
@@ -15,12 +16,19 @@ use crate::sql::lex::{Kind, Token, tokenize_checked};
 /// Statements the assistant may start with.
 const ALLOWED_FIRST: &[&str] = &["SELECT", "WITH", "VALUES", "TABLE", "SHOW"];
 
-/// Words refused anywhere outside strings, comments and quoted names: they
-/// write (data-modifying CTEs, `SELECT … INTO`, `FOR UPDATE`), reach outside
-/// the database, control the transaction, change the schema, the session or
-/// the server, or start another statement. Common column names such as
-/// `lock`, `release`, `load`, `start` or `comment` stay usable; the
-/// statements they begin need a statement separator, which is refused.
+/// Words refused anywhere outside strings, comments and quoted names, on
+/// every engine: they write (data-modifying CTEs, `SELECT … INTO`, `FOR
+/// UPDATE`), reach outside the database, control the transaction, change the
+/// schema or the session.
+///
+/// Statements that only change the server or run maintenance (`COPY`,
+/// `CALL`, `CLUSTER`, `VACUUM`, `PRAGMA`, `ATTACH`, `REFRESH`, `PREPARE`,
+/// `LISTEN`, …) are not listed: on PostgreSQL and SQLite a statement starts
+/// only at the beginning, which must be one of [`ALLOWED_FIRST`], or after a
+/// `;`, after which nothing may follow. So these words are refused where
+/// they can start a statement and stay usable as table and column names
+/// elsewhere. SQL Server, where statements need no separator, has its own
+/// list, [`FORBIDDEN_MSSQL`].
 const FORBIDDEN: &[&str] = &[
     // Writes and remote access.
     "INSERT",
@@ -35,15 +43,11 @@ const FORBIDDEN: &[&str] = &[
     "OPENROWSET",
     "OPENDATASOURCE",
     "OPENQUERY",
-    "GO",
     // Transaction control.
     "BEGIN",
     "COMMIT",
     "ROLLBACK",
-    "ABORT",
-    "SAVE",
     "SAVEPOINT",
-    "PREPARE",
     // Schema and permissions.
     "CREATE",
     "ALTER",
@@ -51,42 +55,31 @@ const FORBIDDEN: &[&str] = &[
     "TRUNCATE",
     "GRANT",
     "REVOKE",
-    "DENY",
-    // Session, server and maintenance.
+    // Session.
     "SET",
-    "RESET",
-    "DISCARD",
-    "USE",
     "DECLARE",
-    "KILL",
-    "SHUTDOWN",
-    "DBCC",
-    "BACKUP",
-    "RESTORE",
-    "WAITFOR",
-    "RECONFIGURE",
-    "CHECKPOINT",
-    "ATTACH",
-    "DETACH",
-    "PRAGMA",
-    "VACUUM",
-    "REINDEX",
-    "ANALYZE",
-    "ANALYSE",
-    "CLUSTER",
-    "REFRESH",
-    "COPY",
-    "CALL",
-    "DO",
-    "NOTIFY",
-    "LISTEN",
-    "UNLISTEN",
-    "IMPORT",
 ];
 
+/// PostgreSQL statement words that are reserved there, so never a bare
+/// name: refused anywhere at no cost.
+const FORBIDDEN_POSTGRES: &[&str] = &["ANALYZE", "ANALYSE", "DO"];
+
 /// T-SQL statements that need no separator: refused anywhere on SQL Server,
-/// where they are reserved words and so never a bare column name.
+/// where they are reserved words and so never a bare column name. (`GO` is
+/// not a word of T-SQL but a batch separator on a line of its own; it is
+/// refused there, see [`check_read_only`].)
 const FORBIDDEN_MSSQL: &[&str] = &[
+    "BACKUP",
+    "CHECKPOINT",
+    "DBCC",
+    "DENY",
+    "KILL",
+    "RECONFIGURE",
+    "RESTORE",
+    "SAVE",
+    "SHUTDOWN",
+    "USE",
+    "WAITFOR",
     "IF",
     "WHILE",
     "GOTO",
@@ -104,7 +97,114 @@ const FORBIDDEN_MSSQL: &[&str] = &[
     "READTEXT",
     "WRITETEXT",
     "UPDATETEXT",
+    "LINENO",
+    // `ADD SIGNATURE TO …`.
+    "ADD",
 ];
+
+/// SQL Server table hints that take or hold more than the briefest shared
+/// lock (`WITH (TABLOCKX)`, or the old `FROM t (HOLDLOCK)` form): one slow
+/// query could block every writer, or every reader, until the rollback.
+const LOCKING_HINTS_MSSQL: &[&str] = &[
+    "HOLDLOCK",
+    "PAGLOCK",
+    "READCOMMITTEDLOCK",
+    "REPEATABLEREAD",
+    "ROWLOCK",
+    "SERIALIZABLE",
+    "TABLOCK",
+    "TABLOCKX",
+    "UPDLOCK",
+    "XLOCK",
+];
+
+/// Words that may follow a column or alias in a query: after one of these a
+/// non-reserved T-SQL statement word such as `RECEIVE` is a name.
+const CLAUSE_WORDS_MSSQL: &[&str] = &[
+    "AND",
+    "AS",
+    "CROSS",
+    "ELSE",
+    "END",
+    "EXCEPT",
+    "FOR",
+    "FROM",
+    "FULL",
+    "GROUP",
+    "HAVING",
+    "IN",
+    "INNER",
+    "INTERSECT",
+    "IS",
+    "JOIN",
+    "LEFT",
+    "LIKE",
+    "NOT",
+    "ON",
+    "OPTION",
+    "OR",
+    "ORDER",
+    "OUTER",
+    "RIGHT",
+    "THEN",
+    "UNION",
+    "WHEN",
+    "WHERE",
+    "WITH",
+];
+
+/// A T-SQL statement that SQL Server starts without a separator, hidden
+/// behind words that are not reserved (or not only statement words) and so
+/// cannot be refused everywhere: `END` outside `CASE … END`, `FETCH` outside
+/// `OFFSET … ROWS FETCH`, `DISABLE`/`ENABLE TRIGGER`, `SEND ON`,
+/// `MOVE`/`GET CONVERSATION` and `RECEIVE` followed by what it reads.
+/// `tokens` holds no spaces or comments; `upper` is a token uppercased.
+fn hidden_mssql_statement(tokens: &[Token], upper: impl Fn(&Token) -> String) -> Option<String> {
+    let word_at = |i: usize| {
+        tokens
+            .get(i)
+            .filter(|t| t.kind == Kind::Word)
+            .map(&upper)
+            .unwrap_or_default()
+    };
+    let mut cases = 0usize;
+    for (i, t) in tokens.iter().enumerate() {
+        if t.kind != Kind::Word {
+            continue;
+        }
+        let w = upper(t);
+        let prev = if i > 0 { word_at(i - 1) } else { String::new() };
+        let next = word_at(i + 1);
+        let hidden = match w.as_str() {
+            "CASE" => {
+                cases += 1;
+                false
+            }
+            "END" => match cases.checked_sub(1) {
+                Some(n) => {
+                    cases = n;
+                    false
+                }
+                None => true,
+            },
+            "FETCH" => !matches!(prev.as_str(), "ROW" | "ROWS"),
+            "DISABLE" | "ENABLE" => next == "TRIGGER",
+            "SEND" => next == "ON" && word_at(i + 2) == "CONVERSATION",
+            "MOVE" | "GET" => next == "CONVERSATION",
+            "RECEIVE" => match tokens.get(i + 1) {
+                Some(n) if n.kind == Kind::Punct => upper(n) == "*",
+                Some(n) if n.kind == Kind::Word => !CLAUSE_WORDS_MSSQL.contains(&next.as_str()),
+                Some(n) => n.kind == Kind::QuotedIdent,
+                None => false,
+            },
+            _ => false,
+        };
+        if hidden {
+            return Some(w);
+        }
+    }
+    None
+}
 
 /// Functions with side effects, or that read files on the server. A
 /// read-only transaction does not stop most of these: they signal other
@@ -258,12 +358,34 @@ pub fn check_read_only(sql: &str, engine: Engine) -> Result<(), String> {
         let name = match t.kind {
             Kind::Word => {
                 let w = word(t);
-                if FORBIDDEN.contains(&w.as_str())
-                    || (mssql && FORBIDDEN_MSSQL.contains(&w.as_str()))
-                {
+                let reserved = match engine {
+                    Engine::Mssql => FORBIDDEN_MSSQL,
+                    Engine::Postgres => FORBIDDEN_POSTGRES,
+                    _ => &[],
+                };
+                // `GO` alone at the start of a line ends the batch.
+                let go = mssql
+                    && w == "GO"
+                    && sql[..t.range.start]
+                        .rsplit('\n')
+                        .next()
+                        .is_some_and(|line| line.trim().is_empty());
+                if FORBIDDEN.contains(&w.as_str()) || reserved.contains(&w.as_str()) || go {
+                    return Err(format!("{w} is not allowed in a read-only query"));
+                }
+                if mssql && LOCKING_HINTS_MSSQL.contains(&w.as_str()) {
                     return Err(format!(
-                        "{w} is not allowed: the assistant may only read data"
+                        "the {w} hint is not allowed: the assistant's queries must not hold locks"
                     ));
+                }
+                // `NEXT VALUE FOR seq` advances the sequence, and the
+                // rollback does not undo that.
+                if mssql
+                    && w == "NEXT"
+                    && tokens.get(i + 1).is_some_and(|n| word(n) == "VALUE")
+                    && tokens.get(i + 2).is_some_and(|n| word(n) == "FOR")
+                {
+                    return Err("NEXT VALUE FOR is not allowed: it advances a sequence".into());
                 }
                 w.to_ascii_lowercase()
             }
@@ -300,6 +422,11 @@ pub fn check_read_only(sql: &str, engine: Engine) -> Result<(), String> {
     // T-SQL needs no `;` between statements: a second top-level SELECT that
     // does not follow a set operator starts a new one.
     if mssql {
+        if let Some(w) = hidden_mssql_statement(&tokens, word) {
+            return Err(format!(
+                "{w} here would start another statement: run one read-only statement"
+            ));
+        }
         let mut depth = 0i32;
         let mut selects = 0;
         let mut prev: Option<String> = None;
@@ -361,6 +488,14 @@ mod tests {
         ok("SELECT \"update\" FROM \"insert\"");
         ok("SELECT replace(name, 'a', 'b'), coalesce(x, 0) FROM t");
         ok("SELECT lock, release, load, status FROM jobs");
+        // Statement words that are ordinary names where no statement can
+        // start (#185).
+        ok("SELECT cluster, call, copy, refresh, import, prepare FROM t");
+        ok("SELECT * FROM copy c JOIN call ON call.id = c.call_id");
+        ok("SELECT reset, discard, listen, notify, abort FROM t WHERE cluster = 1");
+        ok("SELECT vacuum, pragma, attach, detach, reindex FROM maintenance");
+        ok("SELECT go FROM t");
+        ok("SELECT a, go, b FROM t ORDER BY go");
     }
 
     #[test]
@@ -400,7 +535,6 @@ mod tests {
                 "SELECT 1 ROLLBACK",
                 "SELECT 1 FROM t WHERE 1 = 1 COMMIT TRANSACTION",
                 "SELECT 1 BEGIN TRAN",
-                "SELECT 1 SAVE TRANSACTION x",
                 "SELECT 1 DROP TABLE t",
                 "SELECT 1 CREATE TABLE t (a int)",
                 "SELECT 1 ALTER TABLE t ADD b int",
@@ -408,11 +542,10 @@ mod tests {
                 "SELECT 1 GRANT SELECT ON t TO public",
                 "SELECT 1 DECLARE @x int",
                 "SELECT 1 SET x = 1",
-                "SELECT 1 USE master",
-                "SELECT 1 WAITFOR DELAY '00:00:10'",
-                "SELECT 1 ATTACH DATABASE 'x' AS y",
-                "SELECT 1 VACUUM",
-                "SELECT 1 COPY t TO STDOUT",
+                "SELECT 1; VACUUM",
+                "COPY t TO STDOUT",
+                "CALL p()",
+                "SELECT 1; CLUSTER t",
                 "WITH x AS (SELECT 1) SELECT * FROM x ROLLBACK",
                 "SELECT 1 /* x */ COMMIT -- y",
             ] {
@@ -513,6 +646,16 @@ mod tests {
         assert_eq!(check_read_only("SELECT a$b FROM t", pg), Ok(()));
         assert_eq!(check_read_only("TABLE sales.orders", pg), Ok(()));
         assert_eq!(check_read_only("SHOW search_path", pg), Ok(()));
+        // Not reserved in PostgreSQL: usable as names (#185).
+        for sql in [
+            "SELECT * FROM backup",
+            "SELECT use, deny, save, kill, dbcc, checkpoint FROM t",
+            "SELECT b.restore, b.waitfor FROM backup b",
+        ] {
+            assert_eq!(check_read_only(sql, pg), Ok(()), "{sql}");
+        }
+        rejected("SELECT 1 ANALYZE", pg);
+        rejected("SELECT do FROM t", pg);
     }
 
     #[test]
@@ -543,11 +686,47 @@ mod tests {
         rejected("SELECT 1 SHUTDOWN", ms);
         rejected("SELECT 1 BACKUP DATABASE d TO DISK = 'x'", ms);
         rejected("SELECT 1 DENY SELECT ON t TO u", ms);
+        rejected("SELECT 1 SAVE TRANSACTION x", ms);
+        rejected("SELECT 1 USE master", ms);
+        rejected("SELECT 1 WAITFOR DELAY '00:00:10'", ms);
+        rejected("SELECT 1 CHECKPOINT", ms);
+        rejected("SELECT 1\n  go  \nSELECT 2", ms);
+        rejected("SELECT 1\r\nGO\r\n", ms);
         rejected("SELECT 1\nGO 2\nSELECT 2", ms);
         rejected("SELECT 'a''' COMMIT", ms);
         rejected("SELECT [a]]] COMMIT", ms);
         rejected("SELECT N'x' ROLLBACK", ms);
         rejected("SELECT 1 /* /* */ */ COMMIT", ms);
+        // Locking hints and sequences: a rollback undoes neither the wait
+        // nor the sequence step.
+        for sql in [
+            "SELECT * FROM dbo.orders WITH (TABLOCKX, HOLDLOCK)",
+            "SELECT * FROM t WITH (XLOCK)",
+            "SELECT * FROM t WITH (updlock, rowlock)",
+            "SELECT * FROM t WITH (PAGLOCK)",
+            "SELECT * FROM t WITH (SERIALIZABLE)",
+            "SELECT * FROM t (TABLOCK)",
+            "SELECT * FROM t WITH (REPEATABLEREAD)",
+            "SELECT * FROM t OPTION (TABLE HINT(t, READCOMMITTEDLOCK))",
+            "SELECT NEXT VALUE FOR dbo.seq",
+            "SELECT next  value /* x */ for dbo.seq",
+            // Statements that need no separator and no reserved word.
+            "SELECT 1 DISABLE TRIGGER ALL ON dbo.orders",
+            "SELECT 1 ENABLE TRIGGER t ON dbo.orders",
+            "SELECT 1 END CONVERSATION @h",
+            "SELECT CASE WHEN 1 = 1 THEN 1 END END",
+            "SELECT 1 FETCH NEXT FROM c",
+            "SELECT 1 RECEIVE * FROM q",
+            "SELECT 1 RECEIVE TOP (1) message_body FROM q",
+            "SELECT 1 RECEIVE [message_body] FROM q",
+            "SELECT 1 SEND ON CONVERSATION @h",
+            "SELECT 1 MOVE CONVERSATION @h TO @g",
+            "SELECT 1 GET CONVERSATION GROUP @g FROM q",
+            "SELECT 1 LINENO 5",
+            "SELECT 1 ADD SIGNATURE TO p BY CERTIFICATE c",
+        ] {
+            rejected(sql, ms);
+        }
         for sql in [
             "SELECT 1 UNION SELECT 2",
             "SELECT 1 UNION ALL SELECT 2 EXCEPT SELECT 3 INTERSECT SELECT 4",
@@ -556,6 +735,11 @@ mod tests {
             "SELECT TOP 5 WITH TIES * FROM t WITH (NOLOCK) ORDER BY a",
             "SELECT a FROM t ORDER BY a OFFSET 0 ROWS FETCH NEXT 5 ROWS ONLY",
             "SELECT IIF(a > 1, 'x', 'y') FROM t",
+            "SELECT * FROM t WITH (NOLOCK, INDEX(ix_a))",
+            "SELECT CASE WHEN a = 1 THEN CASE b WHEN 2 THEN 'x' END END AS c FROM t",
+            "SELECT receive, send, [get], enable FROM t WHERE receive > 1",
+            "SELECT a AS receive FROM t ORDER BY receive",
+            "SELECT next_value, [value] FROM t",
         ] {
             assert_eq!(check_read_only(sql, ms), Ok(()), "{sql}");
         }
@@ -570,9 +754,10 @@ mod tests {
         // No backslash escapes in SQLite strings.
         rejected(r"SELECT 'a\'; DELETE FROM t; SELECT '", lite);
         rejected(r"SELECT E'a\'; COMMIT; SELECT '", lite);
-        rejected("SELECT 1 DETACH DATABASE x", lite);
-        rejected("SELECT 1 REINDEX", lite);
-        rejected("SELECT 1 ANALYZE", lite);
+        rejected("DETACH DATABASE x", lite);
+        rejected("SELECT 1; REINDEX", lite);
+        rejected("ANALYZE", lite);
+        rejected("ATTACH DATABASE 'x' AS y", lite);
         // SQLite resolves quoted function names, in any case.
         rejected(r#"SELECT "load_extension"('x')"#, lite);
         rejected("SELECT `Load_Extension`('x')", lite);
@@ -590,5 +775,11 @@ mod tests {
         );
         assert_eq!(check_read_only("SELECT [a b] FROM `t`", lite), Ok(()));
         assert_eq!(check_read_only("SELECT iif(a, 1, 2) FROM t", lite), Ok(()));
+        for sql in [
+            "SELECT * FROM backup",
+            "SELECT analyze, do, use, deny FROM t",
+        ] {
+            assert_eq!(check_read_only(sql, lite), Ok(()), "{sql}");
+        }
     }
 }

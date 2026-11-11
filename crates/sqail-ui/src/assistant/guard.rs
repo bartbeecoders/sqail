@@ -16,12 +16,19 @@ use crate::sql::lex::{Kind, Token, tokenize_checked};
 /// Statements the assistant may start with.
 const ALLOWED_FIRST: &[&str] = &["SELECT", "WITH", "VALUES", "TABLE", "SHOW"];
 
-/// Words refused anywhere outside strings, comments and quoted names: they
-/// write (data-modifying CTEs, `SELECT … INTO`, `FOR UPDATE`), reach outside
-/// the database, control the transaction, change the schema, the session or
-/// the server, or start another statement. Common column names such as
-/// `lock`, `release`, `load`, `start` or `comment` stay usable; the
-/// statements they begin need a statement separator, which is refused.
+/// Words refused anywhere outside strings, comments and quoted names, on
+/// every engine: they write (data-modifying CTEs, `SELECT … INTO`, `FOR
+/// UPDATE`), reach outside the database, control the transaction, change the
+/// schema or the session.
+///
+/// Statements that only change the server or run maintenance (`COPY`,
+/// `CALL`, `CLUSTER`, `VACUUM`, `PRAGMA`, `ATTACH`, `REFRESH`, `PREPARE`,
+/// `LISTEN`, …) are not listed: on PostgreSQL and SQLite a statement starts
+/// only at the beginning, which must be one of [`ALLOWED_FIRST`], or after a
+/// `;`, after which nothing may follow. So these words are refused where
+/// they can start a statement and stay usable as table and column names
+/// elsewhere. SQL Server, where statements need no separator, has its own
+/// list, [`FORBIDDEN_MSSQL`].
 const FORBIDDEN: &[&str] = &[
     // Writes and remote access.
     "INSERT",
@@ -36,15 +43,11 @@ const FORBIDDEN: &[&str] = &[
     "OPENROWSET",
     "OPENDATASOURCE",
     "OPENQUERY",
-    "GO",
     // Transaction control.
     "BEGIN",
     "COMMIT",
     "ROLLBACK",
-    "ABORT",
-    "SAVE",
     "SAVEPOINT",
-    "PREPARE",
     // Schema and permissions.
     "CREATE",
     "ALTER",
@@ -52,42 +55,31 @@ const FORBIDDEN: &[&str] = &[
     "TRUNCATE",
     "GRANT",
     "REVOKE",
-    "DENY",
-    // Session, server and maintenance.
+    // Session.
     "SET",
-    "RESET",
-    "DISCARD",
-    "USE",
     "DECLARE",
-    "KILL",
-    "SHUTDOWN",
-    "DBCC",
-    "BACKUP",
-    "RESTORE",
-    "WAITFOR",
-    "RECONFIGURE",
-    "CHECKPOINT",
-    "ATTACH",
-    "DETACH",
-    "PRAGMA",
-    "VACUUM",
-    "REINDEX",
-    "ANALYZE",
-    "ANALYSE",
-    "CLUSTER",
-    "REFRESH",
-    "COPY",
-    "CALL",
-    "DO",
-    "NOTIFY",
-    "LISTEN",
-    "UNLISTEN",
-    "IMPORT",
 ];
 
+/// PostgreSQL statement words that are reserved there, so never a bare
+/// name: refused anywhere at no cost.
+const FORBIDDEN_POSTGRES: &[&str] = &["ANALYZE", "ANALYSE", "DO"];
+
 /// T-SQL statements that need no separator: refused anywhere on SQL Server,
-/// where they are reserved words and so never a bare column name.
+/// where they are reserved words and so never a bare column name. (`GO` is
+/// not a word of T-SQL but a batch separator on a line of its own; it is
+/// refused there, see [`check_read_only`].)
 const FORBIDDEN_MSSQL: &[&str] = &[
+    "BACKUP",
+    "CHECKPOINT",
+    "DBCC",
+    "DENY",
+    "KILL",
+    "RECONFIGURE",
+    "RESTORE",
+    "SAVE",
+    "SHUTDOWN",
+    "USE",
+    "WAITFOR",
     "IF",
     "WHILE",
     "GOTO",
@@ -366,12 +358,20 @@ pub fn check_read_only(sql: &str, engine: Engine) -> Result<(), String> {
         let name = match t.kind {
             Kind::Word => {
                 let w = word(t);
-                if FORBIDDEN.contains(&w.as_str())
-                    || (mssql && FORBIDDEN_MSSQL.contains(&w.as_str()))
-                {
-                    return Err(format!(
-                        "{w} is not allowed: the assistant may only read data"
-                    ));
+                let reserved = match engine {
+                    Engine::Mssql => FORBIDDEN_MSSQL,
+                    Engine::Postgres => FORBIDDEN_POSTGRES,
+                    _ => &[],
+                };
+                // `GO` alone at the start of a line ends the batch.
+                let go = mssql
+                    && w == "GO"
+                    && sql[..t.range.start]
+                        .rsplit('\n')
+                        .next()
+                        .is_some_and(|line| line.trim().is_empty());
+                if FORBIDDEN.contains(&w.as_str()) || reserved.contains(&w.as_str()) || go {
+                    return Err(format!("{w} is not allowed in a read-only query"));
                 }
                 if mssql && LOCKING_HINTS_MSSQL.contains(&w.as_str()) {
                     return Err(format!(
@@ -488,6 +488,14 @@ mod tests {
         ok("SELECT \"update\" FROM \"insert\"");
         ok("SELECT replace(name, 'a', 'b'), coalesce(x, 0) FROM t");
         ok("SELECT lock, release, load, status FROM jobs");
+        // Statement words that are ordinary names where no statement can
+        // start (#185).
+        ok("SELECT cluster, call, copy, refresh, import, prepare FROM t");
+        ok("SELECT * FROM copy c JOIN call ON call.id = c.call_id");
+        ok("SELECT reset, discard, listen, notify, abort FROM t WHERE cluster = 1");
+        ok("SELECT vacuum, pragma, attach, detach, reindex FROM maintenance");
+        ok("SELECT go FROM t");
+        ok("SELECT a, go, b FROM t ORDER BY go");
     }
 
     #[test]
@@ -527,7 +535,6 @@ mod tests {
                 "SELECT 1 ROLLBACK",
                 "SELECT 1 FROM t WHERE 1 = 1 COMMIT TRANSACTION",
                 "SELECT 1 BEGIN TRAN",
-                "SELECT 1 SAVE TRANSACTION x",
                 "SELECT 1 DROP TABLE t",
                 "SELECT 1 CREATE TABLE t (a int)",
                 "SELECT 1 ALTER TABLE t ADD b int",
@@ -535,11 +542,10 @@ mod tests {
                 "SELECT 1 GRANT SELECT ON t TO public",
                 "SELECT 1 DECLARE @x int",
                 "SELECT 1 SET x = 1",
-                "SELECT 1 USE master",
-                "SELECT 1 WAITFOR DELAY '00:00:10'",
-                "SELECT 1 ATTACH DATABASE 'x' AS y",
-                "SELECT 1 VACUUM",
-                "SELECT 1 COPY t TO STDOUT",
+                "SELECT 1; VACUUM",
+                "COPY t TO STDOUT",
+                "CALL p()",
+                "SELECT 1; CLUSTER t",
                 "WITH x AS (SELECT 1) SELECT * FROM x ROLLBACK",
                 "SELECT 1 /* x */ COMMIT -- y",
             ] {
@@ -640,6 +646,16 @@ mod tests {
         assert_eq!(check_read_only("SELECT a$b FROM t", pg), Ok(()));
         assert_eq!(check_read_only("TABLE sales.orders", pg), Ok(()));
         assert_eq!(check_read_only("SHOW search_path", pg), Ok(()));
+        // Not reserved in PostgreSQL: usable as names (#185).
+        for sql in [
+            "SELECT * FROM backup",
+            "SELECT use, deny, save, kill, dbcc, checkpoint FROM t",
+            "SELECT b.restore, b.waitfor FROM backup b",
+        ] {
+            assert_eq!(check_read_only(sql, pg), Ok(()), "{sql}");
+        }
+        rejected("SELECT 1 ANALYZE", pg);
+        rejected("SELECT do FROM t", pg);
     }
 
     #[test]
@@ -670,6 +686,12 @@ mod tests {
         rejected("SELECT 1 SHUTDOWN", ms);
         rejected("SELECT 1 BACKUP DATABASE d TO DISK = 'x'", ms);
         rejected("SELECT 1 DENY SELECT ON t TO u", ms);
+        rejected("SELECT 1 SAVE TRANSACTION x", ms);
+        rejected("SELECT 1 USE master", ms);
+        rejected("SELECT 1 WAITFOR DELAY '00:00:10'", ms);
+        rejected("SELECT 1 CHECKPOINT", ms);
+        rejected("SELECT 1\n  go  \nSELECT 2", ms);
+        rejected("SELECT 1\r\nGO\r\n", ms);
         rejected("SELECT 1\nGO 2\nSELECT 2", ms);
         rejected("SELECT 'a''' COMMIT", ms);
         rejected("SELECT [a]]] COMMIT", ms);
@@ -732,9 +754,10 @@ mod tests {
         // No backslash escapes in SQLite strings.
         rejected(r"SELECT 'a\'; DELETE FROM t; SELECT '", lite);
         rejected(r"SELECT E'a\'; COMMIT; SELECT '", lite);
-        rejected("SELECT 1 DETACH DATABASE x", lite);
-        rejected("SELECT 1 REINDEX", lite);
-        rejected("SELECT 1 ANALYZE", lite);
+        rejected("DETACH DATABASE x", lite);
+        rejected("SELECT 1; REINDEX", lite);
+        rejected("ANALYZE", lite);
+        rejected("ATTACH DATABASE 'x' AS y", lite);
         // SQLite resolves quoted function names, in any case.
         rejected(r#"SELECT "load_extension"('x')"#, lite);
         rejected("SELECT `Load_Extension`('x')", lite);
@@ -752,5 +775,11 @@ mod tests {
         );
         assert_eq!(check_read_only("SELECT [a b] FROM `t`", lite), Ok(()));
         assert_eq!(check_read_only("SELECT iif(a, 1, 2) FROM t", lite), Ok(()));
+        for sql in [
+            "SELECT * FROM backup",
+            "SELECT analyze, do, use, deny FROM t",
+        ] {
+            assert_eq!(check_read_only(sql, lite), Ok(()), "{sql}");
+        }
     }
 }

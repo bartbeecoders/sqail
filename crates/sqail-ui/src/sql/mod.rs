@@ -1,6 +1,7 @@
 //! SQL text helpers for the editor: lexing, highlighting, statement bounds.
 
 pub mod complete;
+pub mod ddl;
 pub mod drop;
 pub mod format;
 pub mod highlight;

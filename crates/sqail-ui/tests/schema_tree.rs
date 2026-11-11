@@ -7,20 +7,36 @@ use std::time::{Duration, Instant};
 
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
+use sqail_client::proto::QueryRequest;
 use sqail_client::proto::{
     ColumnInfo, Connection, ConnectionInput, ConnectionParams, NamedItem, RoutineInfo, RoutineKind,
     SqliteParams, TableInfo, TableKind,
 };
-use sqail_client::{Client, Target, Trust};
+use sqail_client::{Client, On, Target, Trust};
 use sqail_ui::SqailApp;
 use sqail_ui::app::ServiceStatus;
 use sqail_ui::schema::{SchemaData, SchemaKey, SchemaMsg};
 use sqail_ui::settings::{ServiceProfile, Settings};
 
 struct Env {
-    _rt: tokio::runtime::Runtime,
+    rt: tokio::runtime::Runtime,
     _dir: tempfile::TempDir,
     _server: sqail_service::Server,
+    /// A client of the service, to change the database behind the UI's back.
+    client: Client,
+    /// The SQLite connection "small db".
+    small: uuid::Uuid,
+}
+
+impl Env {
+    fn exec(&self, sql: &str) {
+        self.rt
+            .block_on(
+                self.client
+                    .query_all(On::Connection(self.small), &QueryRequest::new(sql)),
+            )
+            .unwrap();
+    }
 }
 
 fn env() -> Env {
@@ -44,7 +60,7 @@ fn env() -> Env {
         identity: None,
     })
     .unwrap();
-    rt.block_on(async {
+    let small = rt.block_on(async {
         client
             .create_connection(&ConnectionInput {
                 name: "small db".into(),
@@ -60,7 +76,8 @@ fn env() -> Env {
                 folder: None,
             })
             .await
-            .unwrap();
+            .unwrap()
+            .id
     });
     sqail_ui::settings::override_config_dir(dir.path().join("ui"));
     sqail_ui::secrets::force_file_store();
@@ -76,9 +93,11 @@ fn env() -> Env {
     settings.save();
     sqail_ui::secrets::save_token(&url, &token).unwrap();
     Env {
-        _rt: rt,
+        rt,
         _dir: dir,
         _server: server,
+        client,
+        small,
     }
 }
 
@@ -338,4 +357,109 @@ fn filter_loads_tables_in_one_request() {
     h.get_by_label("⊞ orders");
     assert!(h.query_by_label("s9").is_none());
     assert!(h.query_by_label("s0").is_none());
+}
+
+/// Step until `label` is shown.
+fn wait_label(h: &mut Harness<'_, SqailApp>, label: &str) {
+    let start = Instant::now();
+    while h.query_by_label(label).is_none() {
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "timed out waiting for {label}"
+        );
+        h.step();
+        std::thread::sleep(Duration::from_millis(15));
+    }
+}
+
+/// Run `sql` in tab `idx` and wait for it to finish.
+fn run(h: &mut Harness<'_, SqailApp>, idx: usize, sql: &str) {
+    h.state_mut().run_sql(idx, sql.into());
+    let start = Instant::now();
+    while h.state().tabs[idx].run.as_ref().is_none_or(|r| r.running) {
+        assert!(start.elapsed() < Duration::from_secs(20), "run {sql}");
+        h.step();
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    h.run_steps(3);
+}
+
+fn right_click(h: &mut Harness<'_, SqailApp>, label: &str) {
+    h.get_by_label(label).click_secondary();
+    h.run_steps(3);
+}
+
+/// DDL run in a query tab reloads the tree (in a transaction: once it ends);
+/// other SQL leaves the cache alone.
+#[test]
+fn ddl_in_the_editor_refreshes_the_tree() {
+    let e = env();
+    e.exec("CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT)");
+    let mut h = app();
+    h.get_by_label("small db").click();
+    wait_label(&mut h, "⊞ people");
+    let idx = h.state_mut().new_tab(Some(e.small));
+    h.run_steps(2);
+
+    run(&mut h, idx, "SELECT * FROM people");
+    assert!(
+        h.state()
+            .schema
+            .cached_keys(e.small)
+            .contains(&SchemaKey::Tables("main".into())),
+        "a SELECT keeps the cache"
+    );
+
+    run(&mut h, idx, "CREATE TABLE pets (id INTEGER PRIMARY KEY)");
+    wait_label(&mut h, "⊞ pets");
+
+    // Manual commit: reloaded when the transaction ends.
+    h.state_mut().tabs[idx].autocommit = false;
+    run(&mut h, idx, "DROP TABLE pets");
+    assert!(h.state().tabs[idx].in_transaction);
+    h.run_steps(4);
+    assert!(
+        h.query_by_label("⊞ pets").is_some(),
+        "not reloaded inside the transaction"
+    );
+    run(&mut h, idx, "COMMIT");
+    assert!(!h.state().tabs[idx].in_transaction);
+    let start = Instant::now();
+    while h.query_by_label("⊞ pets").is_some() {
+        assert!(start.elapsed() < Duration::from_secs(20), "pets dropped");
+        h.step();
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    wait_label(&mut h, "⊞ people");
+}
+
+/// "Refresh" on a schema group and on a table reloads just that part.
+#[test]
+fn refresh_a_schema_or_a_table() {
+    let e = env();
+    e.exec("CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT)");
+    let mut h = app();
+    h.get_by_label("small db").click();
+    wait_label(&mut h, "⊞ people");
+    h.get_by_label("⊞ people").click();
+    wait_label(&mut h, "name");
+
+    // Changed behind the UI's back: the cached tree doesn't know yet.
+    e.exec("CREATE TABLE pets (id INTEGER PRIMARY KEY); ALTER TABLE people ADD COLUMN born TEXT");
+    h.run_steps(4);
+    assert!(h.query_by_label("⊞ pets").is_none());
+    assert!(h.query_by_label("born").is_none());
+
+    right_click(&mut h, "⊞ people");
+    h.get_by_label("Refresh").click();
+    wait_label(&mut h, "born");
+    assert!(
+        h.query_by_label("⊞ pets").is_none(),
+        "a table's refresh keeps the table list"
+    );
+
+    right_click(&mut h, "Tables (1)");
+    h.get_by_label("Refresh").click();
+    wait_label(&mut h, "⊞ pets");
+    h.get_by_label("Tables (2)");
 }

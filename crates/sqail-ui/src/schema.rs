@@ -221,6 +221,9 @@ pub struct SchemaTree {
     /// The tables drawn open, per (connection, schema): these are drawn even
     /// when off screen, being taller than a row.
     open_tables: HashMap<(Uuid, String), HashSet<String>>,
+    /// Tabs that ran schema-changing SQL inside a transaction still open,
+    /// and their connection: its tree is reloaded when the transaction ends.
+    ddl_pending: HashMap<u64, Uuid>,
 }
 
 impl SchemaTree {
@@ -287,6 +290,35 @@ impl SchemaTree {
         self.revision += 1;
         self.data.remove(&conn);
         self.views.remove(&conn);
+    }
+
+    /// Forget what is cached about one schema: its tables, routines and
+    /// their details.
+    pub fn invalidate_schema(&mut self, conn: Uuid, schema: &str) {
+        self.revision += 1;
+        if let Some(m) = self.data.get_mut(&conn) {
+            m.retain(|k, _| match k {
+                SchemaKey::Tables(s) | SchemaKey::Routines(s) => s != schema,
+                SchemaKey::Columns(s, _)
+                | SchemaKey::Indexes(s, _)
+                | SchemaKey::ForeignKeys(s, _) => s != schema,
+                _ => true,
+            });
+        }
+    }
+
+    /// Forget one table's columns, indexes and foreign keys (not the
+    /// schema's table list).
+    pub fn invalidate_table_details(&mut self, conn: Uuid, schema: &str, table: &str) {
+        self.revision += 1;
+        if let Some(m) = self.data.get_mut(&conn) {
+            m.retain(|k, _| match k {
+                SchemaKey::Columns(s, t)
+                | SchemaKey::Indexes(s, t)
+                | SchemaKey::ForeignKeys(s, t) => !(s == schema && t == table),
+                _ => true,
+            });
+        }
     }
 
     /// The keys cached (loaded, loading or failed) for `conn`.
@@ -485,6 +517,15 @@ enum Action {
     Delete(Uuid, String),
     Test(Uuid),
     Refresh(Uuid),
+    RefreshSchema {
+        conn: Uuid,
+        schema: String,
+    },
+    RefreshTable {
+        conn: Uuid,
+        schema: String,
+        table: String,
+    },
     SelectTop {
         conn: Uuid,
         schema: String,
@@ -879,7 +920,9 @@ fn connection_node(
                     .open(open)
                     .show(ui, |ui| {
                         schema_children(ui, &mut t, client, id, c.engine, &schema, filter, actions)
-                    });
+                    })
+                    .header_response
+                    .context_menu(|ui| refresh_schema_item(ui, id, &schema, actions));
             }
         });
     header.header_response.clone().on_hover_text(format!(
@@ -1069,17 +1112,16 @@ fn schema_children(
                 }
                 t.schema.table_step = step;
             });
-        if group == Group::Tables {
-            header.header_response.context_menu(|ui| {
-                if ui.button("New table…").clicked() {
-                    actions.push(Action::NewTable {
-                        conn,
-                        schema: Some(schema.into()),
-                    });
-                    ui.close();
-                }
-            });
-        }
+        header.header_response.context_menu(|ui| {
+            if group == Group::Tables && ui.button("New table…").clicked() {
+                actions.push(Action::NewTable {
+                    conn,
+                    schema: Some(schema.into()),
+                });
+                ui.close();
+            }
+            refresh_schema_item(ui, conn, schema, actions);
+        });
     }
     if sqlite {
         return;
@@ -1130,7 +1172,24 @@ fn schema_children(
                 false
             });
             t.schema.leaf_step = step;
+        })
+        .header_response
+        .context_menu(|ui| refresh_schema_item(ui, conn, schema, actions));
+}
+
+/// "Refresh" in a schema's (or its groups') menu.
+fn refresh_schema_item(ui: &mut egui::Ui, conn: Uuid, schema: &str, actions: &mut Vec<Action>) {
+    if ui
+        .button("Refresh")
+        .on_hover_text("Reload this schema's tables, views and routines")
+        .clicked()
+    {
+        actions.push(Action::RefreshSchema {
+            conn,
+            schema: schema.into(),
         });
+        ui.close();
+    }
 }
 
 fn routine_node(
@@ -1448,6 +1507,18 @@ fn table_node(
             actions.push(Action::Copy(qualified));
             ui.close();
         }
+        if ui
+            .button("Refresh")
+            .on_hover_text("Reload its columns, indexes and foreign keys")
+            .clicked()
+        {
+            actions.push(Action::RefreshTable {
+                conn,
+                schema: schema.into(),
+                table: name.clone(),
+            });
+            ui.close();
+        }
     });
     if resp.header_response.double_clicked() {
         actions.push(Action::SelectTop {
@@ -1558,6 +1629,12 @@ fn apply(app: &mut SqailApp, a: Action, ctx: &egui::Context) {
             });
         }
         Action::Refresh(id) => app.schema.invalidate(id),
+        Action::RefreshSchema { conn, schema } => app.schema.invalidate_schema(conn, &schema),
+        Action::RefreshTable {
+            conn,
+            schema,
+            table,
+        } => app.schema.invalidate_table_details(conn, &schema, &table),
         Action::SelectTop {
             conn,
             schema,
@@ -1639,6 +1716,31 @@ fn apply(app: &mut SqailApp, a: Action, ctx: &egui::Context) {
                 }
             });
         }
+    }
+}
+
+/// A run in tab `tab_id` finished: if its SQL may have changed the schema
+/// (see [`sql::ddl::changes_schema`]), reload its connection's tree. Inside
+/// a transaction that waits for the transaction to end: the tree is read on
+/// other connections, which don't see uncommitted DDL (and on SQL Server
+/// would block on it). A failed script is counted too: statements before
+/// the error may have run, and a needless reload is cheap.
+pub fn after_run(app: &mut SqailApp, tab_id: u64) {
+    let Some(tab) = app.tabs.iter().find(|t| t.id == tab_id) else {
+        return;
+    };
+    let (Some(conn), Some(run)) = (tab.connection, tab.run.as_ref()) else {
+        return;
+    };
+    let in_transaction = tab.in_transaction;
+    if app
+        .engine_of(Some(conn))
+        .is_some_and(|e| sql::ddl::changes_schema(&run.sql, e))
+    {
+        app.schema.ddl_pending.insert(tab_id, conn);
+    }
+    if !in_transaction && let Some(conn) = app.schema.ddl_pending.remove(&tab_id) {
+        app.schema.invalidate(conn);
     }
 }
 

@@ -7,6 +7,99 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
 
 ## Unreleased
 
+### sqail
+
+- **Fix:** sorting a result column that mixes numbers and text (`9`, `10`,
+  `5a`) no longer crashes the editor; numbers sort first, numerically, then
+  the rest alphabetically (#161).
+- **Fix:** when a manual-commit tab's session is lost (expired, service
+  restart, dropped connection) while a transaction is open, sqail no longer
+  runs the next statement in auto-commit on a new session. It reports that
+  the transaction was rolled back and lets you re-run deliberately (#152).
+- **Fix:** switching a tab's connection with an open transaction asks first
+  and closes the old session; a "session busy" error no longer drops the
+  tab's session, and runs wait for an export that uses it; quitting closes
+  all sessions, so *Roll back and quit* really rolls back (#154).
+- **Fix:** *Edit data* looks the table up and applies the edits on the tab's
+  own session, so after `SET search_path`, `USE` or a same-named temp table
+  it edits the table the result came from. With Auto-commit off or a
+  transaction open, the edits join that transaction (all or nothing) and
+  stay uncommitted until Commit; they no longer hang on the tab's own locks
+  (#162, #81).
+- **Fix:** editing a binary column (bytea, varbinary, BLOB) in the grid,
+  editing a row keyed by one, or importing a CSV into one writes the real
+  bytes from the `0x…` hex instead of the text `0x…`; invalid hex is refused
+  before anything is sent (#163).
+- **Fix:** Enter after a fully typed name or keyword (`id`, `AS`, `name`)
+  inserts a new line instead of replacing it with a longer completion, and
+  completion no longer opens at the end of a comment or an unclosed string
+  (#140).
+- **Fix:** Tab and Shift+Tab indent and outdent the selected lines instead
+  of deleting them; Ctrl+K, Ctrl+U and Ctrl+W no longer delete text. New:
+  Ctrl+/ comments or uncomments the selected lines, and Ctrl+H opens find
+  and replace (#141).
+- **Fix:** *Format SQL* no longer changes string literals, `0x…` numbers,
+  `E'…'` / `B'…'` / `U&'…'` strings or operators. When the formatter would
+  change more than layout and keyword case, the text is left alone with a
+  notice. A `go` line inside a string or comment no longer splits a SQL
+  Server batch (#142).
+- **Fix:** generated SQL (drag-and-drop SELECT, completion, table designer)
+  quotes every word PostgreSQL reserves, such as `"user"` and `"position"`,
+  and the SQLite keywords that read as something else (`current_date`,
+  `notnull`, …) (#170).
+- **Fix:** the table designer keeps an index's sort order, INCLUDE columns,
+  filter and (SQL Server) clustering when it changes or re-creates the
+  index; dropping a column an index includes no longer fails on SQL Server,
+  and the *Open in editor* script runs when several defaults change (#172).
+- **Fix:** a damaged `workspace.json`, `settings.toml` or `snippets.json` is
+  no longer silently replaced: sqail keeps it as `<name>.bad` and tells you.
+  Settings, workspace, snippets, `tokens.toml` and history are written
+  atomically, and out-of-range values in a hand-edited `settings.toml` are
+  clamped on load (#155).
+- **Changed:** only one sqail runs per settings folder. A second start says
+  "sqail is already running" instead of overwriting the first window's tabs
+  and settings; use separate `SQAIL_CONFIG_DIR`s to run two side by side
+  (#155).
+- **Security:** `tokens.toml` is created owner-only (0600) from the start
+  instead of being chmodded after the token was written (#155).
+- **Security:** the AI assistant's read-only check also refuses side-effect
+  functions called by a quoted, schema-qualified or `U&"…"` name, and covers
+  more admin functions that a read-only transaction doesn't stop (#178).
+- Floats in the result grid print like psql: exponents for very large and
+  very small values, `NaN` and `Infinity` (#151).
+
+### sqail-service
+
+- **Fix:** a query after `SET SHOWPLAN_XML ON` on SQL Server no longer
+  crashes the service; the query returns its plan and a session keeps its
+  connection (#147).
+- **Fix:** on SQL Server, Stop / Esc and query timeouts abort only the
+  running batch (TDS Attention, as in SSMS). The session keeps its open
+  transaction, #temp tables and SET options, and no `ALTER ANY CONNECTION`
+  permission is needed; `KILL` is only a fallback (#148).
+- **Fix:** SQL Server `PRINT` and `RAISERROR` messages, per-statement row
+  counts and errors arrive in the order the server sends them. A `GO` script
+  continues after a failed batch, as in SSMS, and error line numbers count
+  from the start of the script (#150).
+- **Fix:** SQL Server `money`, `datetime`, `time` / `datetime2` /
+  `datetimeoffset` and `decimal(p,0)` values come back exactly and parse
+  back into SQL Server; `real` keeps its own digits; PostgreSQL enum and
+  extension types show their names (#151).
+- **Changed:** PostgreSQL scripts run statement by statement, as in psql.
+  When a statement fails, the statements before it are kept unless the
+  script opened a transaction, and `VACUUM` and similar statements work
+  inside a script. `SET LOCAL` outside an explicit transaction now lasts
+  only its own statement (#149).
+- **Fix:** *Explain analyze* no longer discards the tab's open transaction:
+  on PostgreSQL and SQL Server only the explained statement is rolled back,
+  to a savepoint (#153).
+- **Fix:** *Script CREATE* recreates the table: identity, generated and
+  computed columns, serial sequences, collations, CHECK constraints, named
+  defaults, foreign-key actions, partitioning, comments, and indexes with
+  DESC, INCLUDE, filters and clustering (#171).
+- **Security:** the bundled SQLite is updated to 3.54.1 (rusqlite 0.42),
+  fixing RUSTSEC-2026-0459 (#198).
+
 ## 1.4.1 — 2026-11-03
 
 ### sqail

@@ -1221,7 +1221,13 @@ impl SqailApp {
         let Some((ri, e)) = run.edit.as_ref() else {
             return;
         };
-        let stmts = e.statements(&run.results[*ri]);
+        let stmts = match e.statements(&run.results[*ri]) {
+            Ok(s) => s,
+            Err(err) => {
+                self.notify(format!("Cannot apply the edits: {err}"), true);
+                return;
+            }
+        };
         let previews = stmts
             .iter()
             .map(|(sql, params)| crate::editing::preview(e.engine, sql, params))

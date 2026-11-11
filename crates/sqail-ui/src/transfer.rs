@@ -14,6 +14,7 @@ use sqail_client::proto::{
 use sqail_client::{Client, On};
 use uuid::Uuid;
 
+use crate::editing::{binary_param, binary_placeholder, is_binary_type, parse_hex};
 use crate::results::Cell;
 use crate::sql::quote_ident;
 
@@ -461,6 +462,10 @@ fn param_limit(engine: Engine) -> usize {
 }
 
 fn placeholder(engine: Engine, n: usize, col: &ColumnInfo) -> String {
+    if is_binary_type(engine, &col.data_type) {
+        // `0x…` text (as exported) decoded to the real bytes.
+        return binary_placeholder(engine, n);
+    }
     match engine {
         // Bind as text and let Postgres convert to the column type.
         Engine::Postgres => format!("${n}::text::{}", col.data_type),
@@ -544,6 +549,18 @@ pub async fn import_csv(
     if sources.is_empty() {
         bail!("map at least one column");
     }
+    // Target column per source, in the same (column) order as `sources`.
+    let targets: Vec<&ColumnInfo> = spec
+        .columns
+        .iter()
+        .zip(&spec.mapping)
+        .filter(|(_, m)| m.is_some())
+        .map(|(c, _)| c)
+        .collect();
+    let binary: Vec<bool> = targets
+        .iter()
+        .map(|c| is_binary_type(spec.engine, &c.data_type))
+        .collect();
     let per_row = sources.len();
     let batch_rows = (param_limit(spec.engine) / per_row).clamp(1, 500);
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
@@ -568,10 +585,15 @@ pub async fn import_csv(
         for rec in reader.records() {
             line += 1;
             let rec = rec.with_context(|| format!("CSV line {line}"))?;
-            for &src in &sources {
+            for (i, &src) in sources.iter().enumerate() {
                 let v = rec.get(src).unwrap_or("");
                 batch.push(if v.is_empty() && spec.empty_is_null {
                     Param::Null
+                } else if binary[i] {
+                    let hex = parse_hex(v).map_err(|e| {
+                        anyhow::anyhow!("CSV line {line}, column {}: {e}", targets[i].name)
+                    })?;
+                    binary_param(spec.engine, &hex)
                 } else {
                     Param::Text(v.to_string())
                 });

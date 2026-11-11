@@ -1741,6 +1741,134 @@ async fn mssql_stops_reading_at_max_rows() {
     assert_eq!(done(&ev).1, Some(false));
 }
 
+/// Run `body` on `path` and cancel it with DELETE /v1/queries after `after`.
+/// The events and how long the query took.
+async fn cancelled_after(
+    h: &Harness,
+    path: &str,
+    body: Value,
+    after: Duration,
+) -> (Vec<QueryEvent>, Duration) {
+    let qid = Uuid::new_v4();
+    let (http, url, token) = (
+        h.http.clone(),
+        h.url(&format!("/v1/queries/{qid}")),
+        h.admin.clone(),
+    );
+    let cancel = tokio::spawn(async move {
+        tokio::time::sleep(after).await;
+        http.delete(url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+            .status()
+    });
+    let t = Instant::now();
+    let ev = h.query_on(path, body, Some(qid)).await;
+    let took = t.elapsed();
+    assert_eq!(cancel.await.unwrap(), 202);
+    (ev, took)
+}
+
+fn connection_lost(ev: &[QueryEvent]) -> bool {
+    ev.iter().any(
+        |e| matches!(e, QueryEvent::Message { text, .. } if text.contains("connection was lost")),
+    )
+}
+
+/// Cancelling on SQL Server sends an Attention, which aborts the batch only:
+/// the session keeps its connection, transaction and #temp tables, whether
+/// or not the login may KILL (#148).
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn mssql_cancel_keeps_the_session() {
+    let h = harness().await;
+    for user in ["sqail", "sa"] {
+        let c = mssql_as(&h, user).await;
+        let s: SessionInfo = h
+            .post("/v1/sessions", &json!({"connection_id": c}), &h.admin)
+            .await
+            .json()
+            .await
+            .unwrap();
+        let sp = format!("/v1/sessions/{}/query", s.id);
+        let run = |sql: &str| h.query_on(&sp, json!({ "sql": sql }), None);
+        let ev = run("CREATE TABLE #it_cancel_148 (i int); BEGIN TRANSACTION; \
+                      INSERT INTO #it_cancel_148 VALUES (2)")
+        .await;
+        assert_eq!(done(&ev).1, Some(true), "{user}: {ev:?}");
+        let spid = rows(&run("SELECT @@SPID AS spid").await, 0);
+        let still_there = async |what: &str| {
+            let now = rows(&run("SELECT @@SPID AS spid").await, 0);
+            assert_eq!(now, spid, "{user} {what}: same session");
+            let ev = run("SELECT count(*) FROM #it_cancel_148").await;
+            assert_eq!(rows(&ev, 0), vec![vec![json!(1)]], "{user} {what}: {ev:?}");
+            assert_eq!(done(&ev).1, Some(true), "{user} {what}: transaction open");
+        };
+
+        // a batch that waits
+        let (ev, took) = cancelled_after(
+            &h,
+            &sp,
+            json!({"sql": "WAITFOR DELAY '00:00:30'; SELECT 1 AS one"}),
+            Duration::from_millis(800),
+        )
+        .await;
+        assert!(done(&ev).0, "{user}: {ev:?}");
+        assert_eq!(error(&ev).unwrap().0, "cancelled", "{user}: {ev:?}");
+        assert_eq!(done(&ev).1, Some(true), "{user}: {ev:?}");
+        assert!(!connection_lost(&ev), "{user}: {ev:?}");
+        // well before the KILL fallback (3 s)
+        assert!(took < Duration::from_millis(2500), "{user}: took {took:?}");
+        still_there("after waitfor").await;
+
+        // a large result mid-stream: two statements, so that max_rows does
+        // not stop it first
+        let (ev, took) = cancelled_after(
+            &h,
+            &sp,
+            json!({"sql": "SELECT 1 AS one; SELECT a.object_id, b.name, c.name AS c \
+                           FROM sys.all_objects a CROSS JOIN sys.all_objects b \
+                           CROSS JOIN sys.all_objects c",
+                   "max_rows": 5_000_000}),
+            Duration::from_millis(1500),
+        )
+        .await;
+        assert!(done(&ev).0, "{user}: {:?}", ev.last());
+        assert!(!rows(&ev, 1).is_empty(), "{user}: cancelled mid-stream");
+        assert!(!connection_lost(&ev), "{user}");
+        assert!(took < Duration::from_secs(4), "{user}: took {took:?}");
+        still_there("after a large result").await;
+
+        // the timeout cancels the same way
+        let ev = h
+            .query_on(
+                &sp,
+                json!({"sql": "WAITFOR DELAY '00:00:30'", "timeout_ms": 500}),
+                None,
+            )
+            .await;
+        assert_eq!(error(&ev).unwrap().0, "timeout", "{user}: {ev:?}");
+        assert!(!connection_lost(&ev), "{user}: {ev:?}");
+        still_there("after a timeout").await;
+
+        // later GO batches do not run after a cancel
+        let (ev, _) = cancelled_after(
+            &h,
+            &sp,
+            json!({"sql": "WAITFOR DELAY '00:00:30'\nGO\nINSERT INTO #it_cancel_148 VALUES (3)"}),
+            Duration::from_millis(500),
+        )
+        .await;
+        assert!(done(&ev).0, "{user}: {ev:?}");
+        still_there("after a cancelled script").await;
+
+        let ev = run("ROLLBACK").await;
+        assert_eq!(done(&ev).1, Some(false), "{user}: {ev:?}");
+    }
+}
+
 #[tokio::test]
 #[ignore = "needs podman test databases (scripts/db.sh up)"]
 async fn postgres_types_and_notices() {

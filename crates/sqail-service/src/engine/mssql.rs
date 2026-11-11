@@ -4,19 +4,27 @@
 //! batch runs as one request with multiple result sets. tiberius does not
 //! surface DONE row counts on result streams, so a batch that is a single
 //! INSERT/UPDATE/DELETE/MERGE runs via `execute` to report affected rows.
-//! Cancelling sends `KILL <spid>` from a side connection (needs ALTER ANY
-//! CONNECTION); the caller also drops the connection if that does not stop it.
-//! A batch that is a single query is stopped with a TDS Attention once it
-//! passes `max_rows`; other batches skip converting the rows past it.
+//! Cancelling sends a TDS Attention, as SSMS does: it aborts the running
+//! batch and leaves the session (its transaction, unless XACT_ABORT is on,
+//! #temp tables and SET options) as it was. Only when the server does not
+//! acknowledge it in time does the canceller fall back to `KILL <spid>` from a
+//! side connection (needs ALTER ANY CONNECTION); the caller drops the
+//! connection if that does not stop it either. A batch that is a single query
+//! is also stopped with an Attention once it passes `max_rows`; other batches
+//! skip converting the rows past it.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::TryStreamExt;
 use serde_json::Value;
 use sqail_proto::{Column, Engine, LogicalType, MssqlAuth, MssqlEncrypt, MssqlParams, Param};
-use tiberius::{AuthMethod, ColumnData, ColumnType, Config, EncryptionLevel, FromSql, QueryItem};
+use tiberius::{
+    AttentionHandle, AuthMethod, ColumnData, ColumnType, Config, EncryptionLevel, FromSql,
+    QueryItem,
+};
 use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
@@ -197,11 +205,14 @@ impl Driver for MssqlDriver {
             .map_err(db_err)?
             .and_then(|r| r.get::<i32, _>(0))
             .unwrap_or(0);
+        let attention = client.attention_handle();
         Ok(Box::new(MssqlConn {
             client,
             cancel: Arc::new(MssqlCancel {
                 driver: self.clone(),
                 spid,
+                attention,
+                runs: Arc::default(),
             }),
         }))
     }
@@ -216,34 +227,108 @@ struct MssqlConn {
     cancel: Arc<MssqlCancel>,
 }
 
+impl Drop for MssqlConn {
+    fn drop(&mut self) {
+        self.cancel.runs.running.store(false, Ordering::Release);
+    }
+}
+
+/// How long the server gets to acknowledge an Attention before the
+/// canceller falls back to KILL. Shorter than the callers' grace periods
+/// (5 s and more), so that the KILL can still stop the query in time.
+const ATTENTION_TIMEOUT: Duration = Duration::from_secs(3);
+
+#[derive(Clone)]
 struct MssqlCancel {
     driver: MssqlDriver,
     spid: i32,
+    attention: AttentionHandle,
+    runs: Arc<Runs>,
 }
 
-#[async_trait]
-impl Cancel for MssqlCancel {
-    async fn cancel(&self) -> bool {
+/// Which `execute` is running, so a late KILL fallback cannot hit a later
+/// query or a closed connection's session id.
+#[derive(Default)]
+struct Runs {
+    running: AtomicBool,
+    finished: AtomicU64,
+}
+
+impl Runs {
+    fn start(&self) {
+        self.running.store(true, Ordering::Release);
+    }
+
+    fn finish(&self) {
+        self.finished.fetch_add(1, Ordering::AcqRel);
+        self.running.store(false, Ordering::Release);
+    }
+
+    fn still_running(&self, finished: u64) -> bool {
+        self.running.load(Ordering::Acquire) && self.finished.load(Ordering::Acquire) == finished
+    }
+}
+
+impl MssqlCancel {
+    /// Ends the whole session, not just the batch. Fails without ALTER ANY
+    /// CONNECTION.
+    async fn kill(&self, finished: Option<u64>) -> bool {
         if self.spid <= 0 {
             return false;
         }
         let res = async {
             let mut side = self.driver.open().await?;
+            if finished.is_some_and(|f| !self.runs.still_running(f)) {
+                return Ok(false);
+            }
             side.simple_query(format!("KILL {}", self.spid))
                 .await
                 .map_err(db_err)?
                 .into_results()
                 .await
-                .map_err(db_err)
+                .map_err(db_err)?;
+            Ok::<_, DbError>(true)
         }
         .await;
         match res {
-            Ok(_) => true,
+            Ok(killed) => killed,
             Err(e) => {
                 tracing::info!(spid = self.spid, error = %e, "KILL failed; dropping the connection instead");
                 false
             }
         }
+    }
+}
+
+#[async_trait]
+impl Cancel for MssqlCancel {
+    /// Requests an Attention, which the running `execute` sends on its next
+    /// read, so it needs that future polled: the callers wait for it after
+    /// cancelling. If the query has not stopped after [`ATTENTION_TIMEOUT`],
+    /// KILL it. A request made while no `execute` runs stops the next one
+    /// before its first batch (the caller may cancel before the query's
+    /// future was first polled); no caller cancels after a query finished.
+    async fn cancel(&self) -> bool {
+        let finished = self.runs.finished.load(Ordering::Acquire);
+        self.attention.request();
+        let this = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(ATTENTION_TIMEOUT).await;
+            if this.runs.still_running(finished) {
+                tracing::info!(
+                    spid = this.spid,
+                    "SQL Server did not acknowledge the Attention; trying KILL"
+                );
+                this.kill(Some(finished)).await;
+            }
+        });
+        true
+    }
+
+    /// Nothing reads the connection any more, so an Attention would not go
+    /// out: KILL before it is closed.
+    async fn cancel_abandoned(&self) -> bool {
+        self.kill(None).await
     }
 }
 
@@ -254,9 +339,13 @@ async fn stream_results(
     mut stream: tiberius::QueryStream<'_>,
     out: &mut ResultWriter<'_>,
     stop_at_cap: bool,
+    attention: &AttentionHandle,
 ) -> Result<bool> {
     while let Some(item) = stream.try_next().await.map_err(db_err)? {
         match item {
+            // Cancelled: what the server sent before the Attention reached it
+            // is read to the acknowledgement but not passed on.
+            _ if attention.is_requested() => {}
             QueryItem::Metadata(meta) => {
                 out.start(meta.columns().iter().map(column).collect())
                     .await?
@@ -295,11 +384,17 @@ impl MssqlConn {
         params: &[Param],
         out: &mut ResultWriter<'_>,
     ) -> Result<()> {
+        if self.cancel.attention.is_requested() {
+            return Err(DbError::Cancelled);
+        }
         let results_before = out.results_seen();
         if shape(sql).is_single_dml() {
             let mut q = tiberius::Query::new(sql);
             bind_all(&mut q, params);
             let res = q.execute(&mut self.client).await.map_err(db_err)?;
+            if self.cancel.attention.is_requested() {
+                return Err(DbError::Cancelled);
+            }
             return out.rows_affected(res.total()).await;
         }
         // A lone query is stopped once it passes max_rows. The probe that
@@ -316,7 +411,7 @@ impl MssqlConn {
             bind_all(&mut q, params);
             q.query(&mut self.client).await.map_err(db_err)?
         };
-        if stream_results(stream, out, stop_at_cap).await? {
+        if stream_results(stream, out, stop_at_cap, &self.cancel.attention).await? {
             // An Attention aborts the batch; tiberius then drains the
             // acknowledgement, which leaves the connection ready for reuse.
             self.client
@@ -349,6 +444,7 @@ fn bind_all<'a>(q: &mut tiberius::Query<'a>, params: &'a [Param]) {
 impl Conn for MssqlConn {
     async fn execute(&mut self, req: &ExecRequest, sink: &EventSink) -> Result<()> {
         let mut out = ResultWriter::new(sink, req.max_rows);
+        self.cancel.runs.start();
         let res = async {
             if req.single_statement {
                 check_single_statement(&req.sql).map_err(DbError::Invalid)?;
@@ -364,6 +460,15 @@ impl Conn for MssqlConn {
             Ok(())
         }
         .await;
+        // After an Attention, read its acknowledgement so the session can
+        // run the next request.
+        let res = match self.client.finish_attention().await {
+            Ok(false) => res,
+            Ok(true) if matches!(res, Err(DbError::ClientGone)) => res,
+            Ok(true) => Err(DbError::Cancelled),
+            Err(e) => Err(DbError::Connect(format!("cannot cancel the query: {e}"))),
+        };
+        self.cancel.runs.finish();
         out.end().await?;
         res
     }

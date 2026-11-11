@@ -229,6 +229,9 @@ next run whenever no transaction is open. Finish with **Commit** or
 **Rollback** in the toolbar.
 Closing a tab with an open transaction asks whether to commit or roll back.
 Idle sessions close after 30 minutes on the service, which rolls them back.
+**Esc** stops only the running statement: the session keeps its open
+transaction, temp tables and `SET` options, as in SSMS. (On SQL Server with
+`SET XACT_ABORT ON`, the server rolls the transaction back.)
 
 **Plans:** *Explain* (Ctrl+E) shows the estimated plan as a tree, with cost
 and row estimates and the most expensive nodes highlighted. *Explain analyze*

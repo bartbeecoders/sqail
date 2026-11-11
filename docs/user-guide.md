@@ -51,6 +51,12 @@ If the service requires client certificates (mTLS), add the certificate and
 key (PEM) to the service entry in `settings.toml`; see
 [Files](#files-and-settings).
 
+The status bar shows whether the service is reachable, as of the last
+request: when a request can't reach it, the dot turns red and a
+**Reconnect** button appears; it turns green again as soon as a request gets
+through. When the service no longer accepts the token (revoked or expired),
+sqail asks for a new one.
+
 ## Connections
 
 **+ Connection** under *Connections* in the sidebar (or *Connections → New
@@ -61,6 +67,10 @@ For PostgreSQL and SQL Server, fill in the server and login first, then click
 **⏷** next to *Database* to choose from the databases that login can access
 (you can still type a name). The admin page's *List* button does the same.
 Listing needs an admin token, as *Test* does for an unsaved connection.
+
+Each tab runs on the connection chosen in its toolbar. A tab gets one by
+itself only when the service has exactly one connection; with several,
+choose one first (new tabs take the current tab's connection).
 
 Double-click a connection in the sidebar to edit it; *New query tab* is in
 its right-click menu. *Duplicate…* in the same menu opens the form filled in

@@ -44,6 +44,12 @@ pub enum Msg {
         result: Result<(Client, ServiceInfo), sqail_client::Error>,
     },
     Connections(Result<Vec<Connection>, String>),
+    /// What a request of the current client showed about the service, sent
+    /// when it changes (service gone, token rejected, answering again).
+    ServiceReach {
+        generation: u64,
+        reach: sqail_client::Reach,
+    },
     Probed(Result<(String, sqail_client::proto::Health), String>),
     Provisioned(Result<Provisioned, String>),
     ConnTested(Result<TestResult, String>),
@@ -169,6 +175,8 @@ pub struct Service {
     pub status: ServiceStatus,
     pub connections: Vec<Connection>,
     pub token_store: Option<secrets::Store>,
+    /// Counts connects, so reports from an older client are ignored.
+    pub generation: u64,
 }
 
 impl Service {
@@ -226,6 +234,7 @@ impl SqailApp {
                 status: ServiceStatus::Unconfigured,
                 connections: Vec::new(),
                 token_store: None,
+                generation: 0,
             },
             tabs: Vec::new(),
             active: 0,
@@ -314,6 +323,9 @@ impl SqailApp {
         self.service.token_store = Some(store);
         self.service.client = None;
         self.service.status = ServiceStatus::Connecting;
+        self.service.generation += 1;
+        let generation = self.service.generation;
+        let sink = self.worker.sink();
         let trust = match &profile.fingerprint {
             Some(fp) => Trust::Pinned(fp.clone()),
             None => Trust::System,
@@ -335,7 +347,8 @@ impl SqailApp {
                     token,
                     trust,
                     identity,
-                })?;
+                })?
+                .observe(reach_reporter(sink, generation));
                 let info = client.info().await?;
                 Ok((client, info))
             }
@@ -370,6 +383,44 @@ impl SqailApp {
         self.settings.save();
         self.dialog = Dialog::None;
         self.connect(profile);
+    }
+
+    /// A request found the service gone, the token rejected, or the service
+    /// answering again: keep the status bar honest.
+    fn service_reach(&mut self, generation: u64, reach: sqail_client::Reach) {
+        use sqail_client::Reach;
+        // Reports of an older client, or before this one connected.
+        if generation != self.service.generation || self.service.client.is_none() {
+            return;
+        }
+        match reach {
+            Reach::Answered => {
+                if matches!(self.service.status, ServiceStatus::Failed(_)) {
+                    self.service.status = ServiceStatus::Connected;
+                    self.refresh_connections();
+                }
+            }
+            Reach::Unreachable(e) => self.service.status = ServiceStatus::Failed(e),
+            Reach::Unauthorized(e) => {
+                self.service.status = ServiceStatus::Failed(e.clone());
+                let url = self.service.profile.as_ref().map(|p| p.url.clone());
+                match (&self.dialog, url) {
+                    // Back to the token prompt, unless the user is busy in a
+                    // dialog: then the status bar and a notice say it.
+                    (Dialog::None, Some(url)) => {
+                        let mut form = WelcomeForm::for_url(&url);
+                        form.error = Some(format!(
+                            "The service no longer accepts the token ({e}). Enter a new one."
+                        ));
+                        self.dialog = Dialog::Welcome(form);
+                    }
+                    _ => self.notify(
+                        format!("The service no longer accepts the token: {e}"),
+                        true,
+                    ),
+                }
+            }
+        }
     }
 
     pub fn forget_service(&mut self) {
@@ -753,18 +804,9 @@ impl SqailApp {
                     }
                 }
                 match client.query(On::Session(sid), &req).await {
-                    Ok(mut stream) => {
-                        while let Some(ev) = stream.events.next().await {
-                            match ev {
-                                Ok(event) => sink.send(Msg::Query {
-                                    tab: tab_id,
-                                    run: run_id,
-                                    event,
-                                }),
-                                Err(e) => return sink.send(fail(e.to_string())),
-                            }
-                        }
-                        return;
+                    Ok(stream) => {
+                        return forward_events(stream.events, tab_id, run_id, |m| sink.send(m))
+                            .await;
                     }
                     Err(e) if is_session_gone(&e) => {
                         if attempt > 0 || in_tx {
@@ -843,10 +885,14 @@ impl SqailApp {
                         tab.in_transaction = false;
                     }
                 }
-                if self.tabs.iter().all(|t| t.connection.is_none())
-                    && let (Some(first), Some(tab)) = (list.first(), self.tabs.get_mut(self.active))
+                // Only when there is no choice to make: with several, binding
+                // the first one could run SQL on a database nobody picked.
+                if let [only] = list.as_slice()
+                    && only.engine.is_known()
+                    && self.tabs.iter().all(|t| t.connection.is_none())
+                    && let Some(tab) = self.tabs.get_mut(self.active)
                 {
-                    tab.connection = Some(first.id);
+                    tab.connection = Some(only.id);
                 }
                 self.schema.retain(&list);
                 self.service.connections = list;
@@ -854,6 +900,7 @@ impl SqailApp {
             Msg::Connections(Err(e)) => {
                 self.notify(format!("Could not load connections: {e}"), true)
             }
+            Msg::ServiceReach { generation, reach } => self.service_reach(generation, reach),
             Msg::Probed(r) => {
                 if let Dialog::Welcome(form) = &mut self.dialog {
                     form.on_probed(r);
@@ -2020,6 +2067,12 @@ impl SqailApp {
             if let Some(store) = self.service.token_store {
                 resp.on_hover_text(format!("Token stored in the {}", store.describe()));
             }
+            if matches!(self.service.status, ServiceStatus::Failed(_))
+                && let Some(p) = self.service.profile.clone()
+                && ui.small_button("Reconnect").clicked()
+            {
+                self.connect(p);
+            }
 
             if let Some(tab) = self.tabs.get(self.active)
                 && let Some(conn) = tab.connection.and_then(|c| self.service.connection(c))
@@ -2460,6 +2513,62 @@ impl SqailApp {
     }
 }
 
+/// The run's event stream closed without `Done` (the service stopped, or its
+/// query task died): nothing more will arrive for it.
+pub const STREAM_ENDED: &str = "The query stream ended unexpectedly (the service may have \
+     stopped). The result is incomplete; whether the statement finished is unknown.";
+
+/// Pass a run's events on as messages. A stream that ends without `Done`
+/// fails the run, so the tab never waits forever.
+async fn forward_events(
+    mut events: impl futures::Stream<Item = sqail_client::Result<QueryEvent>> + Unpin,
+    tab: u64,
+    run: u64,
+    mut send: impl FnMut(Msg),
+) {
+    let fail = |error: String| Msg::QueryFailed {
+        tab,
+        run,
+        error,
+        session_gone: false,
+    };
+    let mut done = false;
+    while let Some(ev) = events.next().await {
+        match ev {
+            Ok(event) => {
+                done |= matches!(event, QueryEvent::Done { .. });
+                send(Msg::Query { tab, run, event });
+            }
+            Err(e) => return send(fail(e.to_string())),
+        }
+    }
+    if !done {
+        send(fail(STREAM_ENDED.into()));
+    }
+}
+
+/// A client observer that tells the UI when what requests show about the
+/// service changes (not on every request).
+fn reach_reporter(
+    sink: crate::worker::Sink,
+    generation: u64,
+) -> impl Fn(sqail_client::Reach) + Send + Sync + 'static {
+    use sqail_client::Reach;
+    use std::sync::atomic::{AtomicU8, Ordering};
+    // The connect that creates the client is its first answer.
+    let last = AtomicU8::new(0);
+    move |reach| {
+        let kind = match reach {
+            Reach::Answered => 0,
+            Reach::Unreachable(_) => 1,
+            Reach::Unauthorized(_) => 2,
+        };
+        if last.swap(kind, Ordering::Relaxed) != kind {
+            sink.send(Msg::ServiceReach { generation, reach });
+        }
+    }
+}
+
 /// Shown instead of running a statement when the tab's transaction is gone.
 const TRANSACTION_LOST: &str = "The session was lost, so its open transaction was rolled back. \
      The statement was not run; run it again to start a new transaction.";
@@ -2599,5 +2708,56 @@ struct FreeSession(crate::worker::Sink, u64);
 impl Drop for FreeSession {
     fn drop(&mut self) {
         self.0.send(Msg::SessionFree { tab: self.1 });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn collect(events: Vec<sqail_client::Result<QueryEvent>>) -> Vec<Msg> {
+        let mut out = Vec::new();
+        futures::executor::block_on(forward_events(futures::stream::iter(events), 1, 2, |m| {
+            out.push(m)
+        }));
+        out
+    }
+
+    fn started() -> sqail_client::Result<QueryEvent> {
+        Ok(QueryEvent::Started {
+            query_id: Uuid::nil(),
+        })
+    }
+
+    #[test]
+    fn a_stream_without_done_fails_the_run() {
+        let msgs = collect(vec![started()]);
+        assert_eq!(msgs.len(), 2);
+        assert!(matches!(
+            &msgs[1],
+            Msg::QueryFailed { tab: 1, run: 2, error, session_gone: false } if error == STREAM_ENDED
+        ));
+        // An empty body too.
+        assert!(matches!(&collect(vec![])[..], [Msg::QueryFailed { .. }]));
+    }
+
+    #[test]
+    fn a_finished_stream_does_not_fail() {
+        let done = Ok(QueryEvent::Done {
+            elapsed_ms: 1,
+            cancelled: false,
+            in_transaction: None,
+        });
+        let msgs = collect(vec![started(), done]);
+        assert_eq!(msgs.len(), 2);
+        assert!(msgs.iter().all(|m| matches!(m, Msg::Query { .. })));
+    }
+
+    #[test]
+    fn a_broken_stream_fails_once() {
+        let broken = Err(sqail_client::Error::Transport("reset".into()));
+        let msgs = collect(vec![started(), broken, started()]);
+        assert_eq!(msgs.len(), 2);
+        assert!(matches!(&msgs[1], Msg::QueryFailed { error, .. } if error.contains("reset")));
     }
 }

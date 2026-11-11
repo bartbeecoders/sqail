@@ -22,7 +22,7 @@ use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
 use super::entra::Entra;
 use super::split::{check_single_statement, shape, single_query, split_go};
-use super::value::{bytes, float, int, text};
+use super::value::{bytes, float, float32, int, text};
 use super::{
     Cancel, Canceller, Conn, DbError, Driver, EventSink, ExecRequest, Result, ResultWriter,
 };
@@ -436,7 +436,8 @@ fn column(c: &tiberius::Column) -> Column {
         ColumnType::Intn => ("int", LogicalType::Int),
         ColumnType::Float4 => ("real", LogicalType::Float),
         ColumnType::Float8 | ColumnType::Floatn => ("float", LogicalType::Float),
-        ColumnType::Money | ColumnType::Money4 => ("money", LogicalType::Decimal),
+        ColumnType::Money => ("money", LogicalType::Decimal),
+        ColumnType::Money4 => ("smallmoney", LogicalType::Decimal),
         ColumnType::Decimaln => ("decimal", LogicalType::Decimal),
         ColumnType::Numericn => ("numeric", LogicalType::Decimal),
         ColumnType::Guid => ("uniqueidentifier", LogicalType::Uuid),
@@ -456,18 +457,66 @@ fn column(c: &tiberius::Column) -> Column {
         ColumnType::BigVarBin => ("varbinary", LogicalType::Bytes),
         ColumnType::BigBinary => ("binary", LogicalType::Bytes),
         ColumnType::Image => ("image", LogicalType::Bytes),
+        // hierarchyid, geometry, geography: their serialized bytes. tiberius
+        // does not pass the UDT's own name on.
+        ColumnType::Udt => ("udt", LogicalType::Bytes),
+        ColumnType::SSVariant => ("sql_variant", LogicalType::Other),
         other => {
             return Column {
-                name: c.name().to_string(),
+                name: column_name(c),
                 type_name: format!("{other:?}").to_lowercase(),
                 logical: LogicalType::Other,
             };
         }
     };
     Column {
-        name: c.name().to_string(),
+        name: column_name(c),
         type_name: type_name.to_string(),
         logical,
+    }
+}
+
+/// An expression without an alias has no name; SSMS shows this instead.
+fn column_name(c: &tiberius::Column) -> String {
+    match c.name() {
+        "" => "(No column name)".to_string(),
+        name => name.to_string(),
+    }
+}
+
+/// `hh:mm:ss` and `digits` fraction digits of `nanos` (always a whole number
+/// of the type's own increments, so this is exact).
+fn time_text(t: chrono::NaiveTime, digits: u8) -> String {
+    use chrono::Timelike;
+    let hms = t.format("%H:%M:%S");
+    match digits.min(9) {
+        0 => hms.to_string(),
+        n => {
+            let frac = t.nanosecond() % 1_000_000_000 / 10u32.pow(9 - u32::from(n));
+            format!("{hms}.{frac:0width$}", width = usize::from(n))
+        }
+    }
+}
+
+/// `datetime` counts 1/300 s ticks; SQL Server shows (and parses back) them
+/// rounded to milliseconds: .997, not .996666666.
+fn datetime_text(v: chrono::NaiveDateTime) -> String {
+    use chrono::Timelike;
+    let ms = (v.nanosecond() % 1_000_000_000 + 500_000) / 1_000_000;
+    let v = v.with_nanosecond(0).unwrap_or(v) + chrono::TimeDelta::milliseconds(ms.into());
+    format!(
+        "{}.{:03}",
+        v.format("%Y-%m-%dT%H:%M:%S"),
+        v.nanosecond() / 1_000_000
+    )
+}
+
+/// A decimal's exact digits; tiberius prints `0.0` for scale 0.
+fn numeric_text(n: tiberius::numeric::Numeric) -> String {
+    if n.scale() == 0 {
+        n.value().to_string()
+    } else {
+        n.to_string()
     }
 }
 
@@ -487,27 +536,43 @@ fn cell(d: &ColumnData<'static>) -> Value {
         ColumnData::I16(v) => v.map(|v| int(v.into())).unwrap_or(Value::Null),
         ColumnData::I32(v) => v.map(|v| int(v.into())).unwrap_or(Value::Null),
         ColumnData::I64(v) => v.map(int).unwrap_or(Value::Null),
-        ColumnData::F32(v) => v.map(|v| float(v.into())).unwrap_or(Value::Null),
+        ColumnData::F32(v) => v.map(float32).unwrap_or(Value::Null),
         ColumnData::F64(v) => v.map(float).unwrap_or(Value::Null),
         ColumnData::Bit(v) => v.map(Value::Bool).unwrap_or(Value::Null),
         ColumnData::String(v) => v.as_ref().map(|s| text(s.as_ref())).unwrap_or(Value::Null),
         ColumnData::Guid(v) => v.map(|g| text(g.to_string())).unwrap_or(Value::Null),
         ColumnData::Binary(v) => v.as_ref().map(|b| bytes(b)).unwrap_or(Value::Null),
-        ColumnData::Numeric(v) => v.map(|n| text(n.to_string())).unwrap_or(Value::Null),
+        // decimal, numeric, and money (decoded exactly with scale 4)
+        ColumnData::Numeric(v) => v.map(|n| text(numeric_text(n))).unwrap_or(Value::Null),
         ColumnData::Xml(v) => v
             .as_ref()
             .map(|x| text(x.to_string()))
             .unwrap_or(Value::Null),
         ColumnData::Date(_) => chrono_cell::<chrono::NaiveDate>(d, |v| v.to_string()),
-        ColumnData::Time(_) => chrono_cell::<chrono::NaiveTime>(d, |v| v.to_string()),
-        ColumnData::DateTime(_) | ColumnData::SmallDateTime(_) | ColumnData::DateTime2(_) => {
+        // time, datetime2 and datetimeoffset print the column's own scale.
+        ColumnData::Time(t) => {
+            let scale = t.map_or(0, |t| t.scale());
+            chrono_cell::<chrono::NaiveTime>(d, |v| time_text(v, scale))
+        }
+        ColumnData::DateTime(_) => chrono_cell::<chrono::NaiveDateTime>(d, datetime_text),
+        ColumnData::SmallDateTime(_) => {
+            chrono_cell::<chrono::NaiveDateTime>(d, |v| v.format("%Y-%m-%dT%H:%M:%S").to_string())
+        }
+        ColumnData::DateTime2(dt) => {
+            let scale = dt.map_or(0, |dt| dt.time().scale());
             chrono_cell::<chrono::NaiveDateTime>(d, |v| {
-                v.format("%Y-%m-%dT%H:%M:%S%.f").to_string()
+                format!("{}T{}", v.format("%Y-%m-%d"), time_text(v.time(), scale))
             })
         }
-        ColumnData::DateTimeOffset(_) => {
+        ColumnData::DateTimeOffset(dto) => {
+            let scale = dto.map_or(0, |dto| dto.datetime2().time().scale());
             chrono_cell::<chrono::DateTime<chrono::FixedOffset>>(d, |v| {
-                v.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false)
+                format!(
+                    "{}T{}{}",
+                    v.format("%Y-%m-%d"),
+                    time_text(v.time(), scale),
+                    v.format("%:z")
+                )
             })
         }
     }
@@ -586,6 +651,30 @@ mod tests {
             port,
             instance: instance.map(String::from),
         }
+    }
+
+    #[test]
+    fn temporal_and_decimal_text() {
+        use chrono::{NaiveDate, NaiveTime};
+        let t = NaiveTime::from_hms_nano_opt(23, 59, 59, 123_456_700).unwrap();
+        assert_eq!(time_text(t, 7), "23:59:59.1234567");
+        assert_eq!(time_text(t, 3), "23:59:59.123");
+        assert_eq!(time_text(t, 0), "23:59:59");
+        let day = NaiveDate::from_ymd_opt(2024, 2, 29).unwrap();
+        for (nanos, want) in [
+            (996_666_666, "2024-02-29T13:45:12.997"),
+            (3_333_333, "2024-02-29T13:45:12.003"),
+            (0, "2024-02-29T13:45:12.000"),
+            (999_600_000, "2024-02-29T13:45:13.000"),
+        ] {
+            let v = day.and_hms_nano_opt(13, 45, 12, nanos).unwrap();
+            assert_eq!(datetime_text(v), want);
+        }
+        use tiberius::numeric::Numeric;
+        assert_eq!(numeric_text(Numeric::new_with_scale(0, 0)), "0");
+        assert_eq!(numeric_text(Numeric::new_with_scale(-42, 0)), "-42");
+        assert_eq!(numeric_text(Numeric::new_with_scale(11000, 4)), "1.1000");
+        assert_eq!(numeric_text(Numeric::new_with_scale(-5, 1)), "-0.5");
     }
 
     #[test]

@@ -217,15 +217,22 @@ pub(crate) async fn decode<R>(src: &mut R, len: u8) -> crate::Result<ColumnData<
 where
     R: SqlReadBytes + Unpin,
 {
+    // SQAIL-PATCH: money decodes to an exact `Numeric` with scale 4 instead of
+    // an `f64`, which cannot hold money's 19 significant digits.
+    let money = |scaled: i64| {
+        ColumnData::Numeric(Some(crate::tds::Numeric::new_with_scale(
+            scaled.into(),
+            MONEY_SCALE as u8,
+        )))
+    };
     let res = match len {
-        0 => ColumnData::F64(None),
-        4 => ColumnData::F64(Some(src.read_i32_le().await? as f64 / 1e4)),
-        8 => ColumnData::F64(Some({
+        0 => ColumnData::Numeric(None),
+        4 => money(src.read_i32_le().await?.into()),
+        8 => {
             let high = src.read_i32_le().await? as i64;
-            let low = src.read_u32_le().await? as f64;
-
-            ((high << 32) as f64 + low) / 1e4
-        })),
+            let low = src.read_u32_le().await? as i64;
+            money((high << 32) | low)
+        }
         _ => {
             return Err(Error::Protocol(
                 format!("money: length of {} is invalid", len).into(),
@@ -250,8 +257,8 @@ mod tests {
 
         let data = decode(&mut buf.into_sql_read_bytes(), 4).await.unwrap();
         match data {
-            ColumnData::F64(Some(v)) => assert!((v - 1.2345).abs() < 1e-9, "v={}", v),
-            other => panic!("expected F64, got {:?}", other),
+            ColumnData::Numeric(Some(n)) => assert_eq!((n.value(), n.scale()), (12345, 4)),
+            other => panic!("expected Numeric, got {:?}", other),
         }
     }
 
@@ -265,8 +272,24 @@ mod tests {
 
         let data = decode(&mut buf.into_sql_read_bytes(), 8).await.unwrap();
         match data {
-            ColumnData::F64(Some(v)) => assert!((v - 429499.7296).abs() < 1e-6, "v={}", v),
-            other => panic!("expected F64, got {:?}", other),
+            ColumnData::Numeric(Some(n)) => {
+                assert_eq!((n.value(), n.scale()), (4294997296, 4))
+            }
+            other => panic!("expected Numeric, got {:?}", other),
+        }
+    }
+
+    // money's extremes are exact, and negative values keep their low word.
+    #[tokio::test]
+    async fn decode_money_extremes_exactly() {
+        for v in [i64::MAX, i64::MIN, -1, -4294967296] {
+            let mut buf = BytesMut::new();
+            buf.put_i32_le((v >> 32) as i32);
+            buf.put_u32_le(v as u32);
+            match decode(&mut buf.into_sql_read_bytes(), 8).await.unwrap() {
+                ColumnData::Numeric(Some(n)) => assert_eq!(n.value(), v as i128),
+                other => panic!("expected Numeric, got {:?}", other),
+            }
         }
     }
 

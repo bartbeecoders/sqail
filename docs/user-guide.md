@@ -308,7 +308,10 @@ remember their state.
   blank line (or below the text) a table or view becomes a formatted
   `SELECT` of all its columns. A procedure becomes `EXEC name` on SQL
   Server or `CALL name()` on Postgres, and a function becomes
-  `SELECT name();`.
+  `SELECT name();`. Names that need it are quoted, here and wherever sqail
+  writes SQL for you (completion, the table designer): mixed case, special
+  characters, and every word the engine reserves, such as `"user"` or
+  `"position"` on PostgreSQL.
 * **History:** every query you ran, with its connection, duration and row
   count. Filter it, open an entry in a new tab, or clear it. The last 5 000
   entries are kept.

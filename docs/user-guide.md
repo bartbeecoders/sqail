@@ -185,12 +185,14 @@ an admin token.
 | Ctrl+E | Show the plan of the statement under the cursor |
 | Ctrl+Space | Completion (also opens by itself while you type a name it can finish, but not when the word is already a whole name or keyword, nor in comments and strings; a space, comma or other punctuation closes it, so Enter and Tab go to the text) |
 | Ctrl+Shift+F | Format the selection or the whole tab |
+| Tab / Shift+Tab | Indent / outdent the selected lines (without a selection, Tab types a tab and Shift+Tab outdents the line) |
+| Ctrl+/ | Comment or uncomment the selected lines with `--` |
 | Ctrl+Shift+P | Command palette: every action, searchable |
 | Ctrl+P | Quick open: jump to a table or snippet |
 | Ctrl+T / Ctrl+W | New / close tab |
 | Ctrl+PageDown / Ctrl+PageUp | Next / previous tab |
 | Ctrl+O / Ctrl+S / Ctrl+Shift+S | Open / save / save as (`.sql` files) |
-| Ctrl+F | Find and replace |
+| Ctrl+F / Ctrl+H | Find and replace |
 | F3 / Shift+F3 | Find next / previous (Enter / Shift+Enter in the find field; Esc there closes it) |
 | Ctrl+= / Ctrl+- | Larger / smaller editor font |
 | Ctrl+mouse wheel, or the wheel with the middle button held | Zoom the editor text |

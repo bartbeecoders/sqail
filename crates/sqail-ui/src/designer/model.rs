@@ -1246,6 +1246,7 @@ mod tests {
             unique,
             primary,
             constraint,
+            ..Default::default()
         }
     }
 

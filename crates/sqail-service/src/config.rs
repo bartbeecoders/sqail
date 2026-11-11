@@ -47,6 +47,12 @@ pub struct Config {
     /// caller provisions its own tokens (`serve --no-bootstrap-token`).
     #[serde(skip)]
     pub bootstrap_admin_token: bool,
+    /// Whether the `SQAIL_*` environment applies (`ENV_OVERRIDES` and
+    /// `SQAIL_MASTER_KEY`). [`Config::load`] turns it on; a config built in
+    /// code (tests, embedders) leaves it off so the caller's environment
+    /// cannot change it.
+    #[serde(skip)]
+    pub use_env: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, ToSchema)]
@@ -132,6 +138,7 @@ impl Default for Config {
             docs_ui: cfg!(debug_assertions),
             admin_ui: true,
             bootstrap_admin_token: true,
+            use_env: false,
         }
     }
 }
@@ -207,6 +214,7 @@ impl Config {
         };
         cfg.data_dir = data_dir;
         cfg.config_file = file;
+        cfg.use_env = true;
         cfg.apply_env()?;
         Ok(cfg)
     }
@@ -219,6 +227,7 @@ impl Config {
             data_dir: self.data_dir.clone(),
             config_file: self.config_file.clone(),
             bootstrap_admin_token: self.bootstrap_admin_token,
+            use_env: self.use_env,
             ..file
         };
         cfg.apply_env()?;
@@ -244,10 +253,10 @@ impl Config {
     }
 
     /// Keys whose file value is currently replaced by an environment variable.
-    pub fn env_overrides() -> Vec<&'static str> {
+    pub fn overridden_keys(&self) -> Vec<&'static str> {
         ENV_OVERRIDES
             .iter()
-            .filter(|(var, _)| std::env::var_os(var).is_some())
+            .filter(|(var, _)| self.use_env && std::env::var_os(var).is_some())
             .map(|(_, key)| *key)
             .collect()
     }
@@ -325,6 +334,9 @@ impl Config {
     }
 
     fn apply_env(&mut self) -> Result<()> {
+        if !self.use_env {
+            return Ok(());
+        }
         if let Ok(v) = std::env::var("SQAIL_BIND") {
             self.bind = v.parse().with_context(|| format!("SQAIL_BIND={v}"))?;
         }

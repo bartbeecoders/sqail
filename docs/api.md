@@ -236,7 +236,10 @@ All schema routes are `GET`s under `/v1/connections/{id}/schema/`:
 `databases`, `schemas`, `tables?schema=`, `routines?schema=`, and
 `columns`, `indexes`, `foreign-keys` and `privileges`, each with
 `?schema=&name=` for a table (`schema` defaults to the connection's current
-schema). An index's `constraint` flag says it backs a `PRIMARY KEY` or
+schema). A routine's `table_valued` flag (omitted when false) marks a
+function that returns a table: a SQL Server inline or multi-statement
+table-valued function, a PostgreSQL set-returning function. An index's
+`constraint` flag says it backs a `PRIMARY KEY` or
 `UNIQUE` constraint. `privileges` lists the table's grants (owner excluded),
 its owner (Postgres) and the roles and users that could be granted
 privileges; `supported` is `false` on SQLite. `GET

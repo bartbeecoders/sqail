@@ -1384,6 +1384,83 @@ async fn engine_sqlite() {
     check_engine(sqlite_dev()).await;
 }
 
+/// `routines` marks functions that return a table, and `SELECT * FROM f()`
+/// (what dragging one into the editor writes) runs.
+async fn table_valued_functions(d: Dialect, setup: &str, teardown: &str, schema: &str) {
+    let h = harness().await;
+    let c = profile(&h, &d, false).await;
+    exec(&h, c, teardown).await;
+    exec(&h, c, setup).await;
+    let list: Vec<RoutineInfo> = h
+        .get_json(&format!(
+            "/v1/connections/{c}/schema/routines?schema={schema}"
+        ))
+        .await;
+    let flags: Vec<(String, bool)> = list
+        .iter()
+        .map(|r| (r.name.clone(), r.table_valued))
+        .collect();
+    let calls: Vec<String> = list
+        .iter()
+        .filter(|r| r.table_valued)
+        .map(|r| {
+            let f = if d.engine == "mssql" {
+                format!("[{schema}].[{}]", r.name)
+            } else {
+                format!("{schema}.{}", r.name)
+            };
+            format!("SELECT * FROM {f}()")
+        })
+        .collect();
+    for sql in &calls {
+        let ev = h.query(c, sql).await;
+        assert!(error(&ev).is_none(), "{sql}: {ev:?}");
+    }
+    exec(&h, c, teardown).await;
+    assert_eq!(
+        flags,
+        vec![
+            ("multi".to_string(), true),
+            ("scalar".to_string(), false),
+            ("tvf".to_string(), true),
+        ]
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn postgres_table_valued_functions() {
+    table_valued_functions(
+        postgres(),
+        "CREATE SCHEMA it176_tvf;
+         CREATE FUNCTION it176_tvf.scalar() RETURNS int LANGUAGE sql AS 'SELECT 1';
+         CREATE FUNCTION it176_tvf.tvf() RETURNS TABLE (a int) LANGUAGE sql AS 'SELECT 1';
+         CREATE FUNCTION it176_tvf.multi() RETURNS SETOF int LANGUAGE sql AS 'SELECT 2';",
+        "DROP SCHEMA IF EXISTS it176_tvf CASCADE",
+        "it176_tvf",
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn mssql_table_valued_functions() {
+    table_valued_functions(
+        mssql(),
+        "EXEC('CREATE SCHEMA it176_tvf')
+GO
+CREATE FUNCTION it176_tvf.scalar() RETURNS int AS BEGIN RETURN 1 END
+GO
+CREATE FUNCTION it176_tvf.tvf() RETURNS TABLE AS RETURN SELECT 1 AS a
+GO
+CREATE FUNCTION it176_tvf.multi() RETURNS @t TABLE (a int) AS BEGIN INSERT @t VALUES (2); RETURN END",
+        "DROP FUNCTION IF EXISTS it176_tvf.scalar, it176_tvf.tvf, it176_tvf.multi;
+IF SCHEMA_ID('it176_tvf') IS NOT NULL EXEC('DROP SCHEMA it176_tvf')",
+        "it176_tvf",
+    )
+    .await;
+}
+
 /// Explain analyze on a session with an open transaction undoes only the
 /// explained statement: the transaction and its earlier work survive, also
 /// when the explained statement fails.

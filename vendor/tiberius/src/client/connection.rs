@@ -1356,6 +1356,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Stream for Connection<S> {
         match ready!(this.transport.try_poll_next_unpin(cx)) {
             Some(Ok(packet)) => {
                 this.flushed = packet.is_last();
+                // sqail patch: progress for `AttentionHandle::packets_read`.
+                this.attention.note_packet();
                 Poll::Ready(Some(Ok(packet)))
             }
             Some(Err(e)) => Poll::Ready(Some(Err(e))),

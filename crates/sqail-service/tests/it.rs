@@ -1384,6 +1384,113 @@ async fn engine_sqlite() {
     check_engine(sqlite_dev()).await;
 }
 
+/// Explain analyze on a session with an open transaction undoes only the
+/// explained statement: the transaction and its earlier work survive, also
+/// when the explained statement fails.
+async fn explain_analyze_keeps_the_open_transaction(
+    engine: &str,
+    begin: &str,
+    h: &Harness,
+    c: Uuid,
+) {
+    let t = format!("it_explain_tx_{}", Uuid::new_v4().simple());
+    let ev = h
+        .query(
+            c,
+            &format!("CREATE TABLE {t} (id int PRIMARY KEY, v int); INSERT INTO {t} VALUES (1, 0)"),
+        )
+        .await;
+    assert!(error(&ev).is_none(), "{} {ev:?}", engine);
+    let s: SessionInfo = h
+        .post("/v1/sessions", &json!({"connection_id": c}), &h.admin)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let qp = format!("/v1/sessions/{}/query", s.id);
+    let ep = format!("/v1/sessions/{}/explain", s.id);
+    let run = |sql: String| h.query_on(&qp, json!({ "sql": sql }), None);
+    let ep = &ep;
+    let explain = |sql: String| async move {
+        let res = h
+            .post(ep, &json!({"sql": sql, "analyze": true}), &h.admin)
+            .await;
+        (res.status(), res.text().await.unwrap())
+    };
+    let ev = run(begin.to_string()).await;
+    assert_eq!(done(&ev).1, Some(true), "{} {ev:?}", engine);
+    let ev = run(format!("UPDATE {t} SET v = 1 WHERE id = 1")).await;
+    assert!(error(&ev).is_none(), "{} {ev:?}", engine);
+
+    let (status, body) = explain(format!("UPDATE {t} SET v = 2 WHERE id = 1")).await;
+    assert_eq!(status, 200, "{}: {body}", engine);
+    // Statements that fail to parse or to run leave the transaction usable.
+    for bad in ["SELEC 1", "SELECT * FROM it_explain_no_such_table"] {
+        let (status, body) = explain(bad.to_string()).await;
+        assert!(!status.is_success(), "{} {bad}: {body}", engine);
+    }
+    let ev = run(format!("SELECT v FROM {t} WHERE id = 1")).await;
+    assert!(error(&ev).is_none(), "{} {ev:?}", engine);
+    assert_eq!(rows(&ev, 0), vec![vec![json!(1)]], "{}", engine);
+    assert_eq!(done(&ev).1, Some(true), "{}: transaction lost", engine);
+
+    let ev = run("COMMIT".to_string()).await;
+    assert!(error(&ev).is_none(), "{} {ev:?}", engine);
+    assert_eq!(done(&ev).1, Some(false), "{} {ev:?}", engine);
+    let ev = h.query(c, &format!("SELECT v FROM {t} WHERE id = 1")).await;
+    assert_eq!(
+        rows(&ev, 0),
+        vec![vec![json!(1)]],
+        "{}: commit lost the update",
+        engine
+    );
+
+    // Without a transaction, analyzing still keeps nothing and opens none.
+    let (status, body) = explain(format!("UPDATE {t} SET v = 3 WHERE id = 1")).await;
+    assert_eq!(status, 200, "{}: {body}", engine);
+    let ev = run(format!("SELECT v FROM {t} WHERE id = 1")).await;
+    assert_eq!(rows(&ev, 0), vec![vec![json!(1)]], "{}", engine);
+    assert_eq!(done(&ev).1, Some(false), "{}", engine);
+
+    if engine == "postgres" {
+        // An aborted transaction is refused with a clear error.
+        run(begin.to_string()).await;
+        let ev = run("SELECT 1 / 0".to_string()).await;
+        assert!(error(&ev).is_some());
+        let (status, body) = explain(format!("SELECT v FROM {t}")).await;
+        assert_eq!(status, 400, "{body}");
+        assert!(body.contains("aborted"), "{body}");
+        run("ROLLBACK".to_string()).await;
+    }
+    h.query(c, &format!("DROP TABLE {t}")).await;
+}
+
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn postgres_explain_analyze_keeps_the_open_transaction() {
+    let h = harness().await;
+    let d = postgres();
+    let c = profile(&h, &d, false).await;
+    explain_analyze_keeps_the_open_transaction(d.engine, d.begin, &h, c).await;
+}
+
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn mssql_explain_analyze_keeps_the_open_transaction() {
+    let h = harness().await;
+    let d = mssql();
+    let c = profile(&h, &d, false).await;
+    explain_analyze_keeps_the_open_transaction(d.engine, d.begin, &h, c).await;
+}
+
+#[tokio::test]
+async fn sqlite_explain_analyze_keeps_the_open_transaction() {
+    // SQLite has no actual plans: analyze never executes the statement.
+    let h = harness().await;
+    let c = h.sqlite_temp(false).await;
+    explain_analyze_keeps_the_open_transaction("sqlite", "BEGIN", &h, c).await;
+}
+
 #[tokio::test]
 #[ignore = "needs podman test databases (scripts/db.sh up)"]
 async fn mssql_scripts_split_on_go_and_return_multiple_results() {
@@ -1739,6 +1846,66 @@ async fn mssql_stops_reading_at_max_rows() {
     assert_eq!(rows(&ev, 0), vec![vec![json!(1)]], "{ev:?}");
     let (ev, _) = timed(&h, &sp, "ROLLBACK", json!([]), 100).await;
     assert_eq!(done(&ev).1, Some(false));
+}
+
+/// The first column of result set `index` holds a showplan.
+fn is_showplan(events: &[QueryEvent], index: u32) -> bool {
+    rows(events, index)
+        .first()
+        .and_then(|r| r.first())
+        .and_then(Value::as_str)
+        .is_some_and(|s| s.starts_with("<ShowPlanXML"))
+}
+
+/// With SHOWPLAN_XML on, the server answers the service's own probes
+/// (@@TRANCOUNT, @@OPTIONS) with a plan; that must not panic (#147).
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn mssql_showplan_xml_does_not_break_the_probes() {
+    let h = harness().await;
+    let c = profile(&h, &mssql(), false).await;
+    let path = format!("/v1/connections/{c}/query");
+    // pooled; a lone query also runs the Attention probe
+    for sql in [
+        "SET SHOWPLAN_XML ON\nGO\nselect 1 a",
+        "SET SHOWPLAN_XML ON\nGO\nselect 1 a; select 2 b",
+    ] {
+        let (ev, _) = timed(&h, &path, sql, json!([]), 100).await;
+        assert!(error(&ev).is_none(), "{ev:?}");
+        assert!(is_showplan(&ev, 0), "{ev:?}");
+        assert_eq!(done(&ev), (false, None), "{ev:?}");
+    }
+    assert!(h.get("/v1/health").await.status().is_success());
+
+    // a session keeps its connection and its transaction state
+    let s: SessionInfo = h
+        .post("/v1/sessions", &json!({"connection_id": c}), &h.admin)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let sp = format!("/v1/sessions/{}/query", s.id);
+    let (ev, _) = timed(&h, &sp, "BEGIN TRANSACTION", json!([]), 100).await;
+    assert_eq!(done(&ev).1, Some(true), "{ev:?}");
+    let (ev, _) = timed(&h, &sp, "SET SHOWPLAN_XML ON", json!([]), 100).await;
+    assert_eq!(done(&ev).1, Some(true), "{ev:?}");
+    for sql in ["select 1 a", "SELECT @@TRANCOUNT"] {
+        let (ev, _) = timed(&h, &sp, sql, json!([]), 100).await;
+        assert!(error(&ev).is_none(), "{ev:?}");
+        assert!(is_showplan(&ev, 0), "{ev:?}");
+        assert!(
+            !ev.iter()
+                .any(|e| matches!(e, QueryEvent::Message { severity, .. } if severity == "error")),
+            "{ev:?}"
+        );
+        assert_eq!(done(&ev).1, Some(true), "{ev:?}");
+    }
+    let (ev, _) = timed(&h, &sp, "SET SHOWPLAN_XML OFF", json!([]), 100).await;
+    assert_eq!(done(&ev).1, Some(true), "{ev:?}");
+    let (ev, _) = timed(&h, &sp, "SELECT @@TRANCOUNT", json!([]), 100).await;
+    assert_eq!(rows(&ev, 0), vec![vec![json!(1)]], "{ev:?}");
+    let (ev, _) = timed(&h, &sp, "ROLLBACK", json!([]), 100).await;
+    assert_eq!(done(&ev).1, Some(false), "{ev:?}");
 }
 
 #[tokio::test]

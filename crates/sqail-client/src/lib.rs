@@ -481,6 +481,20 @@ impl Client {
         .await
     }
 
+    /// Columns of `table` as session `session` sees it (its search path,
+    /// database and temporary tables). Without `schema`, the table is the one
+    /// an unqualified name on the session resolves to.
+    pub async fn session_columns(
+        &self,
+        session: Uuid,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<ColumnInfo>> {
+        let path = Self::schema_path(session, "schema/columns", schema, Some(table));
+        self.get(&path.replacen("/v1/connections/", "/v1/sessions/", 1))
+            .await
+    }
+
     pub async fn indexes(
         &self,
         id: Uuid,

@@ -31,6 +31,8 @@ pub enum Dialog {
     DropTable(Box<DropTable>),
     /// Closing a tab (`Some(index)`) or quitting (`None`) with open transactions.
     ConfirmCloseTransaction(Option<usize>),
+    /// Changing the connection of tab `index`, which has an open transaction.
+    ConfirmSwitchTransaction(usize, Option<Uuid>),
 }
 
 // ---------------------------------------------------------------- welcome --
@@ -1937,7 +1939,9 @@ fn import(ctx: &egui::Context, app: &mut SqailApp) {
 
 pub struct ApplyEdits {
     pub tab: u64,
-    pub connection: Uuid,
+    /// The tab's session: the edits run where the result came from.
+    pub session: Uuid,
+    pub tx: crate::editing::EditTx,
     pub engine: sqail_client::proto::Engine,
     pub statements: Vec<(String, Vec<sqail_client::proto::Param>)>,
     pub previews: Vec<String>,
@@ -1955,9 +1959,15 @@ fn apply_edits(ctx: &egui::Context, app: &mut SqailApp) {
         ui.set_width(700.0);
         ui.heading(format!("Apply {} change(s)", d.statements.len()));
         ui.label(
-            RichText::new(
-                "These statements run in one transaction; if any fails, nothing is changed.",
-            )
+            RichText::new(match d.tx {
+                crate::editing::EditTx::Commit => {
+                    "These statements run in one transaction; if any fails, nothing is changed."
+                }
+                _ => {
+                    "These statements become part of the tab's transaction and are not \
+                     committed until you click Commit. If any fails, none of them is applied."
+                }
+            })
             .weak(),
         );
         egui::ScrollArea::vertical()
@@ -2006,9 +2016,10 @@ fn apply_edits(ctx: &egui::Context, app: &mut SqailApp) {
     if apply && let Some(client) = app.service.client.clone() {
         d.busy = true;
         d.error = None;
-        let (tab, conn, engine, stmts) = (d.tab, d.connection, d.engine, d.statements.clone());
+        let (tab, session, tx, engine, stmts) =
+            (d.tab, d.session, d.tx, d.engine, d.statements.clone());
         app.worker.run(async move {
-            let result = crate::editing::apply(&client, conn, engine, stmts)
+            let result = crate::editing::apply(&client, session, engine, stmts, tx)
                 .await
                 .map_err(|e| format!("{e:#}"));
             Msg::EditsApplied { tab, result }
@@ -2131,7 +2142,12 @@ fn drop_table(ctx: &egui::Context, app: &mut SqailApp) {
     }
 }
 
-fn confirm_close_transaction(ctx: &egui::Context, app: &mut SqailApp, target: Option<usize>) {
+fn confirm_close_transaction(
+    ctx: &egui::Context,
+    app: &mut SqailApp,
+    target: Option<usize>,
+    switch_to: Option<Option<Uuid>>,
+) {
     let mut decision = None;
     let resp = Modal::new(Id::new("confirm_close_tx")).show(ctx, |ui| {
         ui.set_width(440.0);
@@ -2144,15 +2160,18 @@ fn confirm_close_transaction(ctx: &egui::Context, app: &mut SqailApp, target: Op
             None => "Some tabs have open transactions.".to_string(),
         };
         ui.label(what);
+        let (doing, label) = match (target, switch_to) {
+            (Some(_), Some(_)) => ("Switching the connection", "Roll back and switch"),
+            (Some(_), None) => ("Closing", "Roll back and close"),
+            (None, _) => ("Closing", "Roll back and quit"),
+        };
         ui.label(
-            RichText::new("Closing rolls the changes back. Commit first to keep them.").weak(),
+            RichText::new(format!(
+                "{doing} rolls the changes back. Commit first to keep them."
+            ))
+            .weak(),
         );
         ui.horizontal(|ui| {
-            let label = if target.is_some() {
-                "Roll back and close"
-            } else {
-                "Roll back and quit"
-            };
             if ui
                 .button(RichText::new(label).color(Color32::from_rgb(0xd6, 0x45, 0x45)))
                 .clicked()
@@ -2175,7 +2194,10 @@ fn confirm_close_transaction(ctx: &egui::Context, app: &mut SqailApp, target: Op
                     if let Some(t) = app.tabs.get_mut(i) {
                         t.in_transaction = false;
                     }
-                    app.request_close_tab(i);
+                    match switch_to {
+                        Some(conn) => app.set_connection(i, conn),
+                        None => app.request_close_tab(i),
+                    }
                 }
                 None => {
                     app.allow_close = true;
@@ -2201,7 +2223,12 @@ pub fn show(ctx: &egui::Context, app: &mut SqailApp) {
         Dialog::Import(_) => import(ctx, app),
         Dialog::ApplyEdits(_) => apply_edits(ctx, app),
         Dialog::DropTable(_) => drop_table(ctx, app),
-        Dialog::ConfirmCloseTransaction(target) => confirm_close_transaction(ctx, app, target),
+        Dialog::ConfirmCloseTransaction(target) => {
+            confirm_close_transaction(ctx, app, target, None)
+        }
+        Dialog::ConfirmSwitchTransaction(idx, conn) => {
+            confirm_close_transaction(ctx, app, Some(idx), Some(conn))
+        }
     }
 }
 

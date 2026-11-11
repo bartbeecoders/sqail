@@ -10,6 +10,8 @@ use sqail_client::proto::{
 use sqail_client::{Client, On, Target, Trust};
 use sqail_ui::designer::model::{Design, IndexPart, Plan, drop_table};
 use sqail_ui::designer::{self};
+use sqail_ui::sql::drop::{DropItem, ObjectKind, Spot, text_for};
+use sqail_ui::sql::format::Style;
 use uuid::Uuid;
 
 struct Svc {
@@ -463,4 +465,133 @@ fn table_design_round_trip_on_postgres_and_mssql() {
         "IF DATABASE_PRINCIPAL_ID('sqail_it_reader') IS NULL CREATE USER sqail_it_reader WITHOUT LOGIN",
     );
     exercise(&s, ms, Engine::Mssql, "sales", Some("sqail_it_reader"));
+}
+
+/// A table whose column names the engine reserves, built and reloaded by the
+/// designer with a key and an index on them, then queried through the
+/// drag-and-drop SELECT: every name must come out quoted and still match.
+fn reserved_names(s: &Svc, conn: Uuid, engine: Engine, schema: &str, names: [&str; 3]) {
+    let table = format!("rw_{}", &Uuid::new_v4().simple().to_string()[..8]);
+    let text = if engine == Engine::Postgres {
+        "text"
+    } else {
+        "TEXT"
+    };
+    let mut d = Design::new_table(engine, Some(schema));
+    d.table.name = table.clone();
+    let key = d.table.columns[0].id;
+    d.column_mut(key).unwrap().name = names[0].into();
+    d.column_mut(key).unwrap().data_type = text.into();
+    let mut ids = vec![key];
+    for n in &names[1..] {
+        let c = d.add_column();
+        d.column_mut(c).unwrap().name = (*n).into();
+        d.column_mut(c).unwrap().data_type = text.into();
+        ids.push(c);
+    }
+    let ix = d.add_index();
+    d.index_mut(ix).unwrap().name = format!("ix_{table}");
+    d.index_mut(ix).unwrap().parts = vec![IndexPart::Column(ids[1]), IndexPart::Column(ids[2])];
+    s.apply(conn, engine, d.plan().unwrap());
+
+    let d = s.load(conn, engine, schema, &table);
+    no_changes(&d);
+    assert_eq!(d.table.primary_key.columns, vec![column(&d, names[0])]);
+    assert_eq!(
+        d.table.indexes[0].parts,
+        vec![
+            IndexPart::Column(column(&d, names[1])),
+            IndexPart::Column(column(&d, names[2]))
+        ]
+    );
+
+    let q = sqail_ui::sql::qualified_name(engine, Some(schema), &table);
+    s.rows(conn, &format!("INSERT INTO {q} VALUES ('alice', 'b', 'c')"));
+    let item = DropItem {
+        engine,
+        schema: schema.into(),
+        name: table.clone(),
+        kind: ObjectKind::Table,
+    };
+    let cols: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+    let style = Style {
+        uppercase: true,
+        indent: 2,
+    };
+    let select = text_for(&item, Spot::Line, Some(&cols), &style);
+    assert_eq!(s.rows(conn, &select), [["alice", "b", "c"]], "{select}");
+    s.apply(
+        conn,
+        engine,
+        Plan {
+            body: vec![drop_table(engine, schema, &table, false)],
+            ..Default::default()
+        },
+    );
+}
+
+#[test]
+fn sqlite_reserved_words_are_quoted() {
+    let s = svc();
+    let conn = s.connect(
+        ConnectionParams::Sqlite(SqliteParams {
+            path: s.dir.path().join("rw.db").to_string_lossy().into(),
+            create: true,
+        }),
+        None,
+    );
+    let names = ["current_date", "notnull", "raise"];
+    reserved_names(&s, conn, Engine::Sqlite, "main", names);
+}
+
+/// `PG_MUST_QUOTE` against the server's own keyword list, so a server that
+/// reserves more words fails here instead of getting SQL that misreads.
+#[test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+fn postgres_reserved_words_are_quoted() {
+    let s = svc();
+    let pg = s.connect(
+        ConnectionParams::Postgres(PostgresParams {
+            host: "127.0.0.1".into(),
+            port: 55432,
+            database: "sqail_test".into(),
+            user: "sqail".into(),
+            ssl_mode: PgSslMode::Disable,
+            ssl_root_cert: None,
+            ssl_client_cert: None,
+        }),
+        Some("sqail_dev_pw"),
+    );
+    let version = s.rows(pg, "SHOW server_version").remove(0).remove(0);
+    let reserved: Vec<String> = s
+        .rows(
+            pg,
+            "SELECT word FROM pg_get_keywords() WHERE catcode <> 'U' ORDER BY word",
+        )
+        .into_iter()
+        .map(|mut r| r.remove(0))
+        .collect();
+    let missing: Vec<&String> = reserved
+        .iter()
+        .filter(|w| !sqail_ui::sql::pg_must_quote(w))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "PostgreSQL {version} reserves words PG_MUST_QUOTE lacks: {missing:?}"
+    );
+    let extra: Vec<&&str> = sqail_ui::sql::PG_MUST_QUOTE
+        .iter()
+        .filter(|w| !reserved.iter().any(|r| r == **w))
+        .collect();
+    assert!(
+        extra.is_empty(),
+        "PostgreSQL {version} doesn't reserve {extra:?}: keep them in PG_MUST_QUOTE only \
+         if a supported version still does"
+    );
+
+    let schema = format!("it170_{}", &Uuid::new_v4().simple().to_string()[..8]);
+    s.rows(pg, &format!("CREATE SCHEMA {schema}"));
+    let names = ["user", "leading", "position"];
+    reserved_names(&s, pg, Engine::Postgres, &schema, names);
+    s.rows(pg, &format!("DROP SCHEMA {schema} CASCADE"));
 }

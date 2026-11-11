@@ -128,7 +128,8 @@ the attestation is what catches a swapped one.
   still change the setting or write. Real enforcement needs a database role
   without write rights; use one wherever read-only matters.
 * **SQL Server cancel** sends a TDS Attention. Only when the server does not
-  acknowledge it within 3 s, or when a request is abandoned, does the service
+  acknowledge it and sends nothing for 3 s (or for a minute in all), or when
+  a request is abandoned, does the service
   use `KILL`, which needs `ALTER ANY CONNECTION`. Without it the service drops
   the connection, and the server finishes the batch in the background.
 * **Database driver logs at debug level** echo SQL text, which can contain

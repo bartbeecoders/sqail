@@ -28,7 +28,10 @@ use crate::sessions::Session;
 use crate::state::{AppState, RunningQuery};
 use crate::store::{AuditEvent, StoredConnection};
 
-/// Grace period for a cancelled query to stop before its connection is dropped.
+/// Grace period for a cancelled query to stop before its connection is
+/// dropped, renewed while the query still makes progress ([`wind_down`]).
+///
+/// [`wind_down`]: crate::engine::wind_down
 const CANCEL_GRACE: Duration = Duration::from_secs(5);
 
 /// Where the query runs.
@@ -324,11 +327,11 @@ async fn run_controlled(
     if !canceller.cancel().await {
         return (Err(reason), true);
     }
-    match tokio::time::timeout(CANCEL_GRACE, &mut fut).await {
+    match crate::engine::wind_down(&*canceller, CANCEL_GRACE, &mut fut).await {
         // The query stopped (normally with a "cancelled" error from the server).
-        Ok(_) => (Err(reason), false),
+        Some(_) => (Err(reason), false),
         // Still running: give up on this connection.
-        Err(_) => (Err(reason), true),
+        None => (Err(reason), true),
     }
 }
 

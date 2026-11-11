@@ -399,7 +399,9 @@ result.
 `SELECT` / `WITH` / `VALUES` statement: writes, DDL, `EXEC`, `SELECT … INTO`,
 `FOR UPDATE`, transaction control (`COMMIT`, `ROLLBACK`, …), session and
 admin commands, multiple statements, unfinished strings or comments and
-functions with side effects are refused. The service also refuses anything
+functions with side effects (also when the name is quoted, like
+`"pg_sleep"(1)`, or written with `U&"…"` escapes) are refused. A quoted
+column or table that happens to share such a function's name is still fine. The service also refuses anything
 but a single statement for the assistant. Every assistant query also runs in
 its own transaction that is always rolled back (read-only on PostgreSQL), so
 even something that slipped through would be undone. For the strongest

@@ -134,9 +134,20 @@ api $URL/v1/connections/$ID/query -d '{"sql": "SELECT id, name FROM customers; U
   script arrive as `error` events (`code`, `message` and `db_code`, which holds
   the SQLSTATE or SQL Server error number).
 * Cells: `null`; bools and ints (i64) as JSON bool and number; floats as
-  numbers (`"NaN"`/`"Infinity"` as strings); bytes as lowercase hex;
-  everything else as a string (decimals keep full precision, temporal values
-  are ISO-8601, JSON columns are JSON text). `logical` says which applies.
+  numbers (`"NaN"`, `"Infinity"` and `"-Infinity"` as strings; a 4-byte
+  `real`/`float4` with its own shortest digits, `3.14`); bytes as lowercase
+  hex; everything else as a string. Decimals keep full precision and their
+  scale (`"1.50"`, `"0"` for scale 0; SQL Server `money`/`smallmoney` with
+  4 decimals). Temporal values are ISO-8601 with the column's own fraction
+  digits (`time(7)` `"23:59:59.1234567"`, `datetime2(0)` none; SQL Server
+  `datetime` 3, rounded as the server shows it, and `smalldatetime` none), so
+  the text parses back to the same value. JSON columns are JSON text.
+  `logical` says which applies.
+* `type_name` is the engine's type name. PostgreSQL enums and extension
+  types (hstore, PostGIS, ...) have their own name (`format_type`), or
+  `oid:<n>` if the service could not look it up. SQL Server CLR types
+  (`hierarchyid`, `geometry`, `geography`) are `udt` with `logical: bytes`.
+  A SQL Server column without a name is called `(No column name)`.
 * `max_rows` caps each result set (the service clamps it to
   `limits.max_rows`), and `truncated: true` says the cap was hit.
   A script that is a single query stops on the database server once it has

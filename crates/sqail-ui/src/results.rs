@@ -166,6 +166,27 @@ impl SortKey<'_> {
     }
 }
 
+/// A float as psql prints it: shortest digits, with an exponent outside
+/// 1e-4 .. 1e15 (`1.1805916207174113e+21`, not 22 digits; `1e-320`, not
+/// 320 characters), and the server's names for the non-finite values.
+pub fn float_text(f: f64) -> String {
+    if f.is_nan() {
+        "NaN".into()
+    } else if f.is_infinite() {
+        if f > 0.0 { "Infinity" } else { "-Infinity" }.into()
+    } else if f == 0.0 || (1e-4..1e15).contains(&f.abs()) {
+        f.to_string()
+    } else {
+        let s = format!("{f:e}");
+        let (mantissa, exp) = s.split_once('e').unwrap_or((&s, "0"));
+        let (sign, digits) = match exp.strip_prefix('-') {
+            Some(d) => ('-', d),
+            None => ('+', exp),
+        };
+        format!("{mantissa}e{sign}{digits:0>2}")
+    }
+}
+
 impl Cell {
     pub fn from_json(v: Value) -> Self {
         match v {
@@ -187,7 +208,7 @@ impl Cell {
             Cell::Null => Cow::Borrowed("NULL"),
             Cell::Bool(b) => Cow::Borrowed(if *b { "true" } else { "false" }),
             Cell::Int(i) => Cow::Owned(i.to_string()),
-            Cell::Float(f) => Cow::Owned(f.to_string()),
+            Cell::Float(f) => Cow::Owned(float_text(*f)),
             Cell::Text(s) if logical == LogicalType::Bytes => Cow::Owned(format!("0x{s}")),
             Cell::Text(s) => Cow::Borrowed(s.as_str()),
         }
@@ -730,6 +751,27 @@ pub fn selection_tsv_capped(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn floats_print_like_psql() {
+        for (f, want) in [
+            (0.0, "0"),
+            (1.5, "1.5"),
+            (-0.0001, "-0.0001"),
+            (0.00001, "1e-05"),
+            (123456789012345.0, "123456789012345"),
+            (1e15, "1e+15"),
+            (2f64.powi(70), "1.1805916207174113e+21"),
+            (1e300, "1e+300"),
+            (1e-320, "1e-320"),
+            (-2.5e-7, "-2.5e-07"),
+            (f64::NAN, "NaN"),
+            (f64::INFINITY, "Infinity"),
+            (f64::NEG_INFINITY, "-Infinity"),
+        ] {
+            assert_eq!(float_text(f), want, "{f}");
+        }
+    }
 
     #[test]
     fn row_lines_cache_counts_tall_rows_and_invalidates() {

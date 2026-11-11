@@ -330,6 +330,170 @@ fn accept(tab: &mut Tab, i: usize) {
     tab.pending_select = Some(tab.cursor);
 }
 
+/// A line-wise edit of the selection: Tab, Shift+Tab, Ctrl+/.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineEdit {
+    Indent,
+    Outdent,
+    ToggleComment,
+}
+
+/// Byte ranges (without the newline) of the lines the byte selection
+/// `start..end` touches. A selection that ends at the start of a line leaves
+/// that line out.
+fn selected_lines(text: &str, start: usize, end: usize) -> Vec<std::ops::Range<usize>> {
+    let first = text[..start].rfind('\n').map_or(0, |i| i + 1);
+    let end = if end > start && text[..end].ends_with('\n') {
+        end - 1
+    } else {
+        end
+    };
+    let mut lines = Vec::new();
+    let mut at = first;
+    loop {
+        let stop = text[at..].find('\n').map_or(text.len(), |i| at + i);
+        lines.push(at..stop);
+        if stop >= end || stop == text.len() {
+            return lines;
+        }
+        at = stop + 1;
+    }
+}
+
+/// Apply `edit` to the lines of the byte selection `sel` (start, end in any
+/// order) in `text`. Returns the selection moved along with the text.
+fn edit_lines(
+    text: &mut String,
+    sel: (usize, usize),
+    edit: LineEdit,
+    indent: usize,
+) -> (usize, usize) {
+    let (lo, hi) = (sel.0.min(sel.1), sel.0.max(sel.1));
+    let lines = selected_lines(text, lo, hi);
+    let lead = |r: &std::ops::Range<usize>| {
+        text[r.clone()]
+            .bytes()
+            .take_while(|b| matches!(b, b' ' | b'\t'))
+            .count()
+    };
+    let blank = |r: &std::ops::Range<usize>| text[r.clone()].trim().is_empty();
+    let several = lines.len() > 1;
+    // (offset, bytes removed, text inserted), in text order.
+    let mut edits: Vec<(usize, usize, &str)> = Vec::new();
+    match edit {
+        LineEdit::Indent => {
+            for r in &lines {
+                if !(several && blank(r)) {
+                    edits.push((r.start, 0, "\t"));
+                }
+            }
+        }
+        LineEdit::Outdent => {
+            for r in &lines {
+                let s = &text[r.clone()];
+                let n = if s.starts_with('\t') {
+                    1
+                } else {
+                    s.bytes()
+                        .take(indent.max(1))
+                        .take_while(|&b| b == b' ')
+                        .count()
+                };
+                if n > 0 {
+                    edits.push((r.start, n, ""));
+                }
+            }
+        }
+        LineEdit::ToggleComment => {
+            let code: Vec<_> = lines.iter().filter(|r| !blank(r)).collect();
+            let commented = !code.is_empty()
+                && code
+                    .iter()
+                    .all(|r| text[r.start + lead(r)..r.end].starts_with("--"));
+            if commented {
+                for r in &code {
+                    let at = r.start + lead(r);
+                    let n = if text[at..r.end].starts_with("-- ") {
+                        3
+                    } else {
+                        2
+                    };
+                    edits.push((at, n, ""));
+                }
+            } else {
+                let col = code.iter().map(|r| lead(r)).min().unwrap_or(0);
+                for r in &code {
+                    edits.push((r.start + col, 0, "-- "));
+                }
+            }
+        }
+    }
+    let (mut a, mut b) = sel;
+    // A selection that starts where text is inserted keeps starting there,
+    // so whole selected lines stay selected.
+    let keep = |p: usize| sel.0 != sel.1 && p == lo;
+    let (keep_a, keep_b) = (keep(a), keep(b));
+    for &(at, remove, insert) in edits.iter().rev() {
+        text.replace_range(at..at + remove, insert);
+        for (p, stay) in [(&mut a, keep_a), (&mut b, keep_b)] {
+            if stay && remove == 0 && *p == at {
+                continue;
+            }
+            if *p >= at + remove {
+                *p = *p - remove + insert.len();
+            } else if *p > at {
+                *p = at;
+            }
+        }
+    }
+    (a, b)
+}
+
+/// Keys the egui text editor would turn into deletions. Tab with a selection
+/// and Shift+Tab indent / outdent the selected lines, Ctrl+/ toggles a `--`
+/// comment on them, and Ctrl+H/K/U/W (delete a character, the rest of the
+/// line, the start of the line, a word) are swallowed.
+fn line_keys(ui: &mut egui::Ui, tab: &mut Tab, indent: usize) {
+    let (a, b) = (
+        char_to_byte(&tab.text, tab.cursor.primary.index.0),
+        char_to_byte(&tab.text, tab.cursor.secondary.index.0),
+    );
+    let mut edit = None;
+    ui.input_mut(|i| {
+        i.events.retain(|e| {
+            let egui::Event::Key {
+                key,
+                pressed,
+                modifiers,
+                ..
+            } = e
+            else {
+                return true;
+            };
+            let this = match key {
+                Key::Tab if modifiers.shift => Some(LineEdit::Outdent),
+                // A plain Tab without a selection inserts a tab as before.
+                Key::Tab if a != b => Some(LineEdit::Indent),
+                Key::Slash if modifiers.command => Some(LineEdit::ToggleComment),
+                Key::H | Key::K | Key::U | Key::W if modifiers.ctrl => None,
+                _ => return true,
+            };
+            if *pressed && this.is_some() {
+                edit = this;
+            }
+            false
+        })
+    });
+    let Some(edit) = edit else { return };
+    let (primary, secondary) = edit_lines(&mut tab.text, (a, b), edit, indent);
+    // `two` takes the secondary end first.
+    tab.cursor = CCursorRange::two(
+        CCursor::new(byte_to_char(&tab.text, secondary)),
+        CCursor::new(byte_to_char(&tab.text, primary)),
+    );
+    tab.pending_select = Some(tab.cursor);
+}
+
 /// Should typing just now open completions? After `.` or two word chars.
 fn auto_trigger(text: &str, cursor: usize) -> bool {
     let b = text.as_bytes();
@@ -442,6 +606,7 @@ pub fn editor_ui(ui: &mut egui::Ui, tab: &mut Tab, env: &EditorEnv<'_>) {
                 accept(tab, i);
             }
         }
+        line_keys(ui, tab, env.format.indent.into());
     }
 
     let font = FontId::monospace(font_size);
@@ -1042,5 +1207,61 @@ mod tests {
         assert_eq!(char_to_byte("héllo", 2), 3);
         assert_eq!(char_to_byte("hé", 10), 3);
         assert_eq!(byte_to_char("héllo", 3), 2);
+    }
+
+    /// `|` marks the selection ends (one marker: a cursor). Returns the text
+    /// with the moved selection marked the same way.
+    fn lines_edit(marked: &str, edit: LineEdit) -> String {
+        let a = marked.find('|').unwrap();
+        let b = marked.rfind('|').unwrap();
+        let b = if b == a { a } else { b - 1 };
+        let mut text = marked.replace('|', "");
+        let (a, b) = edit_lines(&mut text, (a, b), edit, 4);
+        let (lo, hi) = (a.min(b), a.max(b));
+        if lo != hi {
+            text.insert(hi, '|');
+        }
+        text.insert(lo, '|');
+        text
+    }
+
+    #[test]
+    fn indent_and_outdent_selected_lines() {
+        use LineEdit::*;
+        assert_eq!(
+            lines_edit("|SELECT a\n\nFROM t\n|WHERE x", Indent),
+            "|\tSELECT a\n\n\tFROM t\n|WHERE x",
+            "a selection ending at a line start leaves that line out; blank lines stay blank"
+        );
+        assert_eq!(
+            lines_edit("SEL|ECT a\nFR|OM t", Indent),
+            "\tSEL|ECT a\n\tFR|OM t"
+        );
+        assert_eq!(
+            lines_edit("|\tSELECT a\n      FROM t\n  x|", Outdent),
+            "|SELECT a\n  FROM t\nx|"
+        );
+        assert_eq!(lines_edit("  SELECT| a", Outdent), "SELECT| a");
+        assert_eq!(lines_edit("SELECT| a", Outdent), "SELECT| a");
+    }
+
+    #[test]
+    fn toggle_comment_on_selected_lines() {
+        use LineEdit::*;
+        assert_eq!(
+            lines_edit("  |SELECT a\n\n    FROM t|", ToggleComment),
+            "  |-- SELECT a\n\n  --   FROM t|"
+        );
+        assert_eq!(
+            lines_edit("  |-- SELECT a\n\n  --   FROM t|", ToggleComment),
+            "  |SELECT a\n\n    FROM t|"
+        );
+        assert_eq!(lines_edit("SELECT| 1", ToggleComment), "-- SELECT| 1");
+        assert_eq!(lines_edit("--SELECT| 1", ToggleComment), "SELECT| 1");
+        assert_eq!(
+            lines_edit("-- a\n|b|", ToggleComment),
+            "-- a\n|-- b|",
+            "only the selected lines count"
+        );
     }
 }

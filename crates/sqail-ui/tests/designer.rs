@@ -260,6 +260,164 @@ fn sqlite_table_design_round_trip() {
     exercise(&s, conn, Engine::Sqlite, "main", None);
 }
 
+/// SQL Server: an index with a descending key, included columns and a
+/// filter keeps all of them when a column it includes is dropped or its key
+/// column is retyped, the nonclustered key stays nonclustered, and the
+/// script for two changed defaults runs as one batch.
+#[test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+fn mssql_designer_keeps_index_details() {
+    let s = svc();
+    let ms = s.connect(
+        ConnectionParams::Mssql(MssqlParams {
+            host: "127.0.0.1".into(),
+            port: 51433,
+            instance: None,
+            database: Some("sqail_test".into()),
+            auth: MssqlAuth::Sql {
+                user: "sqail".into(),
+            },
+            encrypt: MssqlEncrypt::Required,
+            trust_server_certificate: true,
+        }),
+        Some("Sqail2_dev!Passw0rd"),
+    );
+    let e = Engine::Mssql;
+    let schema = format!("it172_{}", &Uuid::new_v4().simple().to_string()[..8]);
+    s.rows(ms, &format!("CREATE SCHEMA {schema}"));
+    s.rows(
+        ms,
+        &format!(
+            "CREATE TABLE {schema}.parent (
+                id int CONSTRAINT pk_{schema} PRIMARY KEY NONCLUSTERED,
+                code nvarchar(20) NOT NULL DEFAULT N'', a int DEFAULT 0, b int DEFAULT 1,
+                inc nvarchar(50), inc2 nvarchar(10));
+             CREATE INDEX ix_code ON {schema}.parent (code DESC) INCLUDE (inc, inc2) WHERE a > 0;"
+        ),
+    );
+    let facts = || {
+        s.rows(
+            ms,
+            &format!(
+                "SELECT i.name, i.type_desc, CAST(i.has_filter AS int), i.filter_definition,
+                        (SELECT STRING_AGG(CONCAT(c.name, IIF(x.is_descending_key = 1, ' DESC', ''),
+                                                  IIF(x.is_included_column = 1, ' included', '')), ', ')
+                                WITHIN GROUP (ORDER BY x.index_column_id)
+                         FROM sys.index_columns x
+                         JOIN sys.columns c ON c.object_id = x.object_id AND c.column_id = x.column_id
+                         WHERE x.object_id = i.object_id AND x.index_id = i.index_id)
+                 FROM sys.indexes i
+                 WHERE i.object_id = OBJECT_ID('{schema}.parent') AND i.name IS NOT NULL
+                 ORDER BY i.name"
+            ),
+        )
+    };
+    let after = |include: &str| {
+        vec![
+            vec![
+                "ix_code".to_string(),
+                "NONCLUSTERED".into(),
+                "1".into(),
+                "([a]>(0))".into(),
+                format!("code DESC, {include}"),
+            ],
+            vec![
+                format!("pk_{schema}"),
+                "NONCLUSTERED".into(),
+                "0".into(),
+                "null".into(),
+                "id".into(),
+            ],
+        ]
+    };
+    assert_eq!(facts(), after("inc included, inc2 included"));
+
+    let mut d = s.load(ms, e, &schema, "parent");
+    no_changes(&d);
+    d.remove_column(column(&d, "inc"));
+    s.apply(ms, e, d.plan().unwrap());
+    assert_eq!(facts(), after("inc2 included"));
+
+    let mut d = s.load(ms, e, &schema, "parent");
+    no_changes(&d);
+    for (c, ty) in [("code", "nvarchar(40)"), ("id", "bigint")] {
+        let c = column(&d, c);
+        d.column_mut(c).unwrap().data_type = ty.into();
+    }
+    s.apply(ms, e, d.plan().unwrap());
+    assert_eq!(facts(), after("inc2 included"));
+
+    // "Open in editor": the whole script in one batch.
+    let mut d = s.load(ms, e, &schema, "parent");
+    no_changes(&d);
+    for (c, v) in [("a", "5"), ("b", "6")] {
+        let c = column(&d, c);
+        d.column_mut(c).unwrap().default = v.into();
+    }
+    s.rows(ms, &d.plan().unwrap().script(e));
+    let d = s.load(ms, e, &schema, "parent");
+    no_changes(&d);
+    let defaults: Vec<&str> = d.table.columns[2..4]
+        .iter()
+        .map(|c| c.default.as_str())
+        .collect();
+    assert_eq!(defaults, ["((5))", "((6))"]);
+
+    s.rows(
+        ms,
+        &format!("DROP TABLE {schema}.parent; DROP SCHEMA {schema};"),
+    );
+}
+
+/// PostgreSQL: changing an index keeps its sort order, INCLUDE columns and
+/// WHERE clause, with a renamed column renamed in the clause.
+#[test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+fn postgres_designer_keeps_index_details() {
+    let s = svc();
+    let pg = s.connect(
+        ConnectionParams::Postgres(PostgresParams {
+            host: "127.0.0.1".into(),
+            port: 55432,
+            database: "sqail_test".into(),
+            user: "sqail".into(),
+            ssl_mode: PgSslMode::Disable,
+            ssl_root_cert: None,
+            ssl_client_cert: None,
+        }),
+        Some("sqail_dev_pw"),
+    );
+    let e = Engine::Postgres;
+    let schema = format!("it172_{}", &Uuid::new_v4().simple().to_string()[..8]);
+    s.rows(
+        pg,
+        &format!(
+            "CREATE SCHEMA {schema};
+             CREATE TABLE {schema}.t (id int PRIMARY KEY, code text, a int, inc text);
+             CREATE INDEX ix_t ON {schema}.t (code DESC) INCLUDE (inc) WHERE a > 0;"
+        ),
+    );
+    let mut d = s.load(pg, e, &schema, "t");
+    no_changes(&d);
+    let a = column(&d, "a");
+    d.column_mut(a).unwrap().name = "qty".into();
+    let ix = d.table.indexes[0].id;
+    d.index_mut(ix).unwrap().unique = true;
+    s.apply(pg, e, d.plan().unwrap());
+    let def = s.rows(
+        pg,
+        &format!("SELECT pg_get_indexdef('{schema}.ix_t'::regclass)"),
+    );
+    assert_eq!(
+        def[0][0],
+        format!(
+            "CREATE UNIQUE INDEX ix_t ON {schema}.t USING btree (code DESC) INCLUDE (inc) WHERE (qty > 0)"
+        )
+    );
+    no_changes(&s.load(pg, e, &schema, "t"));
+    s.rows(pg, &format!("DROP SCHEMA {schema} CASCADE"));
+}
+
 #[test]
 #[ignore = "needs podman test databases (scripts/db.sh up)"]
 fn table_design_round_trip_on_postgres_and_mssql() {

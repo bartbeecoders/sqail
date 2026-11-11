@@ -339,7 +339,9 @@ be open at once. Pages:
   only for a new table.
 * **Indexes:** name, *Unique*, and the key columns in order (click the
   column list to add, remove or reorder). An index that backs a `UNIQUE`
-  constraint is marked *constraint* and stays one.
+  constraint is marked *constraint* and stays one. Descending keys show
+  `DESC`; `INCLUDE` columns, a `WHERE` filter and *clustered* are shown next
+  to the index but can't be edited here.
 * **Primary key:** the key columns in order and, on PostgreSQL and SQL
   Server, the constraint name. Key columns are always NOT NULL.
 * **Security:** who holds which privilege on the table (`SELECT`, `INSERT`,
@@ -359,11 +361,16 @@ changed.
 Good to know:
 
 * Renames are real renames (`RENAME COLUMN`, `sp_rename`), so data stays.
-* Changing an index drops and re-creates it as a plain index: PostgreSQL
-  index methods, `INCLUDE` columns and `WHERE` clauses are not kept.
+* Changing an index drops and re-creates it. Its sort order (`DESC`),
+  `INCLUDE` columns, `WHERE` filter and, on SQL Server, `CLUSTERED` or
+  `NONCLUSTERED` are kept (the Indexes page shows them); a PostgreSQL index
+  method other than B-tree is not.
+* Dropping a column takes it out of the indexes that include it (they are
+  re-created without it); an index whose filter uses the column is dropped.
 * SQL Server: changing a column's type or NULL-ness re-creates the indexes
-  and key on it, and a default is dropped and re-added by its generated
-  name.
+  that use it (as a key, included or in the filter) and the key on it, and a
+  default is dropped and re-added by its generated name. *Open in editor*
+  gives a script that runs as one batch.
 * SQLite can change only a few things in place (renames, adding and dropping
   columns, indexes). Anything else (a type, NULL-ness, a default, the
   primary key) rebuilds the table: the rows are copied into a new table

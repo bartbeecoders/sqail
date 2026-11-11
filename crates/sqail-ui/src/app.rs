@@ -1451,10 +1451,11 @@ impl SqailApp {
                 let res =
                     export_query(&client, on, engine, &sql, cols, &path, format, progress).await;
                 sink.send(match res {
-                    Ok(n) => Msg::Notice {
-                        text: format!("Exported {n} rows to {}", path.display()),
-                        error: false,
-                    },
+                    Ok(done) => {
+                        let (text, error) =
+                            crate::transfer::export_notice(done.rows, &path, done.truncated, true);
+                        Msg::Notice { text, error }
+                    }
                     Err(e) => Msg::Notice {
                         text: format!("Export failed: {e:#}"),
                         error: true,
@@ -1471,6 +1472,7 @@ impl SqailApp {
             };
             let Some(rs) = run.results.get(i) else { return };
             let (columns, cells) = (rs.columns.clone(), rs.cells().to_vec());
+            let truncated = rs.truncated;
             self.worker.spawn(move |sink| async move {
                 let Some(path) = pick().await else { return };
                 let res = tokio::task::spawn_blocking(move || {
@@ -1483,10 +1485,11 @@ impl SqailApp {
                 })
                 .await;
                 sink.send(match res {
-                    Ok(Ok((n, path))) => Msg::Notice {
-                        text: format!("Exported {n} rows to {}", path.display()),
-                        error: false,
-                    },
+                    Ok(Ok((n, path))) => {
+                        let (text, error) =
+                            crate::transfer::export_notice(n, &path, truncated, false);
+                        Msg::Notice { text, error }
+                    }
                     Ok(Err(e)) => Msg::Notice {
                         text: format!("Export failed: {e:#}"),
                         error: true,

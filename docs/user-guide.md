@@ -313,7 +313,10 @@ or XML plan.
   statement just reads: when it writes, or sqail can't tell which statement
   produced the result, it refuses and asks you to run the `SELECT` on its own
   first. A session runs one query at a time, so runs in that tab wait until
-  the export finishes.
+  the export finishes. When the file holds fewer rows than the query
+  returns, the notice says so in red: a shown result that stopped at your
+  row limit points you to *Whole query*, and a whole-query export that
+  stopped at `limits.max_rows` points you to that service setting.
 * **✎ Edit data** is available when a result comes from a single table with a
   primary key. Edit cells (double-click or F2), add rows and delete rows. The
   changes are shown as SQL before **Apply** runs them, all or none, in the

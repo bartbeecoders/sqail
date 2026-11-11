@@ -450,7 +450,13 @@ most last quarter?"* or *"Why is the query in my editor slow?"*. The answer
 streams in. Each query it proposes gets **Insert** (at the cursor in the
 editor), **New tab** and **Copy** buttons. Follow-up questions continue the
 same conversation; **New chat** starts over. Enter sends, Shift+Enter adds a
-line. *Include editor SQL* sends the active tab's SQL along with your question.
+line. *Include editor SQL* sends the SQL you selected in the active tab, or
+else the statement at the cursor, along with your question, and, when the
+tab's last run failed, that run's SQL and error. Answers show headings,
+lists and tables.
+
+When a query fails, **Ask assistant** next to *Failed* in the results bar
+opens the assistant and asks why, sending the query and its error.
 
 A conversation stays on the connection of the tab that was active when it
 started (shown under the title). The assistant can:
@@ -460,6 +466,7 @@ started (shown under the title). The assistant can:
 | `list_schemas`, `list_tables` | See what's in the database (`list_tables` takes a name pattern and lists at most 200 tables unless asked for more, up to 1,000; on a large database without a schema or pattern it gives the number of tables per schema) |
 | `describe_table` | Columns, types, keys, indexes and foreign keys |
 | `run_query` | Run **one read-only statement** and see up to 100 rows (`max_rows`, at most 1,000) |
+| `explain_query` | The estimated plan of one read-only statement, without running it (no `ANALYZE`) |
 
 Each tool result is kept under 40,000 characters, with at most 50 columns and
 200 characters per value; the assistant is told what was left out, so it can

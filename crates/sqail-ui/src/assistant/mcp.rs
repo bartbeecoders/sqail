@@ -10,8 +10,8 @@ use std::path::Path;
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 use sqail_client::proto::{
-    ColumnInfo, Engine, ForeignKeyInfo, IndexInfo, Param, QueryEvent, QueryRequest, TableInfo,
-    TableKind,
+    ColumnInfo, Engine, ForeignKeyInfo, IndexInfo, Param, Plan, PlanNode, QueryEvent, QueryRequest,
+    TableInfo, TableKind,
 };
 use sqail_client::{Client, Identity, On, Target, Trust};
 use std::collections::HashMap;
@@ -149,6 +149,9 @@ pub trait Backend {
     ) -> impl Future<Output = Result<(Vec<ColumnInfo>, Vec<IndexInfo>, Vec<ForeignKeyInfo>)>>;
     /// Run one already-checked read-only statement, at most `max_rows` rows.
     fn query(&self, sql: &str, max_rows: u64) -> impl Future<Output = Result<Rows>>;
+    /// The estimated plan of one already-checked read-only statement,
+    /// which is not run (no ANALYZE).
+    fn explain(&self, sql: &str) -> impl Future<Output = Result<Plan>>;
 }
 
 #[derive(Debug, Default)]
@@ -300,7 +303,8 @@ fn instructions(engine: Engine) -> String {
     format!(
         "Tools for exploring a {} database through sqail. Look at the schema before writing \
          queries. run_query only runs single read-only statements and returns a limited \
-         number of rows; aggregate or filter instead of reading whole tables.",
+         number of rows; aggregate or filter instead of reading whole tables. explain_query \
+         shows a statement's estimated plan without running it.",
         engine_name(engine)
     )
 }
@@ -376,6 +380,19 @@ fn tool_definitions(max_rows: u64) -> Value {
             },
             "annotations": { "readOnlyHint": true },
         },
+        {
+            "name": "explain_query",
+            "description": "The estimated execution plan of one read-only SQL statement (SELECT / WITH / \
+                VALUES), as a tree of operators with estimated cost and rows. The statement is not \
+                run (no ANALYZE), so it is quick and safe on slow queries. Pass the statement \
+                itself, without EXPLAIN. Use it to see why a query is slow and to compare rewrites.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "sql": { "type": "string" } },
+                "required": ["sql"],
+            },
+            "annotations": { "readOnlyHint": true },
+        },
     ])
 }
 
@@ -432,6 +449,17 @@ async fn call_tool<B: Backend>(
                 .unwrap_or(max_rows)
                 .clamp(1, max_rows);
             Ok(rows_text(&backend.query(sql, n).await?, n))
+        }
+        "explain_query" => {
+            let sql = arg("sql").ok_or_else(|| anyhow!("`sql` is required"))?;
+            let first = sql.split_whitespace().next().unwrap_or("");
+            if first.eq_ignore_ascii_case("EXPLAIN") {
+                return Err(anyhow!(
+                    "pass the statement itself, without EXPLAIN: explain_query never runs it"
+                ));
+            }
+            check_read_only(sql, backend.engine()).map_err(|e| anyhow!("refused: {e}"))?;
+            Ok(plan_text(&backend.explain(sql).await?))
         }
         other => Err(anyhow!("unknown tool {other}")),
     }
@@ -581,6 +609,45 @@ fn capped(text: String) -> String {
         &text[..end],
         if lines == 1 { "" } else { "s" }
     )
+}
+
+/// A plan as an indented tree: operator, object, estimated cost and rows,
+/// and the operator's details. Falls back to the engine's own output.
+fn plan_text(plan: &Plan) -> String {
+    fn node(out: &mut String, n: &PlanNode, depth: usize) {
+        let pad = "  ".repeat(depth);
+        out.push_str(&format!("{pad}-> {}", n.label));
+        if let Some(o) = &n.object {
+            out.push_str(&format!(" on {o}"));
+        }
+        let mut est = Vec::new();
+        if let Some(c) = n.cost {
+            est.push(format!("cost={c:.2}"));
+        }
+        if let Some(r) = n.rows {
+            est.push(format!("rows={r:.0}"));
+        }
+        if !est.is_empty() {
+            out.push_str(&format!(" ({})", est.join(" ")));
+        }
+        out.push('\n');
+        for p in &n.props {
+            let v = p.value.replace('\n', " ");
+            let v: String = v.chars().take(300).collect();
+            out.push_str(&format!("{pad}     {}: {v}\n", p.key));
+        }
+        for c in &n.children {
+            node(out, c, depth + 1);
+        }
+    }
+    if plan.roots.is_empty() {
+        return plan.raw.clone();
+    }
+    let mut out = String::from("Estimated plan (not run):\n");
+    for root in &plan.roots {
+        node(&mut out, root, 0);
+    }
+    out
 }
 
 fn describe_text(cols: &[ColumnInfo], idx: &[IndexInfo], fks: &[ForeignKeyInfo]) -> String {
@@ -899,6 +966,10 @@ impl Backend for ServiceBackend {
         self.engine
     }
 
+    async fn explain(&self, sql: &str) -> Result<Plan> {
+        self.plan(sql).await
+    }
+
     async fn schemas(&self) -> Result<Vec<String>> {
         Ok(self
             .client
@@ -977,6 +1048,29 @@ impl Backend for ServiceBackend {
     }
 }
 
+impl ServiceBackend {
+    /// The plan through the service's explain endpoint, without ANALYZE,
+    /// on the assistant's session. On PostgreSQL inside a read-only
+    /// transaction that is rolled back, should anything run after all.
+    async fn plan(&self, sql: &str) -> Result<Plan> {
+        let (mut turn, session) = self.begin_turn().await?;
+        let pg = self.engine == Engine::Postgres;
+        if pg {
+            run_all(&self.client, session, "BEGIN READ ONLY", 1).await?;
+        }
+        let plan = self.client.explain(session, sql, false).await;
+        let rollback = if pg {
+            run_all(&self.client, session, "ROLLBACK", 1).await
+        } else {
+            Ok(())
+        };
+        *turn = rollback.is_err();
+        let plan = plan?;
+        rollback.context("rolling back the assistant's transaction")?;
+        Ok(plan)
+    }
+}
+
 async fn run_all(client: &Client, on: On, sql: &str, max_rows: u64) -> Result<()> {
     let mut req = QueryRequest::new(sql);
     req.max_rows = Some(max_rows);
@@ -1035,6 +1129,7 @@ pub fn run_from_env() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqail_client::proto::PlanProp;
 
     struct Fake;
 
@@ -1076,6 +1171,35 @@ mod tests {
                     ref_columns: vec!["id".into()],
                 }],
             ))
+        }
+        async fn explain(&self, sql: &str) -> Result<Plan> {
+            let leaf = PlanNode {
+                label: "Seq Scan".into(),
+                object: Some("sales.orders".into()),
+                cost: Some(12.5),
+                rows: Some(300.0),
+                actual_rows: None,
+                actual_ms: None,
+                props: vec![PlanProp {
+                    key: "Filter".into(),
+                    value: sql.into(),
+                }],
+                children: vec![],
+            };
+            Ok(Plan {
+                roots: vec![PlanNode {
+                    label: "Aggregate".into(),
+                    object: None,
+                    cost: Some(13.0),
+                    rows: Some(1.0),
+                    actual_rows: None,
+                    actual_ms: None,
+                    props: vec![],
+                    children: vec![leaf],
+                }],
+                raw: String::new(),
+                analyzed: false,
+            })
         }
         async fn query(&self, sql: &str, max_rows: u64) -> Result<Rows> {
             if sql.contains("'slow'") {
@@ -1153,7 +1277,13 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            ["list_schemas", "list_tables", "describe_table", "run_query"]
+            [
+                "list_schemas",
+                "list_tables",
+                "describe_table",
+                "run_query",
+                "explain_query"
+            ]
         );
         assert_eq!(replies[2]["error"]["code"], -32601);
     }
@@ -1329,5 +1459,43 @@ mod tests {
             &cut[cut.len() - 200..]
         );
         assert_eq!(capped("short".into()), "short");
+    }
+
+    #[tokio::test]
+    async fn plans_are_shown_as_a_tree() {
+        let replies = exchange(
+            &[
+                call(
+                    1,
+                    "explain_query",
+                    json!({"sql": "SELECT count(*) FROM sales.orders"}),
+                ),
+                call(
+                    2,
+                    "explain_query",
+                    json!({"sql": "EXPLAIN ANALYZE SELECT 1"}),
+                ),
+                call(
+                    3,
+                    "explain_query",
+                    json!({"sql": "DELETE FROM sales.orders"}),
+                ),
+            ]
+            .concat(),
+        )
+        .await;
+        assert_eq!(
+            text(&replies[0]),
+            (
+                "Estimated plan (not run):\n-> Aggregate (cost=13.00 rows=1)\n  \
+                 -> Seq Scan on sales.orders (cost=12.50 rows=300)\n       \
+                 Filter: SELECT count(*) FROM sales.orders\n",
+                false
+            )
+        );
+        let (err, is_err) = text(&replies[1]);
+        assert!(is_err && err.contains("without EXPLAIN"), "{err}");
+        let (err, is_err) = text(&replies[2]);
+        assert!(is_err && err.starts_with("refused:"), "{err}");
     }
 }

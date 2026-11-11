@@ -16,6 +16,8 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::app::{Msg, SqailApp};
+use crate::editor::Tab;
+use crate::results::Severity;
 use cli::Provider;
 use stream::Event;
 
@@ -101,6 +103,8 @@ pub struct Assistant {
     pub conversation: Option<Conversation>,
     /// The turn in progress and how to stop it.
     running: Option<(u64, oneshot::Sender<()>)>,
+    /// The next question carries its own context: don't add the editor's.
+    no_editor_once: bool,
     next_run: u64,
 }
 
@@ -142,8 +146,18 @@ impl Assistant {
                     c.session = Some(id);
                 }
             }
-            Update::Event(Event::TextDelta(t) | Event::Text(t)) => match self.entries.last_mut() {
+            Update::Event(Event::TextDelta(t)) => match self.entries.last_mut() {
                 Some(Entry::Answer(a)) => a.push_str(&t),
+                _ => self.entries.push(Entry::Answer(t)),
+            },
+            // A whole message: a paragraph of its own after another one.
+            Update::Event(Event::Text(t)) => match self.entries.last_mut() {
+                Some(Entry::Answer(a)) => {
+                    if !a.is_empty() && !a.ends_with("\n\n") {
+                        a.push_str(if a.ends_with('\n') { "\n" } else { "\n\n" });
+                    }
+                    a.push_str(&t);
+                }
                 _ => self.entries.push(Entry::Answer(t)),
             },
             Update::Event(Event::ToolUse { id, name, input }) => {
@@ -207,8 +221,9 @@ fn instructions(engine: Engine, connection: &str, max_rows: u64) -> String {
     let engine = mcp::engine_name(engine);
     format!(
         "You are the SQL assistant inside sqail, a desktop SQL editor. You work on the {engine} \
-         database \"{connection}\" through sqail's tools: list_schemas, list_tables, describe_table \
-         and run_query. Explore the schema with them instead of guessing names. run_query is \
+         database \"{connection}\" through sqail's tools: list_schemas, list_tables, describe_table, \
+         run_query and explain_query (the estimated plan, for questions about performance). \
+         Explore the schema with them instead of guessing names. run_query is \
          read-only and returns at most {max_rows} rows: use it to look at data and to check a query \
          before you propose it. You cannot change data or schema; when the user wants changes, \
          write the SQL for them to review and run themselves. Write {engine} SQL. Put each query \
@@ -218,10 +233,95 @@ fn instructions(engine: Engine, connection: &str, max_rows: u64) -> String {
 }
 
 const EDITOR_CONTEXT_CHARS: usize = 8000;
+const ERROR_CONTEXT_CHARS: usize = 2000;
+
+fn cut(s: &str, max: usize) -> String {
+    match s.char_indices().nth(max) {
+        Some((i, _)) => format!("{}…", &s[..i]),
+        None => s.to_string(),
+    }
+}
+
+/// The error messages of the tab's last run, if it failed.
+fn last_error(tab: &Tab) -> Option<(&str, String)> {
+    let run = tab.run.as_ref().filter(|r| r.failed && !r.running)?;
+    let errors: Vec<&str> = run
+        .messages
+        .iter()
+        .filter(|m| matches!(m.severity, Severity::Error))
+        .map(|m| m.text.trim())
+        .collect();
+    (!errors.is_empty()).then(|| (run.sql.trim(), errors.join("\n")))
+}
+
+/// What the editor adds to a question: the selection, else the statement at
+/// the cursor, else the whole tab; and the error of the tab's last run.
+pub fn editor_context(tab: &Tab, engine: Option<Engine>) -> Option<String> {
+    let mut out = String::new();
+    let current = tab.current_sql(engine);
+    let selected = tab.cursor.primary.index != tab.cursor.secondary.index;
+    let (label, sql) = match current.trim() {
+        "" => ("The SQL in my editor", tab.text.trim()),
+        s if selected => ("The SQL I selected in the editor", s),
+        s => ("The statement at my cursor in the editor", s),
+    };
+    if !sql.is_empty() {
+        let sql = cut(sql, EDITOR_CONTEXT_CHARS);
+        out.push_str(&format!("\n\n{label}:\n```sql\n{sql}\n```"));
+    }
+    if let Some((ran, error)) = last_error(tab) {
+        if ran != sql {
+            let ran = cut(ran, EDITOR_CONTEXT_CHARS);
+            out.push_str(&format!(
+                "\n\nThe last run in this tab:\n```sql\n{ran}\n```"
+            ));
+        }
+        let error = cut(&error, ERROR_CONTEXT_CHARS);
+        out.push_str(&format!("\n\nIt failed with:\n```\n{error}\n```"));
+    }
+    (!out.is_empty()).then_some(out)
+}
 
 impl SqailApp {
     pub fn assistant_update(&mut self, run: u64, update: Update) {
         self.assistant.apply(run, update);
+    }
+
+    /// "Ask assistant" on a failed run: open the panel and ask why the
+    /// tab's last query failed, with its SQL and error.
+    pub fn assistant_ask_about_error(&mut self, idx: usize) {
+        let Some(tab) = self.tabs.get(idx) else {
+            return;
+        };
+        let Some((sql, error)) = last_error(tab) else {
+            return;
+        };
+        if self.assistant.is_running() {
+            return self.notify(
+                "The assistant is still answering; ask again when it's done.",
+                true,
+            );
+        }
+        if let Some(c) = &self.assistant.conversation
+            && Some(c.connection) != tab.connection
+        {
+            return self.notify(
+                "The assistant's chat is on another connection: start a new chat to ask about this error.",
+                true,
+            );
+        }
+        let sql = cut(sql, EDITOR_CONTEXT_CHARS);
+        let error = cut(&error, ERROR_CONTEXT_CHARS);
+        self.active = idx;
+        self.assistant.input = format!(
+            "This query failed:\n```sql\n{sql}\n```\nError:\n```\n{error}\n```\nWhy, and how do I fix it?"
+        );
+        self.assistant.no_editor_once = true;
+        if !self.settings.assistant.open {
+            self.settings.assistant.open = true;
+            self.settings.save();
+        }
+        self.assistant_send();
     }
 
     /// Send the text in the input box as the next turn.
@@ -271,10 +371,10 @@ impl SqailApp {
             });
         let mut prompt = question.clone();
         if settings.include_editor
-            && let Some(sql) = tab.map(|t| t.text.trim()).filter(|s| !s.is_empty())
+            && !std::mem::take(&mut self.assistant.no_editor_once)
+            && let Some(context) = tab.and_then(|t| editor_context(t, Some(conn.engine)))
         {
-            let sql: String = sql.chars().take(EDITOR_CONTEXT_CHARS).collect();
-            prompt.push_str(&format!("\n\nThe SQL in my editor:\n```sql\n{sql}\n```"));
+            prompt.push_str(&context);
         }
         let mut env = vec![
             (mcp::Env::URL.to_string(), profile.url.clone()),
@@ -428,5 +528,57 @@ mod tests {
         a.stop();
         a.apply(1, Update::Event(Event::TextDelta("late".into())));
         assert_eq!(a.entries, [Entry::Note("Stopped.".into())]);
+    }
+
+    #[test]
+    fn whole_messages_are_separate_paragraphs() {
+        let mut a = running();
+        a.apply(1, Update::Event(Event::Text("First.".into())));
+        a.apply(1, Update::Event(Event::Text("Second.".into())));
+        a.apply(1, Update::Event(Event::TextDelta(" More".into())));
+        assert_eq!(a.entries, [Entry::Answer("First.\n\nSecond. More".into())]);
+    }
+
+    #[test]
+    fn editor_context_is_the_selection_or_statement_and_the_error() {
+        use crate::results::{Message, Run};
+        use egui::text::{CCursor, CCursorRange};
+        let pg = Some(Engine::Postgres);
+        let mut tab = Tab::new(1, "t".into(), None);
+        tab.text = "SELECT 1;\n\nSELECT name\nFROM people;\n".into();
+        // The cursor in the second statement.
+        tab.cursor = CCursorRange::one(CCursor::new(15));
+        let ctx = editor_context(&tab, pg).unwrap();
+        assert_eq!(
+            ctx,
+            "\n\nThe statement at my cursor in the editor:\n```sql\nSELECT name\nFROM people\n```"
+        );
+        // A selection wins.
+        tab.cursor = CCursorRange::two(CCursor::new(0), CCursor::new(8));
+        let ctx = editor_context(&tab, pg).unwrap();
+        assert!(
+            ctx.starts_with("\n\nThe SQL I selected in the editor:\n```sql\nSELECT 1\n```"),
+            "{ctx}"
+        );
+        // The last run's error, and its SQL when that is other SQL.
+        let mut run = Run::new(1, "SELECT nope FROM people".into());
+        run.running = false;
+        run.failed = true;
+        run.messages.push(Message {
+            severity: Severity::Error,
+            text: "column \"nope\" does not exist".into(),
+        });
+        tab.run = Some(run);
+        let ctx = editor_context(&tab, pg).unwrap();
+        assert!(
+            ctx.ends_with(
+                "The last run in this tab:\n```sql\nSELECT nope FROM people\n```\n\n\
+                 It failed with:\n```\ncolumn \"nope\" does not exist\n```"
+            ),
+            "{ctx}"
+        );
+        // Nothing to say for an empty tab without errors.
+        let empty = Tab::new(2, "t".into(), None);
+        assert_eq!(editor_context(&empty, pg), None);
     }
 }

@@ -293,12 +293,7 @@ fn answer(
 ) {
     for seg in segments(text) {
         match seg {
-            Segment::Text(t) => {
-                let t = t.trim_matches('\n');
-                if !t.is_empty() {
-                    ui.label(inline_markdown(ui, t));
-                }
-            }
+            Segment::Text(t) => markdown(ui, t),
             Segment::Code {
                 lang,
                 code,
@@ -431,6 +426,145 @@ fn find_fence(s: &str) -> Option<usize> {
     None
 }
 
+/// A block of answer text outside code fences.
+#[derive(Debug, PartialEq)]
+enum Block<'a> {
+    /// `#` … `######`: level and text.
+    Heading(usize, &'a str),
+    /// `- x`, `* x`, `+ x` or `1. x`: indent (in levels), marker, text.
+    Item(usize, String, &'a str),
+    /// A pipe table: header cells, then rows.
+    Table(Vec<&'a str>, Vec<Vec<&'a str>>),
+    /// Lines of running text.
+    Paragraph(String),
+}
+
+/// The cells of a `| a | b |` row.
+fn table_cells(line: &str) -> Vec<&str> {
+    let t = line.trim();
+    let t = t.strip_prefix('|').unwrap_or(t);
+    let t = t.strip_suffix('|').unwrap_or(t);
+    t.split('|').map(str::trim).collect()
+}
+
+/// `|---|:---:|`: the line under a table's header.
+fn is_table_rule(line: &str) -> bool {
+    let t = line.trim();
+    t.contains('-') && t.contains('|') && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
+}
+
+/// A list item's marker and text, and its indent in levels.
+fn list_item(line: &str) -> Option<(usize, String, &str)> {
+    let text = line.trim_start();
+    let indent = (line.len() - text.len()) / 2;
+    for bullet in ["- ", "* ", "+ "] {
+        if let Some(rest) = text.strip_prefix(bullet) {
+            return Some((indent, "•".into(), rest));
+        }
+    }
+    let digits = text.chars().take_while(char::is_ascii_digit).count();
+    let rest = text[digits..].strip_prefix(". ")?;
+    (digits > 0 && digits < 4).then(|| (indent, format!("{}.", &text[..digits]), rest))
+}
+
+/// Split answer text into headings, list items, tables and paragraphs.
+fn blocks(text: &str) -> Vec<Block<'_>> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = Vec::new();
+    let mut para: Vec<&str> = Vec::new();
+    let flush = |para: &mut Vec<&str>, out: &mut Vec<Block>| {
+        if !para.is_empty() {
+            out.push(Block::Paragraph(para.join("\n")));
+            para.clear();
+        }
+    };
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let t = line.trim();
+        let hashes = t.chars().take_while(|&c| c == '#').count();
+        if t.is_empty() {
+            flush(&mut para, &mut out);
+        } else if (1..=6).contains(&hashes) && t[hashes..].starts_with(' ') {
+            flush(&mut para, &mut out);
+            out.push(Block::Heading(hashes, t[hashes..].trim()));
+        } else if t.starts_with('|') && lines.get(i + 1).is_some_and(|l| is_table_rule(l)) {
+            flush(&mut para, &mut out);
+            let header = table_cells(line);
+            i += 2;
+            let mut rows = Vec::new();
+            while let Some(l) = lines.get(i).filter(|l| l.trim().starts_with('|')) {
+                rows.push(table_cells(l));
+                i += 1;
+            }
+            out.push(Block::Table(header, rows));
+            continue;
+        } else if let Some((indent, marker, rest)) = list_item(line) {
+            flush(&mut para, &mut out);
+            out.push(Block::Item(indent, marker, rest));
+        } else {
+            para.push(t);
+        }
+        i += 1;
+    }
+    flush(&mut para, &mut out);
+    out
+}
+
+/// Answer text with headings, lists and tables laid out, and `code` and
+/// **bold** inline.
+fn markdown(ui: &mut egui::Ui, text: &str) {
+    for block in blocks(text) {
+        match block {
+            Block::Heading(level, t) => {
+                let size = ui.style().text_styles[&egui::TextStyle::Body].size;
+                let scale = match level {
+                    1 => 1.3,
+                    2 => 1.15,
+                    _ => 1.0,
+                };
+                ui.add_space(2.0);
+                ui.label(
+                    RichText::new(t.replace("**", ""))
+                        .strong()
+                        .size(size * scale),
+                );
+            }
+            Block::Item(indent, marker, t) => {
+                ui.horizontal_top(|ui| {
+                    ui.add_space(8.0 + 14.0 * indent as f32);
+                    ui.label(marker);
+                    ui.label(inline_markdown(ui, t));
+                });
+            }
+            Block::Table(header, rows) => {
+                egui::ScrollArea::horizontal()
+                    .id_salt(ui.next_auto_id())
+                    .show(ui, |ui| {
+                        egui::Grid::new(ui.next_auto_id())
+                            .striped(true)
+                            .spacing([12.0, 2.0])
+                            .show(ui, |ui| {
+                                for h in &header {
+                                    ui.label(RichText::new(h.replace("**", "")).strong());
+                                }
+                                ui.end_row();
+                                for row in &rows {
+                                    for c in row {
+                                        ui.label(inline_markdown(ui, c));
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            }
+            Block::Paragraph(t) => {
+                ui.label(inline_markdown(ui, &t));
+            }
+        }
+    }
+}
+
 /// `code` and **bold**; everything else as plain text.
 fn inline_markdown(ui: &egui::Ui, text: &str) -> LayoutJob {
     let style = ui.style();
@@ -539,6 +673,31 @@ mod tests {
             segments("use ```x``` inline"),
             [Segment::Text("use ```x``` inline")]
         );
+    }
+
+    #[test]
+    fn markdown_blocks() {
+        let text = "## Findings\nThe query scans\n`orders` twice.\n\n- first\n  - nested\n1. one\n12. twelve\n\n| id | name |\n|---|:--|\n| 1 | **a** |\n| 2 | b |\nAfter.\n#not a heading";
+        assert_eq!(
+            blocks(text),
+            [
+                Block::Heading(2, "Findings"),
+                Block::Paragraph("The query scans\n`orders` twice.".into()),
+                Block::Item(0, "•".into(), "first"),
+                Block::Item(1, "•".into(), "nested"),
+                Block::Item(0, "1.".into(), "one"),
+                Block::Item(0, "12.".into(), "twelve"),
+                Block::Table(vec!["id", "name"], vec![vec!["1", "**a**"], vec!["2", "b"]]),
+                Block::Paragraph("After.\n#not a heading".into()),
+            ]
+        );
+        // A line of pipes without a rule under it is text.
+        assert_eq!(
+            blocks("| a | b |\nnext"),
+            [Block::Paragraph("| a | b |\nnext".into())]
+        );
+        // `**bold**` at the start of a line is not a list item.
+        assert_eq!(blocks("**x** y"), [Block::Paragraph("**x** y".into())]);
     }
 
     #[test]

@@ -375,6 +375,55 @@ fn a_cancelled_query_does_not_spoil_the_next() {
     });
 }
 
+/// `explain_query` returns an estimated plan through the service, without
+/// running the statement, and refuses what `run_query` refuses.
+#[test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+fn explain_query_on_every_engine() {
+    let f = fixture();
+    f.rt.block_on(async {
+        for (conn, sql) in [
+            (
+                f.pg,
+                "SELECT status, count(*) FROM sales.orders GROUP BY status",
+            ),
+            (
+                f.ms,
+                "SELECT status, COUNT(*) FROM sales.orders GROUP BY status",
+            ),
+            (
+                f.lite,
+                "SELECT name FROM sqlite_master WHERE name = 'x' ORDER BY name",
+            ),
+        ] {
+            let backend = ServiceBackend::connect(&f.target, conn).await.unwrap();
+            let r = mcp(
+                &backend,
+                &[
+                    call(1, "explain_query", json!({ "sql": sql })),
+                    call(
+                        2,
+                        "explain_query",
+                        json!({"sql": "DELETE FROM sales.orders"}),
+                    ),
+                    call(3, "run_query", json!({"sql": "SELECT 1 AS one"})),
+                ],
+            )
+            .await;
+            assert!(!r[0].1, "{conn}: {:?}", r[0]);
+            assert!(
+                r[0].0.starts_with("Estimated plan (not run):\n-> "),
+                "{}",
+                r[0].0
+            );
+            assert!(r[1].1 && r[1].0.starts_with("refused:"), "{:?}", r[1]);
+            // The session is fine afterwards.
+            assert_eq!(r[2], ("one\n1\n(1 row)".into(), false));
+            backend.close().await;
+        }
+    });
+}
+
 /// Runs `sql` outside the assistant, failing on any error.
 async fn admin(f: &Fixture, conn: Uuid, sql: &str) -> Vec<QueryEvent> {
     let client = Client::new(&f.target).unwrap();

@@ -254,7 +254,9 @@ transaction that is **always rolled back**, so it is safe for `UPDATE` and
   export the result for the rest.
 * Click the **▲▼** on a column header to sort (ascending, then descending,
   then back to the original order). Sorting waits until the result has
-  finished loading.
+  finished loading. NULLs sort first. In a text column, values that are
+  numbers (`9`, `10`, `2.5`) sort numerically and come before the other
+  text (`5a`, `abc`), which sorts alphabetically.
 * Column widths start from the column name and the first 1 000 rows, up to
   about 80 characters. Drag a column's right border to resize it, or
   double-click the border to fit the column to its values (the first

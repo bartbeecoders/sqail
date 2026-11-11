@@ -64,6 +64,9 @@ where
 {
     transport: Framed<MaybeTlsStream<S>, PacketCodec>,
     flushed: bool,
+    /// sqail patch: result streams yield INFO, DONE and ERROR tokens in
+    /// order (`Client::set_messages`).
+    messages: bool,
     context: Context,
     buf: BytesMut,
     /// Set for the duration of a multi-packet write. A message is only partly
@@ -172,6 +175,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
             transport,
             context,
             flushed: false,
+            messages: false,
             buf: BytesMut::new(),
             poisoned: false,
             command_desync: Arc::new(AtomicBool::new(false)),
@@ -309,6 +313,26 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         self.poisoned = false;
 
         Ok(())
+    }
+
+    /// sqail patch: see the `messages` field.
+    pub(crate) fn set_messages(&mut self, on: bool) {
+        self.messages = on;
+    }
+
+    /// sqail patch: see the `messages` field.
+    pub(crate) fn messages(&self) -> bool {
+        self.messages
+    }
+
+    /// sqail patch: a token stream over the response to the request just
+    /// sent, for a [`QueryStream`](crate::QueryStream).
+    pub(crate) fn query_tokens(
+        &mut self,
+    ) -> futures_util::stream::BoxStream<'_, crate::Result<crate::tds::stream::ReceivedToken>>
+    {
+        let messages = self.messages;
+        TokenStream::new(self).with_messages(messages).try_unfold()
     }
 
     /// Returns an error if a previous multi-packet write on this connection was
@@ -906,6 +930,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
                     transport,
                     context,
                     flushed: false,
+                    messages: false,
                     buf: BytesMut::new(),
                     poisoned: false,
                     command_desync,
@@ -951,6 +976,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         Connection {
             transport: Framed::new(MaybeTlsStream::Raw(io), PacketCodec),
             flushed: false,
+            messages: false,
             context: Context::new(),
             buf: BytesMut::new(),
             poisoned,

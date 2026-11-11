@@ -218,8 +218,9 @@ async fn drive(
         }
     };
 
+    // Errors a driver reported where they happened are among the events.
     if let Err(e) = &result
-        && !matches!(e, DbError::ClientGone)
+        && !matches!(e, DbError::ClientGone | DbError::Reported)
     {
         let _ = sink.send(e.to_event()).await;
     }

@@ -71,6 +71,33 @@ impl TokenDone {
         self.status.contains(DoneStatus::Attention)
     }
 
+    /// sqail patch: for tests elsewhere in the crate.
+    #[cfg(test)]
+    pub(crate) fn test_new(status: u16, rows: u64) -> Self {
+        Self {
+            status: BitFlags::from_bits_truncate(status),
+            cur_cmd: 0,
+            done_rows: rows,
+        }
+    }
+
+    /// sqail patch: the row count, if the DONE_COUNT bit is set.
+    pub(crate) fn count(&self) -> Option<u64> {
+        self.status
+            .contains(DoneStatus::Count)
+            .then_some(self.done_rows)
+    }
+
+    /// sqail patch: DONE_MORE.
+    pub(crate) fn has_more(&self) -> bool {
+        self.status.contains(DoneStatus::More)
+    }
+
+    /// sqail patch: DONE_ERROR or DONE_SRVERROR.
+    pub(crate) fn is_error(&self) -> bool {
+        self.status.contains(DoneStatus::Error) || self.status.contains(DoneStatus::SrvError)
+    }
+
     pub(crate) fn rows(&self) -> u64 {
         // The row count is only meaningful when the DONE_COUNT status bit is
         // set (MS-TDS §2.2.7.6); otherwise the field is not a valid count.

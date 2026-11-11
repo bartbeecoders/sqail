@@ -76,9 +76,10 @@ impl From<anyhow::Error> for ApiError {
 impl From<DbError> for ApiError {
     fn from(e: DbError) -> Self {
         let status = match &e {
-            DbError::Database { .. } | DbError::Invalid(_) | DbError::Unsupported(_) => {
-                StatusCode::BAD_REQUEST
-            }
+            DbError::Database { .. }
+            | DbError::Invalid(_)
+            | DbError::Unsupported(_)
+            | DbError::Reported => StatusCode::BAD_REQUEST,
             DbError::Connect(_) => StatusCode::BAD_GATEWAY,
             DbError::Cancelled | DbError::ClientGone => StatusCode::CONFLICT,
             DbError::Timeout => StatusCode::GATEWAY_TIMEOUT,

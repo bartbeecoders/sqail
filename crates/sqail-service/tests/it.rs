@@ -1405,6 +1405,125 @@ async fn mssql_scripts_split_on_go_and_return_multiple_results() {
     assert_eq!(msgs, 2, "PRINT batch ran twice: {ev:?}");
 }
 
+/// The events of a run, short: `msg:<text>`, `result:<index>`,
+/// `affected:<count>`, `error:<message>`.
+fn outline(events: &[QueryEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            QueryEvent::Message { text, .. } => Some(format!("msg:{text}")),
+            QueryEvent::ResultStart { index, .. } => Some(format!("result:{index}")),
+            QueryEvent::RowsAffected { count } => Some(format!("affected:{count}")),
+            QueryEvent::Error { message, .. } => Some(format!("error:{message}")),
+            _ => None,
+        })
+        .collect()
+}
+
+/// SQL Server's PRINT and low-severity RAISERROR messages, row counts and
+/// errors reach the client where the server sent them, and a GO script goes
+/// on after a failed batch, with script line numbers (#150).
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn mssql_messages_row_counts_and_errors_arrive_in_order() {
+    let h = harness().await;
+    let c = profile(&h, &mssql(), false).await;
+    let run = async |sql: &str| outline(&h.query(c, sql).await);
+
+    assert_eq!(
+        run("PRINT 'hello'; SELECT 1 AS a; PRINT 'after'").await,
+        ["msg:hello", "result:0", "msg:after"]
+    );
+    assert_eq!(
+        run("RAISERROR('warn10', 10, 1); SELECT 1 AS a; RAISERROR('info0', 0, 1) WITH NOWAIT")
+            .await,
+        ["msg:warn10", "result:0", "msg:info0"]
+    );
+
+    // row counts of every statement, not just a lone DML one
+    assert_eq!(
+        run("CREATE TABLE #it_150_counts (id int); \
+             INSERT INTO #it_150_counts VALUES (1), (2); \
+             UPDATE #it_150_counts SET id = 3; DELETE FROM #it_150_counts WHERE id = 3")
+        .await,
+        ["affected:2", "affected:2", "affected:2"]
+    );
+    assert_eq!(
+        run("SET NOCOUNT ON; CREATE TABLE #it_150_counts (id int); \
+             INSERT INTO #it_150_counts VALUES (1)")
+        .await,
+        ["msg:Commands completed successfully."]
+    );
+    let ev = h
+        .query_on(
+            &format!("/v1/connections/{c}/query"),
+            json!({"sql": "UPDATE sales.products SET active = active WHERE id <= @P1", "params": [3]}),
+            None,
+        )
+        .await;
+    assert_eq!(outline(&ev), ["affected:3"]);
+
+    // an error between the result sets around it
+    assert_eq!(
+        run("SELECT 1 AS a; RAISERROR('boom16', 16, 1); SELECT 3 AS c").await,
+        [
+            "result:0",
+            "error:Msg 50000, Level 16, State 1, Line 1: boom16",
+            "result:1"
+        ]
+    );
+
+    // the next GO batch runs after a failed one; lines count from the
+    // start of the script
+    let ev = h
+        .query(
+            c,
+            "SELECT 1 AS a\nGO\n\n\nSELECT\n  * FROM zz_it_150_nope\nGO\nSELECT 3 AS c",
+        )
+        .await;
+    assert_eq!(
+        outline(&ev),
+        [
+            "result:0",
+            "error:Msg 208, Level 16, State 1, Line 5: Invalid object name 'zz_it_150_nope'.",
+            "result:1"
+        ]
+    );
+    assert_eq!(rows(&ev, 1), vec![vec![json!(3)]]);
+    assert_eq!(error(&ev).unwrap().0, "db_error");
+    assert!(!done(&ev).0);
+    // still audited as a failure
+    let page: sqail_proto::AuditPage = h.get_json("/v1/audit?limit=50").await;
+    let entry = page
+        .items
+        .iter()
+        .find(|e| {
+            e.detail
+                .as_deref()
+                .is_some_and(|d| d.contains("zz_it_150_nope"))
+        })
+        .expect("query audited");
+    assert!(!entry.success);
+
+    // inside a procedure the line counts from the procedure, which is named
+    let ev = run(
+        "CREATE PROCEDURE #it_150_proc AS\nSELECT 1 AS a\nRAISERROR('in proc', 16, 1)\n\
+                  GO\nPRINT 'before'\nEXEC #it_150_proc",
+    )
+    .await;
+    assert_eq!(ev.len(), 4, "{ev:?}");
+    assert_eq!(
+        ev[..2],
+        ["msg:Commands completed successfully.", "msg:before"]
+    );
+    assert_eq!(ev[2], "result:0");
+    assert!(
+        ev[3].starts_with("error:Msg 50000, Level 16, State 1, Procedure #it_150_proc")
+            && ev[3].ends_with(", Line 3: in proc"),
+        "{ev:?}"
+    );
+}
+
 /// A profile for `user` on the test SQL Server (all dev logins share a
 /// password).
 async fn mssql_as(h: &Harness, user: &str) -> Uuid {

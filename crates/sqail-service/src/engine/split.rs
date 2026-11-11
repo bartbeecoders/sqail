@@ -76,6 +76,9 @@ pub struct Batch {
     pub sql: String,
     /// `GO 5` runs the batch five times.
     pub repeat: u32,
+    /// The script line (1-based) of the batch's first line; the server
+    /// counts lines from the start of the batch.
+    pub line: u32,
 }
 
 /// Split a script on lines consisting of `GO [count]` (outside comments and
@@ -84,23 +87,25 @@ pub fn split_go(script: &str) -> Vec<Batch> {
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut st = St::Code;
-    for line in script.split_inclusive('\n') {
+    let mut start = 1;
+    for (n, line) in (1u32..).zip(script.split_inclusive('\n')) {
         let at_code = matches!(st, St::Code | St::LineComment);
         if at_code && let Some(repeat) = go_line(line) {
-            push_batch(&mut out, std::mem::take(&mut cur), repeat);
+            push_batch(&mut out, std::mem::take(&mut cur), repeat, start);
+            start = n + 1;
             st = St::Code;
             continue;
         }
         scan(line, &mut st, |_, _| {});
         cur.push_str(line);
     }
-    push_batch(&mut out, cur, 1);
+    push_batch(&mut out, cur, 1, start);
     out
 }
 
-fn push_batch(out: &mut Vec<Batch>, sql: String, repeat: u32) {
+fn push_batch(out: &mut Vec<Batch>, sql: String, repeat: u32, line: u32) {
     if !sql.trim().is_empty() {
-        out.push(Batch { sql, repeat });
+        out.push(Batch { sql, repeat, line });
     }
 }
 
@@ -476,9 +481,19 @@ mod tests {
             b,
             vec![Batch {
                 sql: "PRINT 'x'\n".into(),
-                repeat: 3
+                repeat: 3,
+                line: 1,
             }]
         );
+    }
+
+    #[test]
+    fn batches_know_their_first_script_line() {
+        let lines: Vec<u32> = split_go("SELECT 1\nGO\n\n\nSELECT\n * FROM x\nGO\nGO\nSELECT 3")
+            .iter()
+            .map(|b| b.line)
+            .collect();
+        assert_eq!(lines, [1, 3, 9]);
     }
 
     #[test]

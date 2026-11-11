@@ -1,9 +1,12 @@
 //! Microsoft SQL Server via tiberius.
 //!
 //! Scripts are split on `GO` here (the server does not understand it). Each
-//! batch runs as one request with multiple result sets. tiberius does not
-//! surface DONE row counts on result streams, so a batch that is a single
-//! INSERT/UPDATE/DELETE/MERGE runs via `execute` to report affected rows.
+//! batch runs as one request with multiple result sets. The (patched)
+//! tiberius result stream also yields INFO messages (`PRINT`), DONE row
+//! counts and errors where the server sends them, so they reach the client
+//! in that order. As in SSMS and sqlcmd, a failed batch does not stop the
+//! script: the next `GO` batch runs, and error lines count from the start of
+//! the script.
 //! Cancelling sends `KILL <spid>` from a side connection (needs ALTER ANY
 //! CONNECTION); the caller also drops the connection if that does not stop it.
 //! A batch that is a single query is stopped with a TDS Attention once it
@@ -21,7 +24,7 @@ use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
 use super::entra::Entra;
-use super::split::{check_single_statement, shape, single_query, split_go};
+use super::split::{check_single_statement, single_query, split_go};
 use super::value::{bytes, float, int, text};
 use super::{
     Cancel, Canceller, Conn, DbError, Driver, EventSink, ExecRequest, Result, ResultWriter,
@@ -188,6 +191,8 @@ impl Target {
 impl Driver for MssqlDriver {
     async fn connect(&self) -> Result<Box<dyn Conn>> {
         let mut client = self.open().await?;
+        // Messages, row counts and errors in order, on user scripts' streams.
+        client.set_messages(true);
         let spid = client
             .simple_query("SELECT CAST(@@SPID AS int)")
             .await
@@ -247,6 +252,16 @@ impl Cancel for MssqlCancel {
     }
 }
 
+/// What one run of a batch reported.
+#[derive(Default)]
+struct BatchOutput {
+    /// Added to error line numbers: the batch's first line in the script,
+    /// less one.
+    line_offset: u32,
+    /// Messages, row counts or errors were sent.
+    reported: bool,
+}
+
 /// Stream a batch's result sets into `out`. Rows past `max_rows` are not
 /// converted; with `stop_at_cap` the first one ends the stream and `true`
 /// is returned, and the caller must cancel the rest of the batch.
@@ -254,12 +269,33 @@ async fn stream_results(
     mut stream: tiberius::QueryStream<'_>,
     out: &mut ResultWriter<'_>,
     stop_at_cap: bool,
+    batch: &mut BatchOutput,
 ) -> Result<bool> {
     while let Some(item) = stream.try_next().await.map_err(db_err)? {
         match item {
             QueryItem::Metadata(meta) => {
                 out.start(meta.columns().iter().map(column).collect())
                     .await?
+            }
+            QueryItem::Message(m) => {
+                batch.reported = true;
+                out.message("info", m.message()).await?;
+            }
+            QueryItem::Error(e) => {
+                batch.reported = true;
+                out.error(&DbError::Database {
+                    code: Some(e.code().to_string()),
+                    message: server_message(&e, batch.line_offset),
+                })
+                .await?;
+            }
+            // The end of a SELECT: its row count is the result set's.
+            QueryItem::Done(_) if out.is_open() => out.end().await?,
+            QueryItem::Done(d) => {
+                if let Some(count) = d.rows() {
+                    batch.reported = true;
+                    out.rows_affected(count).await?;
+                }
             }
             QueryItem::Row(_) if out.is_truncated() => {
                 out.skip_row();
@@ -289,19 +325,20 @@ impl MssqlConn {
         Ok(row.is_some_and(|r| r.get::<i32, _>(0) == Some(0) || r.get::<i32, _>(1) == Some(0)))
     }
 
+    /// Run one batch; `line` is its first line in the script. Errors the
+    /// server reports go to `out` and do not fail the batch.
     async fn run_batch(
         &mut self,
         sql: &str,
+        line: u32,
         params: &[Param],
         out: &mut ResultWriter<'_>,
     ) -> Result<()> {
         let results_before = out.results_seen();
-        if shape(sql).is_single_dml() {
-            let mut q = tiberius::Query::new(sql);
-            bind_all(&mut q, params);
-            let res = q.execute(&mut self.client).await.map_err(db_err)?;
-            return out.rows_affected(res.total()).await;
-        }
+        let mut batch = BatchOutput {
+            line_offset: line.saturating_sub(1),
+            reported: false,
+        };
         // A lone query is stopped once it passes max_rows. The probe that
         // decides whether that is safe would change @@ROWCOUNT and @@ERROR,
         // so a query reading those runs to the end.
@@ -316,7 +353,7 @@ impl MssqlConn {
             bind_all(&mut q, params);
             q.query(&mut self.client).await.map_err(db_err)?
         };
-        if stream_results(stream, out, stop_at_cap).await? {
+        if stream_results(stream, out, stop_at_cap, &mut batch).await? {
             // An Attention aborts the batch; tiberius then drains the
             // acknowledgement, which leaves the connection ready for reuse.
             self.client
@@ -325,7 +362,7 @@ impl MssqlConn {
                 .map_err(|e| DbError::Connect(format!("cannot stop the query at max_rows: {e}")))?;
         }
         out.end().await?;
-        if out.results_seen() == results_before {
+        if out.results_seen() == results_before && !batch.reported {
             out.message("info", "Commands completed successfully.")
                 .await?;
         }
@@ -354,18 +391,23 @@ impl Conn for MssqlConn {
                 check_single_statement(&req.sql).map_err(DbError::Invalid)?;
             }
             if !req.params.is_empty() {
-                return self.run_batch(&req.sql, &req.params, &mut out).await;
+                return self.run_batch(&req.sql, 1, &req.params, &mut out).await;
             }
             for batch in split_go(&req.sql) {
                 for _ in 0..batch.repeat {
-                    self.run_batch(&batch.sql, &[], &mut out).await?;
+                    self.run_batch(&batch.sql, batch.line, &[], &mut out)
+                        .await?;
                 }
             }
             Ok(())
         }
         .await;
         out.end().await?;
-        res
+        match res {
+            // Failed, though the script ran on (audited as a failure).
+            Ok(()) if out.reported_errors() => Err(DbError::Reported),
+            res => res,
+        }
     }
 
     fn canceller(&self) -> Canceller {
@@ -530,17 +572,29 @@ fn db_err(e: tiberius::error::Error) -> DbError {
 /// `Msg 208, Level 16, State 1, Line 1: Invalid object name 'x'.` (SSMS style).
 fn ms_message(e: &tiberius::error::Error) -> String {
     match e {
-        tiberius::error::Error::Server(t) => format!(
-            "Msg {}, Level {}, State {}, Line {}: {}",
-            t.code(),
-            t.class(),
-            t.state(),
-            t.line(),
-            t.message()
-        ),
+        tiberius::error::Error::Server(t) => server_message(t, 0),
         tiberius::error::Error::Tls(msg) => tls_message(msg),
         other => other.to_string(),
     }
+}
+
+/// A server error, SSMS style. Inside a procedure, the line counts from the
+/// procedure's start and the procedure is named; otherwise it counts from
+/// the batch's, and `line_offset` (the batch's first script line less one)
+/// makes it a script line.
+fn server_message(t: &tiberius::error::TokenError, line_offset: u32) -> String {
+    let at = if t.procedure().is_empty() {
+        format!("Line {}", t.line().saturating_add(line_offset))
+    } else {
+        format!("Procedure {}, Line {}", t.procedure(), t.line())
+    };
+    format!(
+        "Msg {}, Level {}, State {}, {at}: {}",
+        t.code(),
+        t.class(),
+        t.state(),
+        t.message()
+    )
 }
 
 /// tiberius explains TLS failures in terms of its own API; say what to do

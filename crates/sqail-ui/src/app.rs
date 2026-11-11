@@ -99,7 +99,8 @@ pub enum Msg {
     FileOpened(Result<(PathBuf, String, crate::textfile::FileFormat), String>),
     FileSaved {
         tab: u64,
-        result: Result<PathBuf, String>,
+        /// The path and the text written to it.
+        result: Result<(PathBuf, String), String>,
         /// Saved from the “Unsaved changes” prompt: close the tab now.
         close: bool,
     },
@@ -412,7 +413,8 @@ impl SqailApp {
         None
     }
 
-    fn tab_index(&self, id: u64) -> Option<usize> {
+    /// Where the tab with id `id` is now (tabs move and close).
+    pub fn tab_index(&self, id: u64) -> Option<usize> {
         self.tabs.iter().position(|t| t.id == id)
     }
 
@@ -552,10 +554,11 @@ impl SqailApp {
     }
 
     pub fn request_close_tab(&mut self, idx: usize) {
+        let id = self.tabs[idx].id;
         if self.tabs[idx].in_transaction {
-            self.dialog = Dialog::ConfirmCloseTransaction(Some(idx));
+            self.dialog = Dialog::ConfirmCloseTransaction(Some(id));
         } else if self.tabs[idx].is_dirty() && self.settings.confirm_close_tab {
-            self.dialog = Dialog::ConfirmClose(idx);
+            self.dialog = Dialog::ConfirmClose(id);
         } else {
             self.close_tab(idx);
         }
@@ -588,7 +591,7 @@ impl SqailApp {
             return;
         }
         if tab.in_transaction {
-            self.dialog = Dialog::ConfirmSwitchTransaction(idx, connection);
+            self.dialog = Dialog::ConfirmSwitchTransaction(tab.id, connection);
             return;
         }
         tab.connection = connection;
@@ -1037,9 +1040,9 @@ impl SqailApp {
             }
             Msg::FileOpened(Err(e)) => self.notify(format!("Open failed: {e}"), true),
             Msg::FileSaved { tab, result, close } => match result {
-                Ok(path) => {
+                Ok((path, written)) => {
                     if let Some(t) = self.tab_mut(tab) {
-                        t.mark_saved(path);
+                        t.mark_saved(path, written);
                     }
                     if close && let Some(idx) = self.tabs.iter().position(|t| t.id == tab) {
                         self.close_tab(idx);
@@ -1573,8 +1576,9 @@ impl SqailApp {
                     }
                 },
             };
+            // The tab text as it was before encoding is what counts as saved.
             let result = std::fs::write(&path, crate::textfile::encode(&text, &format))
-                .map(|_| path)
+                .map(|_| (path, text))
                 .map_err(|e| e.to_string());
             Msg::FileSaved {
                 tab: id,

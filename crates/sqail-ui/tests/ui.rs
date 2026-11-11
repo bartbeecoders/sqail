@@ -498,6 +498,61 @@ fn files_keep_their_encoding_bom_and_line_endings() {
     h.get_by_label_contains("saved as UTF-8");
 }
 
+/// Only the text that was written is marked saved, and the unsaved-changes
+/// prompt acts on its own tab even when tabs before it close meanwhile (#156).
+#[test]
+fn saving_and_close_prompts_follow_the_right_text_and_tab() {
+    let e = env();
+    let mut h = app([1280.0, 800.0]);
+    // A save finishes after the user typed on: the tab stays dirty.
+    let file = e.dir.path().join("race.sql");
+    let id = h.state().tabs[0].id;
+    h.state_mut().tabs[0].text = "SELECT 1 -- more".into();
+    std::fs::write(&file, "SELECT 1").unwrap();
+    h.state().worker.sink().send(sqail_ui::app::Msg::FileSaved {
+        tab: id,
+        result: Ok((file.clone(), "SELECT 1".into())),
+        close: false,
+    });
+    h.run_steps(2);
+    assert_eq!(h.state().tabs[0].title, "race.sql");
+    assert!(
+        h.state().tabs[0].is_dirty(),
+        "the typed text is not in the file"
+    );
+
+    // Tabs A, B, C (all dirty); the prompt for C is open when A closes.
+    for name in ["B", "C"] {
+        let i = h.state_mut().new_tab(None);
+        h.state_mut().tabs[i].text = format!("SELECT '{name}'");
+    }
+    h.run_steps(2);
+    let c = h.state().tabs[2].id;
+    h.state_mut().request_close_tab(2);
+    h.run_steps(2);
+    assert!(matches!(h.state().dialog, sqail_ui::dialogs::Dialog::ConfirmClose(x) if x == c));
+    h.state_mut().close_tab(0);
+    h.run_steps(2);
+    h.get_by_label("Discard").click();
+    h.run_steps(2);
+    let texts: Vec<_> = h.state().tabs.iter().map(|t| t.text.clone()).collect();
+    assert_eq!(
+        texts,
+        ["SELECT 'B'"],
+        "C was discarded, not the tab after it"
+    );
+
+    // A prompt whose tab is gone just closes.
+    h.state_mut().request_close_tab(0);
+    h.run_steps(2);
+    let b = h.state().tabs[0].id;
+    h.state_mut().new_tab(None);
+    h.state_mut().close_tab(0);
+    h.run_steps(2);
+    assert!(h.state().tab_index(b).is_none());
+    assert!(matches!(h.state().dialog, sqail_ui::dialogs::Dialog::None));
+}
+
 /// A profile of an engine newer than this build is listed as unsupported, and
 /// not offered in the tab's connection picker.
 #[test]
@@ -1454,7 +1509,7 @@ fn editor_runs_queries_end_to_end() {
     h.run_steps(3);
     assert!(matches!(
         h.state().dialog,
-        sqail_ui::dialogs::Dialog::ConfirmCloseTransaction(Some(0))
+        sqail_ui::dialogs::Dialog::ConfirmCloseTransaction(Some(id)) if id == h.state().tabs[0].id
     ));
     h.get_by_label("Cancel").click();
     h.run_steps(3);
@@ -2065,7 +2120,8 @@ fn switching_connection_closes_the_old_session() {
     h.run_steps(3);
     assert!(matches!(
         h.state().dialog,
-        sqail_ui::dialogs::Dialog::ConfirmSwitchTransaction(0, Some(c)) if c == other
+        sqail_ui::dialogs::Dialog::ConfirmSwitchTransaction(id, Some(c))
+            if id == h.state().tabs[0].id && c == other
     ));
     shot(&mut h, "12-switch-transaction");
     h.get_by_label("Cancel").click();

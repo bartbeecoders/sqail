@@ -341,10 +341,12 @@ impl Tab {
         self.text = text;
     }
 
-    pub fn mark_saved(&mut self, path: PathBuf) {
+    /// `written` is the text that went to the file, which is not
+    /// `self.text` when the user typed on while the save was in progress.
+    pub fn mark_saved(&mut self, path: PathBuf, written: String) {
         self.title = file_title(&path);
         self.path = Some(path);
-        self.saved = self.text.clone();
+        self.saved = written;
     }
 
     /// The selection if there is one, else the statement at the cursor.
@@ -1321,9 +1323,13 @@ mod tests {
         );
         t.text = "SELECT 1".into();
         assert!(t.is_dirty());
-        t.mark_saved("/tmp/x.sql".into());
+        t.mark_saved("/tmp/x.sql".into(), "SELECT 1".into());
         assert!(!t.is_dirty());
         assert_eq!(t.title, "x.sql");
+        // Typed while the save was in progress: not in the file, still dirty.
+        t.text = "SELECT 1 -- more".into();
+        t.mark_saved("/tmp/x.sql".into(), "SELECT 1".into());
+        assert!(t.is_dirty());
     }
 
     #[test]

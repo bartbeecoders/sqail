@@ -21,7 +21,9 @@ pub enum Dialog {
     AzureDiscover(Box<DiscoverForm>),
     Settings(Box<crate::settings_ui::SettingsPage>),
     ConfirmDelete(Uuid, String),
-    ConfirmClose(usize),
+    /// Closing the dirty tab with this id (ids, not indices: tabs before it
+    /// may close while the dialog is open).
+    ConfirmClose(u64),
     SaveSnippet {
         name: String,
         sql: String,
@@ -29,10 +31,11 @@ pub enum Dialog {
     Import(Box<ImportForm>),
     ApplyEdits(Box<ApplyEdits>),
     DropTable(Box<DropTable>),
-    /// Closing a tab (`Some(index)`) or quitting (`None`) with open transactions.
-    ConfirmCloseTransaction(Option<usize>),
-    /// Changing the connection of tab `index`, which has an open transaction.
-    ConfirmSwitchTransaction(usize, Option<Uuid>),
+    /// Closing a tab (`Some(tab id)`) or quitting (`None`) with open transactions.
+    ConfirmCloseTransaction(Option<u64>),
+    /// Changing the connection of the tab with this id, which has an open
+    /// transaction.
+    ConfirmSwitchTransaction(u64, Option<Uuid>),
 }
 
 // ---------------------------------------------------------------- welcome --
@@ -1622,14 +1625,15 @@ fn confirm_delete(ctx: &egui::Context, app: &mut SqailApp) {
 }
 
 fn confirm_close(ctx: &egui::Context, app: &mut SqailApp) {
-    let Dialog::ConfirmClose(idx) = app.dialog else {
+    let Dialog::ConfirmClose(id) = app.dialog else {
         return;
     };
-    let title = app
-        .tabs
-        .get(idx)
-        .map(|t| t.title.clone())
-        .unwrap_or_default();
+    // The tab closed meanwhile (e.g. an earlier save-and-close finished).
+    let Some(idx) = app.tab_index(id) else {
+        app.dialog = Dialog::None;
+        return;
+    };
+    let title = app.tabs[idx].title.clone();
     let mut decision = None;
     let resp = Modal::new(Id::new("confirm_close")).show(ctx, |ui| {
         ui.heading("Unsaved changes");
@@ -2145,9 +2149,20 @@ fn drop_table(ctx: &egui::Context, app: &mut SqailApp) {
 fn confirm_close_transaction(
     ctx: &egui::Context,
     app: &mut SqailApp,
-    target: Option<usize>,
+    target: Option<u64>,
     switch_to: Option<Option<Uuid>>,
 ) {
+    // Look the tab up by id; if it closed meanwhile there is nothing to ask.
+    let target = match target {
+        Some(id) => match app.tab_index(id) {
+            Some(i) => Some(i),
+            None => {
+                app.dialog = Dialog::None;
+                return;
+            }
+        },
+        None => None,
+    };
     let mut decision = None;
     let resp = Modal::new(Id::new("confirm_close_tx")).show(ctx, |ui| {
         ui.set_width(440.0);

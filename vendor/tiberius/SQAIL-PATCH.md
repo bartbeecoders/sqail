@@ -44,10 +44,14 @@ as SSMS does, without `KILL` (which ends the whole session and needs
 * `cancel_request` does not send a second Attention when one from the handle
   is already out; it reads that one's acknowledgement instead.
 * `AttentionHandle` is re-exported from the crate root.
+* `AttentionHandle::packets_read` counts the packets the connection has
+  read (`Connection::poll_next`), so that a canceller can tell a response
+  still arriving after the Attention from a server that went quiet (#215).
 
 Unit tests: `requested_attention_goes_out_on_the_next_read`,
-`no_attention_without_a_request` and
-`attention_requested_after_the_response_is_not_sent` in
+`no_attention_without_a_request`,
+`attention_requested_after_the_response_is_not_sent` and
+`the_handle_counts_packets_read` in
 `src/tds/stream/token.rs`.
 
 ## 3. Exact money, smallmoney and smalldatetime types (#151)

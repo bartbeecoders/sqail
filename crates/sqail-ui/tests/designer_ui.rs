@@ -219,6 +219,62 @@ fn design_create_and_drop_tables() {
         "reloaded table matches the design"
     );
 
+    // --- foreign keys and CHECK constraints pages ---------------------------
+    h.get_by_label("Checks (0)").click();
+    h.run_steps(2);
+    h.get_by_label("+ Add check").click();
+    h.run_steps(2);
+    {
+        let d = h.state_mut().designers.list[0].design.as_mut().unwrap();
+        d.table.checks[0].expression = "score >= 0".into();
+    }
+    h.run_steps(2);
+    shot(&mut h, "designer-02c-checks");
+    h.get_by_label("Foreign keys (0)").click();
+    h.run_steps(2);
+    h.get_by_label("+ Add foreign key").click();
+    h.run_steps(2);
+    {
+        let d = h.state_mut().designers.list[0].design.as_mut().unwrap();
+        let mentor = d.add_column();
+        d.column_mut(mentor).unwrap().name = "mentor".into();
+        d.column_mut(mentor).unwrap().data_type = "INTEGER".into();
+        let fk = d.table.foreign_keys[0].id;
+        let f = d.foreign_key_mut(fk).unwrap();
+        f.columns = vec![mentor];
+        f.ref_table = "people".into();
+        f.ref_columns = vec!["id".into()];
+        f.on_delete = sqail_client::proto::ReferentialAction::SetNull;
+    }
+    h.run_steps(4);
+    h.get_by_label("mentor");
+    shot(&mut h, "designer-02d-foreign-keys");
+    h.get_by_label_contains(" change(s)…").click();
+    h.run_steps(2);
+    h.get_by_label("Apply").click();
+    h.step();
+    wait(&mut h, "keys and checks to apply and reload", |a| {
+        let d = &a.designers.list[0];
+        designer_ready(a)
+            && !d.review
+            && d.design.as_ref().is_some_and(|x| {
+                x.table.foreign_keys.len() == 1 && x.plan().is_ok_and(|p| p.is_empty())
+            })
+    });
+    h.get_by_label("Foreign keys (1)");
+    h.get_by_label("Checks (1)");
+    {
+        let d = h.state().designers.list[0].design.as_ref().unwrap();
+        assert_eq!(d.table.checks[0].expression, "score >= 0");
+        let f = &d.table.foreign_keys[0];
+        assert_eq!(
+            (f.ref_table.as_str(), f.on_delete),
+            ("people", sqail_client::proto::ReferentialAction::SetNull)
+        );
+    }
+    h.state_mut().designers.list[0].section = sqail_ui::designer::Section::Columns;
+    h.run_steps(2);
+
     // --- create a table from the Tables header ----------------------------
     h.get_by_label("Tables (1)").click_secondary();
     h.run_steps(2);

@@ -328,7 +328,13 @@ or XML plan.
   must be selected once, without an alias. Binary columns (`bytea`,
   `varbinary`, `BLOB`) are edited as `0x` followed by hex digits, as they are
   shown (`0x` alone is an empty value); sqail writes the bytes themselves,
-  and refuses a value that isn't valid hex before anything is sent.
+  and refuses a value that isn't valid hex before anything is sent. Columns
+  the database fills are read-only and left out of new rows: identity
+  columns it always numbers (SQL Server `IDENTITY`, PostgreSQL `GENERATED
+  ALWAYS AS IDENTITY`), generated or computed columns, and SQL Server
+  `rowversion`. The column header's tooltip says why. A PostgreSQL
+  `BY DEFAULT` identity and SQLite's `INTEGER PRIMARY KEY` stay editable;
+  leave them empty in a new row to get the next number.
 * Messages (`RAISERROR`, `RAISE NOTICE`, `PRINT`) and row counts appear in the
   *Messages* tab, in the order the server sent them, between the results.
   On SQL Server every statement reports its row count (unless
@@ -346,7 +352,8 @@ panel on the right collapses the same way (**»**, Ctrl+Shift+A), and both
 remember their state.
 
 * **Connections:** a tree of schemas, tables, views, columns, indexes, foreign
-  keys and routines, loaded lazily. Right-click a table for *SELECT top 100*,
+  keys and routines, loaded lazily. Columns show their type and whether they
+  are an *identity* (*rowid* on SQLite) or *generated*. Right-click a table for *SELECT top 100*,
   *Design table…*, *Import CSV…*, *Script CREATE*, *Drop table…* or *Copy
   name*. *Import CSV* reads binary columns as `0x` + hex, the way CSV
   export writes them, and stops (changing nothing) at a value that isn't
@@ -388,7 +395,17 @@ be open at once. Pages:
 
 * **Columns:** name, type (type it, or pick a common one from ⏷), whether it
   allows NULL, and the default as an SQL expression (`0`, `'none'`,
-  `now()`). Tick *Key* to put a column in the primary key. Rows you added
+  `now()`), and (PostgreSQL, SQL Server) a comment. The menu in front of
+  the default makes a column an *identity*
+  (numbered by the database: `BY DEFAULT` or `ALWAYS` on PostgreSQL,
+  `IDENTITY` on SQL Server) or *generated* (computed from an expression;
+  *Stored*, on SQL Server *Persisted*, keeps the values on disk). An
+  existing PostgreSQL column can become an identity or stop being one, and
+  a generated column can get a new expression (PostgreSQL 17 or later) or
+  become an ordinary column with its values kept. SQL Server can't change
+  either on an existing column, and the menu says so: drop the column and
+  add a new one. On SQLite a lone `INTEGER PRIMARY KEY` is shown as
+  *rowid*. Tick *Key* to put a column in the primary key. Rows you added
   are marked *new*, edited ones *changed*; removed columns are listed under
   *Dropped* and can be restored until you apply. Column order can be changed
   only for a new table.
@@ -399,12 +416,28 @@ be open at once. Pages:
   to the index but can't be edited here.
 * **Primary key:** the key columns in order and, on PostgreSQL and SQL
   Server, the constraint name. Key columns are always NOT NULL.
+* **Foreign keys:** name, the key columns in order (click the list to
+  change them), the referenced table (`table` in the same schema, or
+  `schema.table`) and its columns (comma-separated), and what happens *On
+  delete* and *On update* (no action, restrict, cascade, set null, set
+  default). Add, change, rename and drop them; a changed key is dropped and
+  added again, a renamed one is renamed. Options it was declared with
+  (`MATCH FULL`, `DEFERRABLE`, `NOT FOR REPLICATION`) are shown and kept.
+  SQLite keeps no names for foreign keys, and changing one rebuilds the
+  table.
+* **Checks:** `CHECK` constraints, by name and condition (`qty > 0`). A
+  changed condition drops and adds the constraint again, so existing rows
+  must satisfy it.
 * **Security:** who holds which privilege on the table (`SELECT`, `INSERT`,
   `UPDATE`, `DELETE`, …). Tick and untick to grant and revoke; *+ Add
   grantee* adds a role or user (⏷ lists the ones the database has). Not
   available for SQLite, which has no permissions.
 * **SQL:** the statements your edits add up to; *Open in editor* copies them
   to a new tab.
+
+Next to the table name is the table's comment. Comments are written with
+`COMMENT ON` on PostgreSQL and as the `MS_Description` extended property on
+SQL Server (what SSMS shows as *Description*); SQLite has none.
 
 **Apply…** shows the statements again and runs them in one transaction: if
 one fails, nothing changes and the error is shown. Afterwards the designer
@@ -421,17 +454,32 @@ Good to know:
   `NONCLUSTERED` are kept (the Indexes page shows them); a PostgreSQL index
   method other than B-tree is not.
 * Dropping a column takes it out of the indexes that include it (they are
-  re-created without it); an index whose filter uses the column is dropped.
+  re-created without it); an index whose filter uses the column is dropped,
+  and so are the foreign keys and `CHECK` constraints that use it.
 * SQL Server: changing a column's type or NULL-ness re-creates the indexes
   that use it (as a key, included or in the filter) and the key on it, and a
-  default is dropped and re-added by its generated name. *Open in editor*
-  gives a script that runs as one batch.
+  default is dropped and re-added by its generated name. `CHECK`
+  constraints and the table's own foreign keys on such a column (or on a
+  renamed one, for `CHECK`) are dropped and added back too. *Open in
+  editor* gives a script that runs as one batch.
+* PostgreSQL: changing a column's type drops its default first and sets the
+  new one (or the old one again) afterwards, so a default that can't be
+  cast to the new type (`''` to `integer`) doesn't stop the change.
+* Foreign keys of other tables that reference this one are dropped and
+  added back, with their actions and options, when the key they use is
+  re-created with the same columns. Changes they couldn't follow are
+  refused before anything runs, with the keys named: dropping a referenced
+  column, changing the columns of a referenced key, or (SQL Server, which
+  wants the same type on both sides) changing a referenced column's type.
+* Columns a generated or computed column uses can't be dropped or change
+  type while it exists (nor be renamed, on SQL Server); the designer says
+  which column is in the way. Dropping both together works.
 * SQLite can change only a few things in place (renames, adding and dropping
   columns, indexes). Anything else (a type, NULL-ness, a default, the
   primary key) rebuilds the table: the rows are copied into a new table
-  that replaces the old one. Triggers on the table are dropped, and `CHECK`
-  constraints, `AUTOINCREMENT` and foreign-key actions are not carried
-  over; the review says so before you apply.
+  that replaces the old one, with its `CHECK` constraints and foreign keys
+  (actions included). Triggers on the table are dropped and `AUTOINCREMENT`
+  is not carried over; the review says so before you apply.
 
 ## AI assistant
 

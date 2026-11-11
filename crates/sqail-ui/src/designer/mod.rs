@@ -1,17 +1,18 @@
 //! The visual table designer: a window per table where columns, the primary
-//! key, indexes and grants are edited, reviewed as DDL and applied in one
-//! transaction. The DDL itself comes from [`model`].
+//! key, indexes, foreign keys, CHECK constraints, comments and grants are
+//! edited, reviewed as DDL and applied in one transaction. The DDL itself
+//! comes from [`model`].
 
 pub mod model;
 
 use anyhow::bail;
 use egui::{Color32, RichText};
-use sqail_client::proto::{Engine, QueryEvent, QueryRequest, TablePrivileges};
+use sqail_client::proto::{Engine, QueryEvent, QueryRequest, ReferentialAction, TablePrivileges};
 use sqail_client::{Client, On};
 use uuid::Uuid;
 
 use crate::app::{Msg, SqailApp};
-use model::{Design, IndexPart, Plan, Status};
+use model::{Design, IndexPart, Plan, Status, ValueKind};
 
 const RED: Color32 = Color32::from_rgb(0xd6, 0x45, 0x45);
 const GREEN: Color32 = Color32::from_rgb(0x3f, 0xa3, 0x5b);
@@ -23,6 +24,8 @@ pub enum Section {
     Columns,
     Indexes,
     PrimaryKey,
+    ForeignKeys,
+    Checks,
     Security,
     Sql,
 }
@@ -161,11 +164,14 @@ pub async fn fetch(
     table: &str,
 ) -> Result<Loaded, String> {
     let s = Some(schema);
-    let (cols, idx, fks, privs) = futures::join!(
+    let (cols, idx, fks, privs, checks, referencing, details) = futures::join!(
         client.columns(conn, s, table),
         client.indexes(conn, s, table),
         client.foreign_keys(conn, s, table),
         client.privileges(conn, s, table),
+        client.checks(conn, s, table),
+        client.referencing_keys(conn, s, table),
+        client.table_details(conn, s, table),
     );
     let err = |e: sqail_client::Error| e.to_string();
     let cols = cols.map_err(err)?;
@@ -179,10 +185,23 @@ pub async fn fetch(
         .as_ref()
         .map(|p| p.grants.clone())
         .unwrap_or_default();
-    Ok(Loaded {
-        design: Design::from_catalog(engine, schema, table, &cols, &idx, fks, &grants),
-        privileges,
-    })
+    let mut design = Design::from_catalog(engine, schema, table, &cols, &idx, fks, &grants);
+    // A service older than these calls answers 404: the constraints stay
+    // unknown, as before.
+    let older = |e: &sqail_client::Error| e.status() == Some(404);
+    match (checks, referencing) {
+        (Ok(checks), Ok(referencing)) => {
+            design = design.with_constraints(&checks, referencing);
+        }
+        (Err(e), _) | (_, Err(e)) if !older(&e) => return Err(err(e)),
+        _ => {}
+    }
+    match details {
+        Ok(details) => design = design.with_comment(details.comment),
+        Err(e) if !older(&e) => return Err(err(e)),
+        Err(_) => {}
+    }
+    Ok(Loaded { design, privileges })
 }
 
 /// Handle [`Msg::DesignerLoaded`].
@@ -467,6 +486,8 @@ fn window(ui: &mut egui::Ui, d: &mut Designer) -> Option<Request> {
                         Section::Columns => columns(ui, d),
                         Section::Indexes => indexes(ui, d),
                         Section::PrimaryKey => primary_key(ui, d),
+                        Section::ForeignKeys => foreign_keys(ui, d),
+                        Section::Checks => checks(ui, d),
                         Section::Security => security(ui, d),
                         Section::Sql => sql(ui, d, &mut request),
                     }
@@ -489,6 +510,14 @@ fn tabs(ui: &mut egui::Ui, d: &mut Designer) {
                 format!("Indexes ({})", design.table.indexes.len()),
             ),
             (Section::PrimaryKey, "Primary key".to_string()),
+            (
+                Section::ForeignKeys,
+                format!("Foreign keys ({})", design.table.foreign_keys.len()),
+            ),
+            (
+                Section::Checks,
+                format!("Checks ({})", design.table.checks.len()),
+            ),
             (Section::Security, "Security".to_string()),
             (Section::Sql, "SQL".to_string()),
         ] {
@@ -533,11 +562,26 @@ fn header(ui: &mut egui::Ui, d: &mut Designer) {
                 .hint_text("name")
                 .desired_width(220.0),
         );
+        if d.engine != Engine::Sqlite {
+            ui.label("Comment");
+            let resp = ui.add_enabled(
+                editable && design.comments_known,
+                egui::TextEdit::singleline(&mut design.table.comment)
+                    .hint_text("none")
+                    .desired_width(220.0),
+            );
+            if !design.comments_known {
+                resp.on_disabled_hover_text(OLD_SERVICE_COMMENTS);
+            }
+        }
         if d.read_only {
             ui.label(RichText::new("read-only connection").color(AMBER));
         }
     });
 }
+
+const OLD_SERVICE_COMMENTS: &str =
+    "This sqail-service is too old to read comments, so they can't be changed here";
 
 fn status_label(ui: &mut egui::Ui, s: Status) {
     match s {
@@ -555,10 +599,14 @@ fn columns(ui: &mut egui::Ui, d: &mut Designer) {
     let mut remove = None;
     let mut toggle_pk = None;
     let mut moved = None;
+    let mut set_kind = None;
     let row_h = ui.spacing().interact_size.y;
+    // SQLite keeps no comments.
+    let comments = engine != Engine::Sqlite;
+    let comments_known = design.comments_known;
     egui::Grid::new(("designer_columns", id))
         .striped(true)
-        .num_columns(7)
+        .num_columns(if comments { 8 } else { 7 })
         .spacing([8.0, 4.0])
         .show(ui, |ui| {
             ui.label(RichText::new("Key").strong())
@@ -567,44 +615,172 @@ fn columns(ui: &mut egui::Ui, d: &mut Designer) {
             ui.label(RichText::new("Type").strong());
             ui.label(RichText::new("Null").strong())
                 .on_hover_text("Allows NULL");
-            ui.label(RichText::new("Default").strong());
+            ui.label(RichText::new("Default").strong()).on_hover_text(
+                "A default, or where the database takes the values from: \
+                 an identity or a generated (computed) expression",
+            );
+            if comments {
+                ui.label(RichText::new("Comment").strong());
+            }
             ui.label("");
             ui.label("");
             ui.end_row();
             let ids: Vec<u64> = design.table.columns.iter().map(|c| c.id).collect();
             let last = ids.len().saturating_sub(1);
+            let kinds: &[ValueKind] = match engine {
+                Engine::Postgres => &[
+                    ValueKind::Plain,
+                    ValueKind::IdentityByDefault,
+                    ValueKind::IdentityAlways,
+                    ValueKind::Generated,
+                ],
+                Engine::Mssql => &[
+                    ValueKind::Plain,
+                    ValueKind::IdentityAlways,
+                    ValueKind::Generated,
+                ],
+                Engine::Sqlite | Engine::Unknown => &[ValueKind::Plain, ValueKind::Generated],
+            };
             for (row, cid) in ids.iter().copied().enumerate() {
                 let mut in_pk = design.in_pk(cid);
                 if ui.checkbox(&mut in_pk, "").changed() {
                     toggle_pk = Some(cid);
                 }
                 let status = design.column_status(cid);
+                let allowed: Vec<(ValueKind, Result<(), &str>)> = kinds
+                    .iter()
+                    .map(|k| (*k, design.kind_allowed(cid, *k)))
+                    .collect();
+                let type_ok = design.type_editable(cid);
+                let expr_ok = design.expression_editable(cid);
+                let stored_ok = design.stored_editable(cid);
                 let c = design.column_mut(cid).expect("listed");
+                let kind = ValueKind::of(c);
+                // SQLite's rowid can be NULL-less only; identity columns
+                // elsewhere are NOT NULL.
+                let identity = c.identity.is_some() && engine != Engine::Sqlite;
                 ui.add_sized([170.0, row_h], egui::TextEdit::singleline(&mut c.name));
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
-                    ui.add(
+                    let ty = ui.add_enabled(
+                        type_ok.is_ok(),
                         egui::TextEdit::singleline(&mut c.data_type)
                             .desired_width(170.0)
                             .font(egui::TextStyle::Monospace),
                     );
-                    ui.menu_button("⏷", |ui| {
-                        for t in model::type_suggestions(engine) {
-                            if ui.button(RichText::new(*t).monospace()).clicked() {
-                                c.data_type = t.to_string();
+                    if let Err(why) = type_ok {
+                        ty.on_disabled_hover_text(why);
+                    }
+                    ui.add_enabled_ui(type_ok.is_ok(), |ui| {
+                        ui.menu_button("⏷", |ui| {
+                            for t in model::type_suggestions(engine) {
+                                if ui.button(RichText::new(*t).monospace()).clicked() {
+                                    c.data_type = t.to_string();
+                                    ui.close();
+                                }
+                            }
+                        });
+                    });
+                });
+                let why_not_null = if in_pk {
+                    Some("Key columns cannot be NULL")
+                } else if identity {
+                    Some("Identity columns cannot be NULL")
+                } else {
+                    type_ok.err()
+                };
+                let null = ui.add_enabled(
+                    why_not_null.is_none(),
+                    egui::Checkbox::new(&mut c.nullable, ""),
+                );
+                if let Some(why) = why_not_null {
+                    null.on_disabled_hover_text(why);
+                }
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    let menu = ui.menu_button(format!("{} ⏷", kind.label(engine)), |ui| {
+                        for (k, ok) in &allowed {
+                            let b = ui.add_enabled(
+                                ok.is_ok(),
+                                egui::Button::selectable(kind == *k, k.label(engine)),
+                            );
+                            if let Err(why) = ok {
+                                b.clone().on_disabled_hover_text(*why);
+                            }
+                            if b.clicked() {
+                                set_kind = Some((cid, *k));
                                 ui.close();
                             }
                         }
+                        if let Some(g) = c.generated.as_mut() {
+                            ui.separator();
+                            let label = if engine == Engine::Mssql {
+                                "Persisted"
+                            } else {
+                                "Stored"
+                            };
+                            let s = ui.add_enabled(
+                                stored_ok.is_ok(),
+                                egui::Checkbox::new(&mut g.stored, label),
+                            );
+                            if let Err(why) = stored_ok {
+                                s.on_disabled_hover_text(why);
+                            }
+                        }
                     });
+                    menu.response.on_hover_text(match kind {
+                        ValueKind::Plain => {
+                            "The value when none is given; click to choose \
+                                             identity or generated instead"
+                        }
+                        ValueKind::IdentityAlways | ValueKind::IdentityByDefault => {
+                            "The database numbers this column"
+                        }
+                        ValueKind::Generated => "Computed from the expression",
+                    });
+                    match (kind, c.generated.as_mut()) {
+                        (ValueKind::Generated, Some(g)) => {
+                            let e = ui.add_enabled(
+                                expr_ok.is_ok(),
+                                egui::TextEdit::singleline(&mut g.expression)
+                                    .hint_text("expression")
+                                    .desired_width(150.0)
+                                    .font(egui::TextStyle::Monospace),
+                            );
+                            if let Err(why) = expr_ok {
+                                e.on_disabled_hover_text(why);
+                            }
+                        }
+                        (ValueKind::Plain, _) => {
+                            ui.add_sized(
+                                [150.0, row_h],
+                                egui::TextEdit::singleline(&mut c.default)
+                                    .hint_text("none")
+                                    .font(egui::TextStyle::Monospace),
+                            );
+                        }
+                        _ => {
+                            if let Some(i) = &c.identity
+                                && let (Some(s), Some(n)) = (&i.seed, &i.increment)
+                            {
+                                ui.label(
+                                    RichText::new(format!("from {s}, step {n}")).small().weak(),
+                                );
+                            }
+                        }
+                    }
                 });
-                ui.add_enabled(!in_pk, egui::Checkbox::new(&mut c.nullable, ""))
-                    .on_disabled_hover_text("Key columns cannot be NULL");
-                ui.add_sized(
-                    [150.0, row_h],
-                    egui::TextEdit::singleline(&mut c.default)
-                        .hint_text("none")
-                        .font(egui::TextStyle::Monospace),
-                );
+                if comments {
+                    let resp = ui.add_enabled(
+                        comments_known,
+                        egui::TextEdit::singleline(&mut c.comment)
+                            .hint_text("none")
+                            .desired_width(160.0),
+                    );
+                    if !comments_known {
+                        resp.on_disabled_hover_text(OLD_SERVICE_COMMENTS);
+                    }
+                }
                 status_label(ui, status);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
@@ -635,6 +811,9 @@ fn columns(ui: &mut egui::Ui, d: &mut Designer) {
         });
     if let Some(c) = toggle_pk {
         design.toggle_pk(c);
+    }
+    if let Some((c, k)) = set_kind {
+        design.set_kind(c, k);
     }
     if let Some(c) = remove {
         design.remove_column(c);
@@ -906,6 +1085,305 @@ fn primary_key(ui: &mut egui::Ui, d: &mut Designer) {
         RichText::new("Key columns become NOT NULL. Changing the key drops and re-creates it.")
             .small()
             .weak(),
+    );
+}
+
+fn action_label(a: ReferentialAction) -> &'static str {
+    match a {
+        ReferentialAction::NoAction => "no action",
+        ReferentialAction::Restrict => "restrict",
+        ReferentialAction::Cascade => "cascade",
+        ReferentialAction::SetNull => "set null",
+        ReferentialAction::SetDefault => "set default",
+    }
+}
+
+fn foreign_keys(ui: &mut egui::Ui, d: &mut Designer) {
+    let id = d.id;
+    let engine = d.engine;
+    let design = d.design.as_mut().expect("loaded");
+    if !design.constraints_known {
+        ui.colored_label(
+            AMBER,
+            "This sqail-service is too old to list who references this table, so changes \
+             to its keys are not checked against them.",
+        );
+    }
+    if design.table.foreign_keys.is_empty() {
+        ui.label(RichText::new("The table has no foreign keys.").weak());
+    }
+    let column_ids: Vec<(u64, String)> = design
+        .table
+        .columns
+        .iter()
+        .map(|c| (c.id, c.name.clone()))
+        .collect();
+    let named = engine != Engine::Sqlite;
+    let mut remove = None;
+    let ids: Vec<u64> = design.table.foreign_keys.iter().map(|f| f.id).collect();
+    egui::Grid::new(("designer_fks", id))
+        .striped(true)
+        .num_columns(8)
+        .spacing([8.0, 4.0])
+        .show(ui, |ui| {
+            if !ids.is_empty() {
+                ui.label(RichText::new("Name").strong());
+                ui.label(RichText::new("Columns").strong());
+                ui.label(RichText::new("References").strong())
+                    .on_hover_text("schema.table, or table in this schema");
+                ui.label(RichText::new("Referenced columns").strong())
+                    .on_hover_text("Comma-separated, in key order");
+                ui.label(RichText::new("On delete").strong());
+                ui.label(RichText::new("On update").strong());
+                ui.label("");
+                ui.label("");
+                ui.end_row();
+            }
+            for fid in ids {
+                let status = {
+                    let f = design
+                        .table
+                        .foreign_keys
+                        .iter()
+                        .find(|f| f.id == fid)
+                        .expect("listed");
+                    design.foreign_key_status(f)
+                };
+                let labels: Vec<String> = {
+                    let f = design
+                        .table
+                        .foreign_keys
+                        .iter()
+                        .find(|f| f.id == fid)
+                        .expect("listed");
+                    f.columns.iter().map(|c| design.column_name(*c)).collect()
+                };
+                let schema = design.table.schema.clone();
+                let f = design.foreign_key_mut(fid).expect("listed");
+                if named {
+                    ui.add_sized(
+                        [160.0, ui.spacing().interact_size.y],
+                        egui::TextEdit::singleline(&mut f.name).hint_text("chosen by the database"),
+                    );
+                } else {
+                    ui.label(RichText::new("—").weak())
+                        .on_hover_text("SQLite keeps no names for foreign keys");
+                }
+                let shown = if labels.is_empty() {
+                    "choose…".to_string()
+                } else {
+                    labels.join(", ")
+                };
+                ui.menu_button(shown, |ui| {
+                    ui.set_min_width(200.0);
+                    ui.label(RichText::new("Key order").weak());
+                    let mut up = None;
+                    let mut drop_col = None;
+                    for (pos, label) in labels.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_enabled(pos > 0, egui::Button::new("↑").small())
+                                .clicked()
+                            {
+                                up = Some(pos);
+                            }
+                            if ui.small_button("×").clicked() {
+                                drop_col = Some(pos);
+                            }
+                            ui.label(label);
+                        });
+                    }
+                    if let Some(pos) = up {
+                        f.columns.swap(pos, pos - 1);
+                    }
+                    if let Some(pos) = drop_col {
+                        f.columns.remove(pos);
+                    }
+                    ui.separator();
+                    ui.label(RichText::new("Add").weak());
+                    for (cid, name) in &column_ids {
+                        if !f.columns.contains(cid) && ui.button(format!("+ {name}")).clicked() {
+                            f.columns.push(*cid);
+                        }
+                    }
+                });
+                // `schema.table`, or a bare table in the table's schema.
+                let mut target = if engine == Engine::Sqlite || f.ref_schema == schema {
+                    f.ref_table.clone()
+                } else {
+                    format!("{}.{}", f.ref_schema, f.ref_table)
+                };
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut target)
+                            .hint_text("table")
+                            .desired_width(160.0),
+                    )
+                    .changed()
+                {
+                    match target.split_once('.') {
+                        Some((sc, t)) if engine != Engine::Sqlite => {
+                            f.ref_schema = sc.trim().to_string();
+                            f.ref_table = t.trim().to_string();
+                        }
+                        _ => {
+                            f.ref_schema = schema.clone();
+                            f.ref_table = target.trim().to_string();
+                        }
+                    }
+                }
+                let mut refs = f.ref_columns.join(", ");
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut refs)
+                            .hint_text(if named { "id" } else { "primary key" })
+                            .desired_width(140.0),
+                    )
+                    .changed()
+                {
+                    f.ref_columns = refs
+                        .split(',')
+                        .map(|c| c.trim().to_string())
+                        .filter(|c| !c.is_empty())
+                        .collect();
+                }
+                for (salt, action) in [("del", &mut f.on_delete), ("upd", &mut f.on_update)] {
+                    egui::ComboBox::from_id_salt(("designer_fk_action", id, fid, salt))
+                        .selected_text(action_label(*action))
+                        .width(100.0)
+                        .show_ui(ui, |ui| {
+                            for a in ReferentialAction::ALL {
+                                ui.selectable_value(action, a, action_label(a));
+                            }
+                        });
+                }
+                ui.horizontal(|ui| {
+                    if !f.options.trim().is_empty() {
+                        ui.label(RichText::new(f.options.trim()).small().weak())
+                            .on_hover_text("Kept when the key is re-created");
+                    }
+                    status_label(ui, status);
+                });
+                if ui
+                    .small_button("×")
+                    .on_hover_text("Drop foreign key")
+                    .clicked()
+                {
+                    remove = Some(fid);
+                }
+                ui.end_row();
+            }
+        });
+    if let Some(f) = remove {
+        design.remove_foreign_key(f);
+    }
+    ui.add_space(4.0);
+    if ui.button("+ Add foreign key").clicked() {
+        design.add_foreign_key();
+    }
+    let removed = design.removed_foreign_keys();
+    if !removed.is_empty() {
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Dropped:").color(RED));
+            for f in removed {
+                let label = if f.name.is_empty() {
+                    format!("→ {}", f.ref_table)
+                } else {
+                    f.name.clone()
+                };
+                ui.label(RichText::new(label).strikethrough().color(RED));
+            }
+        });
+    }
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new(if engine == Engine::Sqlite {
+            "Changing a foreign key rebuilds the table (SQLite can't alter them in place)."
+        } else {
+            "A changed foreign key is dropped and added again; existing rows must satisfy it."
+        })
+        .small()
+        .weak(),
+    );
+}
+
+fn checks(ui: &mut egui::Ui, d: &mut Designer) {
+    let id = d.id;
+    let engine = d.engine;
+    let design = d.design.as_mut().expect("loaded");
+    if !design.constraints_known {
+        ui.colored_label(
+            AMBER,
+            "This sqail-service is too old to list CHECK constraints; the ones the table \
+             has are not shown.",
+        );
+    }
+    if design.table.checks.is_empty() {
+        ui.label(RichText::new("The table has no CHECK constraints.").weak());
+    }
+    let mut remove = None;
+    let ids: Vec<u64> = design.table.checks.iter().map(|c| c.id).collect();
+    egui::Grid::new(("designer_checks", id))
+        .striped(true)
+        .num_columns(4)
+        .spacing([8.0, 4.0])
+        .show(ui, |ui| {
+            if !ids.is_empty() {
+                ui.label(RichText::new("Name").strong());
+                ui.label(RichText::new("Condition").strong());
+                ui.label("");
+                ui.label("");
+                ui.end_row();
+            }
+            for cid in ids {
+                let status = {
+                    let c = design
+                        .table
+                        .checks
+                        .iter()
+                        .find(|c| c.id == cid)
+                        .expect("listed");
+                    design.check_status(c)
+                };
+                let c = design.check_mut(cid).expect("listed");
+                ui.add_sized(
+                    [180.0, ui.spacing().interact_size.y],
+                    egui::TextEdit::singleline(&mut c.name).hint_text("chosen by the database"),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut c.expression)
+                        .hint_text("qty > 0")
+                        .desired_width(320.0)
+                        .font(egui::TextStyle::Monospace),
+                );
+                status_label(ui, status);
+                if ui
+                    .small_button("×")
+                    .on_hover_text("Drop the constraint")
+                    .clicked()
+                {
+                    remove = Some(cid);
+                }
+                ui.end_row();
+            }
+        });
+    if let Some(c) = remove {
+        design.remove_check(c);
+    }
+    ui.add_space(4.0);
+    if ui.button("+ Add check").clicked() {
+        design.add_check();
+    }
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new(if engine == Engine::Sqlite {
+            "Changing a CHECK constraint rebuilds the table (SQLite can't alter them in place)."
+        } else {
+            "A changed constraint is dropped and added again; existing rows must satisfy it."
+        })
+        .small()
+        .weak(),
     );
 }
 

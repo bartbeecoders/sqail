@@ -525,6 +525,51 @@ impl Client {
         .await
     }
 
+    /// Foreign keys in any table that reference `table`. A service older
+    /// than this call answers 404.
+    pub async fn referencing_keys(
+        &self,
+        id: Uuid,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<ReferencingKey>> {
+        self.get(&Self::schema_path(
+            id,
+            "schema/referencing-keys",
+            schema,
+            Some(table),
+        ))
+        .await
+    }
+
+    /// A table's comment. A service older than this call answers 404.
+    pub async fn table_details(
+        &self,
+        id: Uuid,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<TableDetails> {
+        self.get(&Self::schema_path(
+            id,
+            "schema/table-details",
+            schema,
+            Some(table),
+        ))
+        .await
+    }
+
+    /// A table's CHECK constraints. A service older than this call
+    /// answers 404.
+    pub async fn checks(
+        &self,
+        id: Uuid,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<CheckInfo>> {
+        self.get(&Self::schema_path(id, "schema/checks", schema, Some(table)))
+            .await
+    }
+
     pub async fn privileges(
         &self,
         id: Uuid,

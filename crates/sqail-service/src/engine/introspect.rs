@@ -4,7 +4,8 @@
 
 use serde_json::Value;
 use sqail_proto::{
-    ColumnInfo, Ddl, Engine, ForeignKeyInfo, IndexInfo, NamedItem, Param, RoutineInfo, RoutineKind,
+    CheckInfo, ColumnInfo, Ddl, Engine, ForeignKeyInfo, GeneratedInfo, IdentityInfo, IndexInfo,
+    NamedItem, Param, ReferencingKey, ReferentialAction, RoutineInfo, RoutineKind, TableDetails,
     TableGrant, TableInfo, TableKind, TablePrivileges,
 };
 
@@ -49,7 +50,18 @@ fn split_list(v: &Value) -> Vec<String> {
 }
 
 async fn rows(conn: &mut dyn Conn, sql: &str, params: Vec<Param>) -> Result<Vec<Vec<Value>>> {
-    fetch_rows(conn, sql, params).await
+    // SQL Server picks a catalog read as the victim when it deadlocks with
+    // DDL running elsewhere (Msg 1205); a read is safe to run again.
+    let mut tries = 0;
+    loop {
+        match fetch_rows(conn, sql, params.clone()).await {
+            Err(DbError::Internal(m)) if m.contains("Msg 1205,") && tries < 3 => {
+                tries += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(20 * tries)).await;
+            }
+            r => return r,
+        }
+    }
 }
 
 // ------------------------------------------------------------ databases --
@@ -187,6 +199,32 @@ macro_rules! ms_type {
     };
 }
 
+/// SQL Server: the identity and computed-column rows of column `c` (`idc`,
+/// `cc`) and its default constraint (`dc`).
+macro_rules! ms_column_joins {
+    () => {
+        "LEFT JOIN sys.identity_columns idc ON idc.object_id = c.object_id AND idc.column_id = c.column_id
+         LEFT JOIN sys.computed_columns cc ON cc.object_id = c.object_id AND cc.column_id = c.column_id
+         LEFT JOIN sys.default_constraints dc ON dc.object_id = c.default_object_id"
+    };
+}
+
+/// PostgreSQL: the sequence that column `a` of table `c` owns, as `s`
+/// (`seqoid`, `deptype` 'i' for identity or 'a' for serial, `seqstart`,
+/// `seqincrement`).
+macro_rules! pg_owned_sequence {
+    () => {
+        "LEFT JOIN LATERAL (
+             SELECT sc.oid AS seqoid, dep.deptype, sq.seqstart, sq.seqincrement
+             FROM pg_depend dep
+             JOIN pg_class sc ON sc.oid = dep.objid AND sc.relkind = 'S'
+             JOIN pg_sequence sq ON sq.seqrelid = sc.oid
+             WHERE dep.classid = 'pg_class'::regclass AND dep.refclassid = 'pg_class'::regclass
+               AND dep.refobjid = c.oid AND dep.refobjsubid = a.attnum AND dep.deptype IN ('a', 'i')
+             LIMIT 1) s ON true"
+    };
+}
+
 /// The schema an unqualified `table` resolves to on `conn`, the way the
 /// engine resolves it in a statement: PostgreSQL's search path, SQL Server's
 /// default schema then `dbo`, SQLite's `temp`, `main`, then attached
@@ -231,20 +269,30 @@ pub async fn columns(
     schema: Option<&str>,
     table: &str,
 ) -> Result<Vec<ColumnInfo>> {
+    // Columns 0-5 as in `ColumnInfo`; then the identity kind ('a' always,
+    // 'd' by default, '' none), seed and increment, the generation kind
+    // ('s' stored, 'v' virtual, '' none) whose expression is column 4, and
+    // the comment.
     let (sql, params) = match conn.engine() {
         Engine::Unknown => return Err(DbError::unknown_engine()),
         Engine::Postgres => (
-            "SELECT a.attname::text, a.attnum::int8, format_type(a.atttypid, a.atttypmod)::text,
+            concat!(
+                "SELECT a.attname::text, a.attnum::int8, format_type(a.atttypid, a.atttypmod)::text,
                     (NOT a.attnotnull)::bool, pg_get_expr(d.adbin, d.adrelid)::text,
-                    COALESCE(a.attnum = ANY(i.indkey), false)::bool
+                    COALESCE(a.attnum = ANY(i.indkey), false)::bool,
+                    a.attidentity::text, s.seqstart::text, s.seqincrement::text, a.attgenerated::text,
+                    col_description(c.oid, a.attnum)::text
              FROM pg_attribute a
              JOIN pg_class c ON c.oid = a.attrelid
              JOIN pg_namespace n ON n.oid = c.relnamespace
              LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
-             LEFT JOIN pg_index i ON i.indrelid = c.oid AND i.indisprimary
+             LEFT JOIN pg_index i ON i.indrelid = c.oid AND i.indisprimary ",
+                pg_owned_sequence!(),
+                "
              WHERE n.nspname = COALESCE($1, current_schema()) AND c.relname = $2
                AND a.attnum > 0 AND NOT a.attisdropped
-             ORDER BY a.attnum",
+             ORDER BY a.attnum"
+            ),
             vec![param(schema), param(Some(table))],
         ),
         Engine::Mssql => (
@@ -252,13 +300,20 @@ pub async fn columns(
                 "SELECT c.name, c.column_id, ",
                 ms_type!(),
                 ",
-                    c.is_nullable, dc.definition,
-                    CAST(CASE WHEN pk.column_id IS NULL THEN 0 ELSE 1 END AS bit)
+                    c.is_nullable, COALESCE(cc.definition, dc.definition),
+                    CAST(CASE WHEN pk.column_id IS NULL THEN 0 ELSE 1 END AS bit),
+                    IIF(c.is_identity = 1, 'a', ''),
+                    CAST(idc.seed_value AS nvarchar(40)), CAST(idc.increment_value AS nvarchar(40)),
+                    CASE WHEN cc.is_persisted = 1 THEN 's' WHEN c.is_computed = 1 THEN 'v' ELSE '' END,
+                    CAST(ep.value AS nvarchar(max))
              FROM sys.columns c
              JOIN sys.objects o ON o.object_id = c.object_id
              JOIN sys.schemas s ON s.schema_id = o.schema_id
-             JOIN sys.types t ON t.user_type_id = c.user_type_id
-             LEFT JOIN sys.default_constraints dc ON dc.object_id = c.default_object_id
+             JOIN sys.types t ON t.user_type_id = c.user_type_id ",
+                ms_column_joins!(),
+                "
+             LEFT JOIN sys.extended_properties ep ON ep.class = 1 AND ep.major_id = c.object_id
+                    AND ep.minor_id = c.column_id AND ep.name = 'MS_Description'
              LEFT JOIN (SELECT ic.object_id, ic.column_id FROM sys.indexes i
                         JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
                         WHERE i.is_primary_key = 1) pk
@@ -268,29 +323,236 @@ pub async fn columns(
             ),
             vec![param(schema), param(Some(table))],
         ),
-        Engine::Sqlite => {
-            sqlite_schema(conn, schema).await?;
-            (
-                "SELECT name, cid + 1, type, \"notnull\" = 0 AND pk = 0, dflt_value, pk > 0
-                 FROM pragma_table_info(?1, ?2) ORDER BY cid",
-                vec![param(Some(table)), param(Some(schema.unwrap_or("main")))],
-            )
-        }
+        Engine::Sqlite => return sqlite_columns(conn, schema, table).await,
     };
     Ok(rows(conn, sql, params)
         .await?
         .iter()
         .filter_map(|r| {
+            let expr = get_str(&r[4]);
+            let generated = match get_str(&r[9]).as_deref() {
+                Some(g @ ("s" | "v")) => Some(GeneratedInfo {
+                    expression: expr.clone().unwrap_or_default(),
+                    stored: g == "s",
+                }),
+                _ => None,
+            };
+            let identity = match get_str(&r[6]).as_deref() {
+                Some(k @ ("a" | "d")) => Some(IdentityInfo {
+                    always: k == "a",
+                    seed: get_str(&r[7]),
+                    increment: get_str(&r[8]),
+                }),
+                _ => None,
+            };
             Some(ColumnInfo {
                 name: get_str(&r[0])?,
                 ordinal: get_i64(&r[1]),
                 data_type: get_str(&r[2]).unwrap_or_default(),
                 nullable: get_bool(&r[3]),
-                default: get_str(&r[4]),
+                default: if generated.is_some() { None } else { expr },
                 primary_key: get_bool(&r[5]),
+                identity,
+                generated,
+                comment: get_str(&r[10]),
             })
         })
         .collect())
+}
+
+/// SQLite columns, generated ones included (`pragma_table_info` leaves
+/// them out). Their expressions are only in the `CREATE TABLE` text.
+async fn sqlite_columns(
+    conn: &mut dyn Conn,
+    schema: Option<&str>,
+    table: &str,
+) -> Result<Vec<ColumnInfo>> {
+    let db = sqlite_schema(conn, schema).await?;
+    let params = || vec![param(Some(table)), param(Some(&db.name))];
+    // A lone `INTEGER PRIMARY KEY` is the rowid, numbered by SQLite, unless
+    // the table is WITHOUT ROWID (its key then has an index of its own).
+    let raw = rows(
+        conn,
+        "SELECT name, cid + 1, type, \"notnull\" = 0 AND pk = 0, dflt_value, pk > 0, hidden,
+                pk = 1 AND upper(type) = 'INTEGER'
+                  AND (SELECT count(*) FROM pragma_table_info(?1, ?2) WHERE pk > 0) = 1
+                  AND NOT EXISTS (SELECT 1 FROM pragma_index_list(?1, ?2) WHERE origin = 'pk')
+         FROM pragma_table_xinfo(?1, ?2) WHERE hidden IN (0, 2, 3) ORDER BY cid",
+        params(),
+    )
+    .await?;
+    let create_sql = if raw.iter().any(|r| get_i64(&r[6]) != 0) {
+        let sql = format!(
+            "SELECT sql FROM {}.sqlite_schema WHERE type = 'table' AND name = ?1",
+            db.quoted
+        );
+        rows(conn, &sql, vec![param(Some(table))])
+            .await?
+            .first()
+            .and_then(|r| get_str(&r[0]))
+    } else {
+        None
+    };
+    Ok(raw
+        .iter()
+        .filter_map(|r| {
+            let name = get_str(&r[0])?;
+            let hidden = get_i64(&r[6]);
+            let generated = (hidden == 2 || hidden == 3).then(|| GeneratedInfo {
+                expression: create_sql
+                    .as_deref()
+                    .and_then(|s| sqlite_generated_expr(s, &name))
+                    .unwrap_or_default(),
+                stored: hidden == 3,
+            });
+            Some(ColumnInfo {
+                ordinal: get_i64(&r[1]),
+                data_type: get_str(&r[2]).unwrap_or_default(),
+                nullable: get_bool(&r[3]),
+                default: get_str(&r[4]),
+                primary_key: get_bool(&r[5]),
+                identity: get_bool(&r[7]).then(IdentityInfo::default),
+                generated,
+                name,
+                comment: None,
+            })
+        })
+        .collect())
+}
+
+/// The top-level pieces of `text`, split at commas outside quotes and
+/// parentheses, up to an unmatched `)`.
+fn sqlite_split(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut depth, mut start, mut quote) = (0i32, 0, None::<char>);
+    for (i, ch) in text.char_indices() {
+        match (quote, ch) {
+            (Some(q), c) if c == q || (q == '[' && c == ']') => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"' | '`' | '[') => quote = Some(ch),
+            (None, '(') => depth += 1,
+            (None, ')') if depth == 0 => {
+                out.push(&text[start..i]);
+                return out;
+            }
+            (None, ')') => depth -= 1,
+            (None, ',') if depth == 0 => {
+                out.push(&text[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&text[start..]);
+    out
+}
+
+/// The column and constraint definitions of an SQLite `CREATE TABLE`.
+fn sqlite_defs(create: &str) -> Vec<&str> {
+    match create.find('(') {
+        Some(open) => sqlite_split(&create[open + 1..])
+            .into_iter()
+            .map(str::trim)
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
+/// The names and words of `def` outside parentheses, with their offsets;
+/// quoted names unquoted. An opening parenthesis is the word `(`.
+fn sqlite_words(def: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let mut chars = def.char_indices().peekable();
+    let mut depth = 0;
+    while let Some((i, ch)) = chars.next() {
+        match ch {
+            '\'' | '"' | '`' | '[' => {
+                let close = if ch == '[' { ']' } else { ch };
+                let mut name = String::new();
+                for (_, c) in chars.by_ref() {
+                    if c == close {
+                        break;
+                    }
+                    name.push(c);
+                }
+                if depth == 0 && ch != '\'' {
+                    out.push((i, name));
+                }
+            }
+            '(' => {
+                if depth == 0 {
+                    out.push((i, "(".into()));
+                }
+                depth += 1;
+            }
+            ')' => depth -= 1,
+            c if c.is_alphanumeric() || c == '_' => {
+                let mut end = i + c.len_utf8();
+                while let Some(&(j, c)) = chars.peek() {
+                    if !(c.is_alphanumeric() || c == '_' || c == '$') {
+                        break;
+                    }
+                    end = j + c.len_utf8();
+                    chars.next();
+                }
+                if depth == 0 {
+                    out.push((i, def[i..end].to_string()));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The inside of the parentheses that open at `open` in `def`.
+fn sqlite_parens(def: &str, open: usize) -> Option<String> {
+    let inner = &def[open + 1..];
+    let end = sqlite_split(inner)
+        .iter()
+        .map(|p| p.len() + 1)
+        .sum::<usize>()
+        - 1;
+    inner[end..]
+        .starts_with(')')
+        .then(|| inner[..end].trim().to_string())
+}
+
+/// The expression of generated column `column` in an SQLite `CREATE TABLE`
+/// statement: what is inside the parentheses after `AS` in its definition.
+fn sqlite_generated_expr(create: &str, column: &str) -> Option<String> {
+    sqlite_defs(create).into_iter().find_map(|def| {
+        let words = sqlite_words(def);
+        if !words.first()?.1.eq_ignore_ascii_case(column) {
+            return None;
+        }
+        let at = words
+            .windows(2)
+            .position(|w| w[0].1.eq_ignore_ascii_case("AS") && w[1].1 == "(")?;
+        sqlite_parens(def, words[at + 1].0)
+    })
+}
+
+/// The CHECK constraints in an SQLite `CREATE TABLE` statement, on columns
+/// and on the table, with their names where given.
+fn sqlite_checks(create: &str) -> Vec<CheckInfo> {
+    let mut out = Vec::new();
+    for def in sqlite_defs(create) {
+        let words = sqlite_words(def);
+        for (k, w) in words.windows(2).enumerate() {
+            if !(w[0].1.eq_ignore_ascii_case("CHECK") && w[1].1 == "(") {
+                continue;
+            }
+            let name = match k.checked_sub(2).map(|n| &words[n].1) {
+                Some(c) if c.eq_ignore_ascii_case("CONSTRAINT") => words[k - 1].1.clone(),
+                _ => String::new(),
+            };
+            if let Some(expression) = sqlite_parens(def, w[1].0) {
+                out.push(CheckInfo { name, expression });
+            }
+        }
+    }
+    out
 }
 
 // -------------------------------------------------------------- indexes --
@@ -402,6 +664,94 @@ fn index_info(r: &[Value]) -> Option<IndexInfo> {
 
 // --------------------------------------------------------- foreign keys --
 
+/// PostgreSQL foreign keys: the holding table's schema and name, then the
+/// [`fk_info`] columns. Followed by a condition on `n`/`c` (the holding
+/// table) or `rn`/`rc` (the referenced one).
+macro_rules! pg_foreign_keys {
+    () => {
+        "SELECT n.nspname::text, c.relname::text, con.conname::text,
+                (SELECT string_agg(a.attname, chr(31) ORDER BY k.ord)
+                 FROM unnest(con.conkey) WITH ORDINALITY k(attnum, ord)
+                 JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum)::text,
+                rn.nspname::text, rc.relname::text,
+                (SELECT string_agg(a.attname, chr(31) ORDER BY k.ord)
+                 FROM unnest(con.confkey) WITH ORDINALITY k(attnum, ord)
+                 JOIN pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = k.attnum)::text,
+                con.confdeltype::text, con.confupdtype::text,
+                NULLIF(concat_ws(' ',
+                    CASE WHEN con.confmatchtype = 'f' THEN 'MATCH FULL' END,
+                    CASE WHEN con.condeferrable THEN 'DEFERRABLE' END,
+                    CASE WHEN con.condeferred THEN 'INITIALLY DEFERRED' END,
+                    CASE WHEN NOT con.convalidated THEN 'NOT VALID' END), '')
+         FROM pg_constraint con
+         JOIN pg_class c ON c.oid = con.conrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         JOIN pg_class rc ON rc.oid = con.confrelid
+         JOIN pg_namespace rn ON rn.oid = rc.relnamespace
+         WHERE con.contype = 'f' "
+    };
+}
+
+/// SQL Server foreign keys, columns as in [`pg_foreign_keys`], then (for
+/// scripting) whether the name is generated. `$where` is a condition on
+/// `ps`/`p` (the holding table) or `rs`/`rt` (the referenced one).
+macro_rules! ms_foreign_keys {
+    ($where:literal) => {
+        concat!(
+            "SELECT ps.name, p.name, fk.name,
+                STRING_AGG(pc.name, CHAR(31)) WITHIN GROUP (ORDER BY fkc.constraint_column_id),
+                rs.name, rt.name,
+                STRING_AGG(rc.name, CHAR(31)) WITHIN GROUP (ORDER BY fkc.constraint_column_id),
+                fk.delete_referential_action_desc, fk.update_referential_action_desc,
+                IIF(fk.is_not_for_replication = 1, 'NOT FOR REPLICATION', NULL),
+                fk.is_system_named
+             FROM sys.foreign_keys fk
+             JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
+             JOIN sys.columns pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id
+             JOIN sys.columns rc ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id
+             JOIN sys.objects rt ON rt.object_id = fk.referenced_object_id
+             JOIN sys.schemas rs ON rs.schema_id = rt.schema_id
+             JOIN sys.objects p ON p.object_id = fk.parent_object_id
+             JOIN sys.schemas ps ON ps.schema_id = p.schema_id
+             WHERE ",
+            $where,
+            "
+             GROUP BY ps.name, p.name, fk.name, rs.name, rt.name, fk.delete_referential_action_desc,
+                      fk.update_referential_action_desc, fk.is_system_named, fk.is_not_for_replication
+             ORDER BY ps.name, p.name, fk.name"
+        )
+    };
+}
+
+/// The foreign keys a table holds.
+const MS_FOREIGN_KEYS: &str =
+    ms_foreign_keys!("ps.name = COALESCE(@P1, SCHEMA_NAME()) AND p.name = @P2");
+
+fn fk_action(v: &Value) -> Option<ReferentialAction> {
+    get_str(v).and_then(|s| ReferentialAction::parse(&s))
+}
+
+/// One row of a foreign-key query from its third column on: name,
+/// columns, referenced schema, table and columns, ON DELETE, ON UPDATE,
+/// options.
+fn fk_info(r: &[Value]) -> Option<ForeignKeyInfo> {
+    Some(ForeignKeyInfo {
+        name: get_str(&r[0])?,
+        columns: split_list(&r[1]),
+        ref_schema: get_str(&r[2]),
+        ref_table: get_str(&r[3])?,
+        ref_columns: split_list(&r[4]),
+        on_delete: fk_action(&r[5]),
+        on_update: fk_action(&r[6]),
+        options: get_str(&r[7]),
+    })
+}
+
+/// SQLite: a table's `pragma_foreign_key_list` (id, table, from, to,
+/// on_delete, on_update, match; one row per column).
+const SQLITE_FKS: &str = "SELECT id, \"table\", \"from\", \"to\", on_delete, on_update, \"match\"
+ FROM pragma_foreign_key_list(?1, ?2) ORDER BY id, seq";
+
 pub async fn foreign_keys(
     conn: &mut dyn Conn,
     schema: Option<&str>,
@@ -410,91 +760,201 @@ pub async fn foreign_keys(
     let (sql, params) = match conn.engine() {
         Engine::Unknown => return Err(DbError::unknown_engine()),
         Engine::Postgres => (
-            "SELECT con.conname::text,
-                    (SELECT string_agg(a.attname, chr(31) ORDER BY k.ord)
-                     FROM unnest(con.conkey) WITH ORDINALITY k(attnum, ord)
-                     JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum)::text,
-                    rn.nspname::text, rc.relname::text,
-                    (SELECT string_agg(a.attname, chr(31) ORDER BY k.ord)
-                     FROM unnest(con.confkey) WITH ORDINALITY k(attnum, ord)
-                     JOIN pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = k.attnum)::text
-             FROM pg_constraint con
-             JOIN pg_class c ON c.oid = con.conrelid
-             JOIN pg_namespace n ON n.oid = c.relnamespace
-             JOIN pg_class rc ON rc.oid = con.confrelid
-             JOIN pg_namespace rn ON rn.oid = rc.relnamespace
-             WHERE con.contype = 'f' AND n.nspname = COALESCE($1, current_schema()) AND c.relname = $2
-             ORDER BY 1",
+            concat!(
+                pg_foreign_keys!(),
+                "AND n.nspname = COALESCE($1, current_schema()) AND c.relname = $2 ORDER BY 3"
+            ),
             vec![param(schema), param(Some(table))],
         ),
         Engine::Mssql => (MS_FOREIGN_KEYS, vec![param(schema), param(Some(table))]),
         Engine::Sqlite => {
-            sqlite_schema(conn, schema).await?;
-            let raw = rows(
-                conn,
-                "SELECT id, \"table\", \"from\", \"to\" FROM pragma_foreign_key_list(?1, ?2) ORDER BY id, seq",
-                vec![param(Some(table)), param(Some(schema.unwrap_or("main")))],
-            )
-            .await?;
-            let mut out: Vec<(i64, ForeignKeyInfo)> = Vec::new();
-            for r in raw {
-                let id = get_i64(&r[0]);
-                if out.last().is_none_or(|(last, _)| *last != id) {
-                    out.push((
-                        id,
-                        ForeignKeyInfo {
-                            name: format!("fk_{table}_{id}"),
-                            columns: vec![],
-                            ref_schema: schema.map(str::to_string),
-                            ref_table: get_str(&r[1]).unwrap_or_default(),
-                            ref_columns: vec![],
-                        },
-                    ));
+            let db = sqlite_schema(conn, schema).await?;
+            let params = vec![param(Some(table)), param(Some(&db.name))];
+            let raw = rows(conn, SQLITE_FKS, params).await?;
+            return Ok(sqlite_fks(table, schema, &raw));
+        }
+    };
+    Ok(rows(conn, sql, params)
+        .await?
+        .iter()
+        .filter_map(|r| fk_info(&r[2..]))
+        .collect())
+}
+
+/// [`SQLITE_FKS`] rows as the keys of `table`.
+fn sqlite_fks(table: &str, schema: Option<&str>, raw: &[Vec<Value>]) -> Vec<ForeignKeyInfo> {
+    let mut out: Vec<(i64, ForeignKeyInfo)> = Vec::new();
+    for r in raw {
+        let id = get_i64(&r[0]);
+        if out.last().is_none_or(|(last, _)| *last != id) {
+            out.push((
+                id,
+                ForeignKeyInfo {
+                    name: format!("fk_{table}_{id}"),
+                    ref_schema: schema.map(str::to_string),
+                    ref_table: get_str(&r[1]).unwrap_or_default(),
+                    on_delete: fk_action(&r[4]),
+                    on_update: fk_action(&r[5]),
+                    options: get_str(&r[6])
+                        .filter(|m| !m.eq_ignore_ascii_case("NONE"))
+                        .map(|m| format!("MATCH {m}")),
+                    ..Default::default()
+                },
+            ));
+        }
+        let fk = &mut out.last_mut().expect("pushed above").1;
+        fk.columns.extend(get_str(&r[2]));
+        // `to` is NULL when the FK references the primary key implicitly.
+        fk.ref_columns.extend(get_str(&r[3]));
+    }
+    out.into_iter().map(|(_, fk)| fk).collect()
+}
+
+/// The foreign keys, in any table of the database, that reference `table`
+/// (its own self-references included).
+pub async fn referencing_keys(
+    conn: &mut dyn Conn,
+    schema: Option<&str>,
+    table: &str,
+) -> Result<Vec<ReferencingKey>> {
+    let (sql, params) = match conn.engine() {
+        Engine::Unknown => return Err(DbError::unknown_engine()),
+        Engine::Postgres => (
+            concat!(
+                pg_foreign_keys!(),
+                "AND rn.nspname = COALESCE($1, current_schema()) AND rc.relname = $2
+                 ORDER BY 1, 2, 3"
+            ),
+            vec![param(schema), param(Some(table))],
+        ),
+        Engine::Mssql => (
+            ms_foreign_keys!("rs.name = COALESCE(@P1, SCHEMA_NAME()) AND rt.name = @P2"),
+            vec![param(schema), param(Some(table))],
+        ),
+        Engine::Sqlite => {
+            let db = sqlite_schema(conn, schema).await?;
+            let sql = format!(
+                "SELECT DISTINCT m.name FROM {}.sqlite_schema m, pragma_foreign_key_list(m.name, ?2) f
+                 WHERE m.type = 'table' AND f.\"table\" = ?1 COLLATE NOCASE ORDER BY m.name",
+                db.quoted
+            );
+            let tables = rows(conn, &sql, vec![param(Some(table)), param(Some(&db.name))]).await?;
+            let mut out = Vec::new();
+            for t in tables.iter().filter_map(|r| get_str(&r[0])) {
+                let params = vec![param(Some(&t)), param(Some(&db.name))];
+                let raw = rows(conn, SQLITE_FKS, params).await?;
+                for key in sqlite_fks(&t, schema, &raw) {
+                    if key.ref_table.eq_ignore_ascii_case(table) {
+                        out.push(ReferencingKey {
+                            schema: Some(db.name.clone()),
+                            table: t.clone(),
+                            key,
+                        });
+                    }
                 }
-                let fk = &mut out.last_mut().expect("pushed above").1;
-                fk.columns.extend(get_str(&r[2]));
-                // `to` is NULL when the FK references the primary key implicitly.
-                fk.ref_columns.extend(get_str(&r[3]));
             }
-            return Ok(out.into_iter().map(|(_, fk)| fk).collect());
+            return Ok(out);
         }
     };
     Ok(rows(conn, sql, params)
         .await?
         .iter()
         .filter_map(|r| {
-            Some(ForeignKeyInfo {
-                name: get_str(&r[0])?,
-                columns: split_list(&r[1]),
-                ref_schema: get_str(&r[2]),
-                ref_table: get_str(&r[3])?,
-                ref_columns: split_list(&r[4]),
+            Some(ReferencingKey {
+                schema: get_str(&r[0]),
+                table: get_str(&r[1])?,
+                key: fk_info(&r[2..])?,
             })
         })
         .collect())
 }
 
-/// SQL Server foreign keys: name, columns, referenced schema, table and
-/// columns, then (for scripting) the ON DELETE and ON UPDATE actions,
-/// whether the name is generated, and NOT FOR REPLICATION.
-const MS_FOREIGN_KEYS: &str = "SELECT fk.name,
-        STRING_AGG(pc.name, CHAR(31)) WITHIN GROUP (ORDER BY fkc.constraint_column_id),
-        rs.name, rt.name,
-        STRING_AGG(rc.name, CHAR(31)) WITHIN GROUP (ORDER BY fkc.constraint_column_id),
-        fk.delete_referential_action_desc, fk.update_referential_action_desc,
-        fk.is_system_named, fk.is_not_for_replication
- FROM sys.foreign_keys fk
- JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
- JOIN sys.columns pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id
- JOIN sys.columns rc ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id
- JOIN sys.objects rt ON rt.object_id = fk.referenced_object_id
- JOIN sys.schemas rs ON rs.schema_id = rt.schema_id
- JOIN sys.objects p ON p.object_id = fk.parent_object_id
- JOIN sys.schemas ps ON ps.schema_id = p.schema_id
- WHERE ps.name = COALESCE(@P1, SCHEMA_NAME()) AND p.name = @P2
- GROUP BY fk.name, rs.name, rt.name, fk.delete_referential_action_desc,
-          fk.update_referential_action_desc, fk.is_system_named, fk.is_not_for_replication
- ORDER BY fk.name";
+// ---------------------------------------------------------- table details --
+
+pub async fn table_details(
+    conn: &mut dyn Conn,
+    schema: Option<&str>,
+    table: &str,
+) -> Result<TableDetails> {
+    let not_found = || DbError::Invalid(format!("table '{table}' not found"));
+    let sql = match conn.engine() {
+        Engine::Unknown => return Err(DbError::unknown_engine()),
+        Engine::Sqlite => {
+            sqlite_schema(conn, schema).await?;
+            return Ok(TableDetails { comment: None });
+        }
+        Engine::Postgres => {
+            "SELECT obj_description(c.oid, 'pg_class')::text
+             FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = COALESCE($1, current_schema()) AND c.relname = $2"
+        }
+        Engine::Mssql => {
+            "SELECT CAST(ep.value AS nvarchar(max))
+             FROM sys.objects o
+             JOIN sys.schemas s ON s.schema_id = o.schema_id
+             LEFT JOIN sys.extended_properties ep ON ep.class = 1 AND ep.major_id = o.object_id
+                    AND ep.minor_id = 0 AND ep.name = 'MS_Description'
+             WHERE s.name = COALESCE(@P1, SCHEMA_NAME()) AND o.name = @P2"
+        }
+    };
+    let rows = rows(conn, sql, vec![param(schema), param(Some(table))]).await?;
+    let row = rows.first().ok_or_else(not_found)?;
+    Ok(TableDetails {
+        comment: get_str(&row[0]),
+    })
+}
+
+// --------------------------------------------------------------- checks --
+
+/// SQL Server CHECK constraints of a table: name, definition, whether the
+/// name is generated, NOT FOR REPLICATION.
+const MS_CHECKS: &str = "SELECT name, definition, is_system_named, is_not_for_replication
+ FROM sys.check_constraints
+ WHERE parent_object_id = OBJECT_ID(QUOTENAME(COALESCE(@P1, SCHEMA_NAME())) + '.' + QUOTENAME(@P2))
+ ORDER BY name";
+
+pub async fn checks(
+    conn: &mut dyn Conn,
+    schema: Option<&str>,
+    table: &str,
+) -> Result<Vec<CheckInfo>> {
+    let (sql, params) = match conn.engine() {
+        Engine::Unknown => return Err(DbError::unknown_engine()),
+        Engine::Postgres => (
+            "SELECT con.conname::text, pg_get_expr(con.conbin, con.conrelid, true)::text
+             FROM pg_constraint con
+             JOIN pg_class c ON c.oid = con.conrelid
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE con.contype = 'c' AND n.nspname = COALESCE($1, current_schema()) AND c.relname = $2
+             ORDER BY 1",
+            vec![param(schema), param(Some(table))],
+        ),
+        Engine::Mssql => (MS_CHECKS, vec![param(schema), param(Some(table))]),
+        Engine::Sqlite => {
+            let db = sqlite_schema(conn, schema).await?;
+            let sql = format!(
+                "SELECT sql FROM {}.sqlite_schema WHERE type = 'table' AND name = ?1",
+                db.quoted
+            );
+            let create = rows(conn, &sql, vec![param(Some(table))])
+                .await?
+                .first()
+                .and_then(|r| get_str(&r[0]))
+                .unwrap_or_default();
+            return Ok(sqlite_checks(&create));
+        }
+    };
+    Ok(rows(conn, sql, params)
+        .await?
+        .iter()
+        .filter_map(|r| {
+            Some(CheckInfo {
+                name: get_str(&r[0])?,
+                expression: get_str(&r[1])?,
+            })
+        })
+        .collect())
+}
 
 // ------------------------------------------------------------- routines --
 
@@ -780,7 +1240,8 @@ const PG_DDL_TABLE: &str = "SELECT (quote_ident(n.nspname) || '.' || quote_ident
 /// the type's, identity START and INCREMENT, whether it is a serial (its
 /// default draws from a sequence the column owns), and the comment (as a
 /// literal).
-const PG_DDL_COLUMNS: &str = "SELECT quote_ident(a.attname)::text, format_type(a.atttypid, a.atttypmod)::text,
+const PG_DDL_COLUMNS: &str = concat!(
+    "SELECT quote_ident(a.attname)::text, format_type(a.atttypid, a.atttypmod)::text,
         a.attnotnull, pg_get_expr(d.adbin, d.adrelid)::text, a.attidentity::text, a.attgenerated::text,
         CASE WHEN a.attcollation <> 0 AND a.attcollation <> t.typcollation
              THEN quote_ident(cn.nspname) || '.' || quote_ident(co.collname) END::text,
@@ -794,17 +1255,12 @@ const PG_DDL_COLUMNS: &str = "SELECT quote_ident(a.attname)::text, format_type(a
  JOIN pg_type t ON t.oid = a.atttypid
  LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
  LEFT JOIN pg_collation co ON co.oid = a.attcollation
- LEFT JOIN pg_namespace cn ON cn.oid = co.collnamespace
- LEFT JOIN LATERAL (
-     SELECT sc.oid AS seqoid, dep.deptype, sq.seqstart, sq.seqincrement
-     FROM pg_depend dep
-     JOIN pg_class sc ON sc.oid = dep.objid AND sc.relkind = 'S'
-     JOIN pg_sequence sq ON sq.seqrelid = sc.oid
-     WHERE dep.classid = 'pg_class'::regclass AND dep.refclassid = 'pg_class'::regclass
-       AND dep.refobjid = c.oid AND dep.refobjsubid = a.attnum AND dep.deptype IN ('a', 'i')
-     LIMIT 1) s ON true
+ LEFT JOIN pg_namespace cn ON cn.oid = co.collnamespace ",
+    pg_owned_sequence!(),
+    "
  WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped
- ORDER BY a.attnum";
+ ORDER BY a.attnum"
+);
 
 async fn pg_table_ddl(conn: &mut dyn Conn, schema: &str, table: &str) -> Result<String> {
     let params = || vec![param(Some(schema)), param(Some(table))];
@@ -959,10 +1415,9 @@ const MS_DDL_COLUMNS: &str = concat!(
  FROM sys.columns c
  JOIN sys.objects o ON o.object_id = c.object_id
  JOIN sys.schemas s ON s.schema_id = o.schema_id
- JOIN sys.types t ON t.user_type_id = c.user_type_id
- LEFT JOIN sys.identity_columns idc ON idc.object_id = c.object_id AND idc.column_id = c.column_id
- LEFT JOIN sys.computed_columns cc ON cc.object_id = c.object_id AND cc.column_id = c.column_id
- LEFT JOIN sys.default_constraints dc ON dc.object_id = c.default_object_id
+ JOIN sys.types t ON t.user_type_id = c.user_type_id ",
+    ms_column_joins!(),
+    "
  WHERE s.name = @P1 AND o.name = @P2
  ORDER BY c.column_id"
 );
@@ -1077,16 +1532,7 @@ async fn ms_table_ddl(conn: &mut dyn Conn, schema: &str, table: &str) -> Result<
             ms_keys(i)
         ));
     }
-    let checks = rows(
-        conn,
-        "SELECT name, definition, is_system_named, is_not_for_replication
-         FROM sys.check_constraints
-         WHERE parent_object_id = OBJECT_ID(QUOTENAME(@P1) + '.' + QUOTENAME(@P2))
-         ORDER BY name",
-        params(),
-    )
-    .await?;
-    for r in &checks {
+    for r in &rows(conn, MS_CHECKS, params()).await? {
         lines.push(format!(
             "    {}CHECK {}{}",
             ms_constraint(&get_str(&r[0]).unwrap_or_default(), get_bool(&r[2])),
@@ -1098,27 +1544,26 @@ async fn ms_table_ddl(conn: &mut dyn Conn, schema: &str, table: &str) -> Result<
             get_str(&r[1]).unwrap_or_default()
         ));
     }
-    let action = |v: &Value, on: &str| match get_str(v).as_deref() {
-        Some("CASCADE") => format!(" ON {on} CASCADE"),
-        Some("SET_NULL") => format!(" ON {on} SET NULL"),
-        Some("SET_DEFAULT") => format!(" ON {on} SET DEFAULT"),
-        _ => String::new(),
-    };
     for r in rows(conn, MS_FOREIGN_KEYS, params()).await? {
+        let Some(fk) = fk_info(&r[2..]) else { continue };
+        let action = |a: Option<ReferentialAction>, on: &str| match a {
+            Some(
+                a @ (ReferentialAction::Cascade
+                | ReferentialAction::SetNull
+                | ReferentialAction::SetDefault),
+            ) => format!(" ON {on} {}", a.sql()),
+            _ => String::new(),
+        };
         lines.push(format!(
             "    {}FOREIGN KEY ({}) REFERENCES {}.{} ({}){}{}{}",
-            ms_constraint(&get_str(&r[0]).unwrap_or_default(), get_bool(&r[7])),
-            ms_list(&split_list(&r[1])),
-            ms_ident(&get_str(&r[2]).unwrap_or_else(|| "dbo".into())),
-            ms_ident(&get_str(&r[3]).unwrap_or_default()),
-            ms_list(&split_list(&r[4])),
-            action(&r[5], "DELETE"),
-            action(&r[6], "UPDATE"),
-            if get_bool(&r[8]) {
-                " NOT FOR REPLICATION"
-            } else {
-                ""
-            }
+            ms_constraint(&fk.name, get_bool(&r[10])),
+            ms_list(&fk.columns),
+            ms_ident(fk.ref_schema.as_deref().unwrap_or("dbo")),
+            ms_ident(&fk.ref_table),
+            ms_list(&fk.ref_columns),
+            action(fk.on_delete, "DELETE"),
+            action(fk.on_update, "UPDATE"),
+            fk.options.map(|o| format!(" {o}")).unwrap_or_default()
         ));
     }
     let mut out = format!("CREATE TABLE {qname} (\n{}\n);", lines.join(",\n"));
@@ -1156,6 +1601,41 @@ async fn ms_table_ddl(conn: &mut dyn Conn, schema: &str, table: &str) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sqlite_generated_expressions() {
+        let sql = "CREATE TABLE t (id INTEGER PRIMARY KEY, \"has\" TEXT DEFAULT 'a,b',
+            total REAL GENERATED ALWAYS AS (price * (1 + tax)) STORED,
+            [Label x] TEXT AS (upper(\"has\")) VIRTUAL, alias AS (id), CHECK (id > 0))";
+        let e = |c: &str| sqlite_generated_expr(sql, c);
+        assert_eq!(e("total").as_deref(), Some("price * (1 + tax)"));
+        assert_eq!(e("Label x").as_deref(), Some("upper(\"has\")"));
+        assert_eq!(e("ALIAS").as_deref(), Some("id"));
+        assert_eq!(e("has"), None);
+        assert_eq!(e("missing"), None);
+        assert_eq!(
+            sqlite_checks(sql),
+            [CheckInfo {
+                name: String::new(),
+                expression: "id > 0".into()
+            }]
+        );
+        let sql = "CREATE TABLE \"t\" (a INTEGER CHECK (a > 0) NOT NULL, b TEXT CHECK(b <> ')'),
+            CONSTRAINT \"ck ab\" CHECK ((a, b) IS NOT NULL), constraint x check (length(b) < 9))";
+        let names: Vec<(String, String)> = sqlite_checks(sql)
+            .into_iter()
+            .map(|c| (c.name, c.expression))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                (String::new(), "a > 0".to_string()),
+                (String::new(), "b <> ')'".to_string()),
+                ("ck ab".to_string(), "(a, b) IS NOT NULL".to_string()),
+                ("x".to_string(), "length(b) < 9".to_string()),
+            ]
+        );
+    }
 
     #[test]
     fn identifier_quoting() {

@@ -31,6 +31,7 @@ impl Catalog for Fake {
             nullable: true,
             default: None,
             primary_key: false,
+            ..Default::default()
         };
         Some(match table {
             "orders" => vec![c("id"), c("customer_id"), c("status")],

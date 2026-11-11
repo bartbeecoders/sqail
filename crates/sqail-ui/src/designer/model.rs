@@ -7,7 +7,10 @@
 
 use std::collections::BTreeSet;
 
-use sqail_client::proto::{ColumnInfo, Engine, ForeignKeyInfo, IndexInfo, TableGrant};
+use sqail_client::proto::{
+    CheckInfo, ColumnInfo, Engine, ForeignKeyInfo, GeneratedInfo, IdentityInfo, IndexInfo,
+    ReferencingKey, ReferentialAction, TableGrant,
+};
 
 use crate::sql::{qualified_name, quote_ident};
 
@@ -19,6 +22,50 @@ pub struct Column {
     pub nullable: bool,
     /// Default expression as SQL text; empty for none.
     pub default: String,
+    /// The database numbers the column. On SQLite this only reports a
+    /// lone `INTEGER PRIMARY KEY` (the rowid) and is never edited.
+    pub identity: Option<IdentityInfo>,
+    /// The column is computed from an expression.
+    pub generated: Option<GeneratedInfo>,
+    /// Empty for none.
+    pub comment: String,
+}
+
+/// Where a column's values come from, as the designer offers it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueKind {
+    /// Written by the user, with an optional default.
+    Plain,
+    /// Numbered by the database; written values win (PostgreSQL only).
+    IdentityByDefault,
+    /// Numbered by the database (SQL Server `IDENTITY`, PostgreSQL
+    /// `GENERATED ALWAYS AS IDENTITY`).
+    IdentityAlways,
+    /// Computed from an expression.
+    Generated,
+}
+
+impl ValueKind {
+    pub fn of(c: &Column) -> Self {
+        match (&c.identity, &c.generated) {
+            (_, Some(_)) => Self::Generated,
+            (Some(i), _) if i.always => Self::IdentityAlways,
+            (Some(_), _) => Self::IdentityByDefault,
+            _ => Self::Plain,
+        }
+    }
+
+    pub fn label(self, engine: Engine) -> &'static str {
+        match (self, engine) {
+            (Self::Plain, _) => "default",
+            (Self::IdentityByDefault, Engine::Sqlite) => "rowid",
+            (Self::IdentityByDefault, _) => "identity (by default)",
+            (Self::IdentityAlways, Engine::Mssql) => "identity",
+            (Self::IdentityAlways, _) => "identity (always)",
+            (Self::Generated, Engine::Mssql) => "computed",
+            (Self::Generated, _) => "generated",
+        }
+    }
 }
 
 /// One key of an index: a column, or an expression kept as the catalog gave it.
@@ -61,6 +108,36 @@ pub struct PrimaryKey {
     pub clustered: Option<bool>,
 }
 
+/// A CHECK constraint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Check {
+    pub id: u64,
+    /// Empty lets the database choose (SQLite keeps none).
+    pub name: String,
+    /// The condition as SQL text, in terms of the loaded column names.
+    pub expression: String,
+}
+
+/// A foreign key the table holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignKey {
+    pub id: u64,
+    /// Empty lets the database choose (SQLite keeps no names).
+    pub name: String,
+    /// Column ids, in key order.
+    pub columns: Vec<u64>,
+    pub ref_schema: String,
+    pub ref_table: String,
+    /// Referenced column names, in key order; empty (SQLite only) for the
+    /// referenced table's primary key.
+    pub ref_columns: Vec<String>,
+    pub on_delete: ReferentialAction,
+    pub on_update: ReferentialAction,
+    /// Further clauses it was declared with (`MATCH FULL`, `DEFERRABLE`,
+    /// `NOT FOR REPLICATION`, ...), kept when it is re-created.
+    pub options: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Table {
     pub schema: String,
@@ -68,6 +145,10 @@ pub struct Table {
     pub columns: Vec<Column>,
     pub primary_key: PrimaryKey,
     pub indexes: Vec<Index>,
+    pub checks: Vec<Check>,
+    pub foreign_keys: Vec<ForeignKey>,
+    /// Empty for none.
+    pub comment: String,
     /// (grantee, privilege)
     pub grants: BTreeSet<(String, String)>,
 }
@@ -122,6 +203,35 @@ impl Plan {
     }
 }
 
+/// Constraints that hang on what a design changes (see
+/// [`Design::dependents`]).
+#[derive(Default)]
+struct Dependents<'a> {
+    /// Foreign keys of other tables that reference this one, dropped and
+    /// added back.
+    referencing: Vec<&'a ReferencingKey>,
+    /// Ids of the table's CHECK constraints to drop and add back.
+    checks: BTreeSet<u64>,
+    /// Ids of the table's foreign keys to drop and add back.
+    foreign_keys: BTreeSet<u64>,
+    /// Why the design can't be applied.
+    problems: Vec<String>,
+}
+
+impl<'a> Dependents<'a> {
+    /// Drop and add back a referencing key: another table's, or (by id)
+    /// one of the table's own.
+    fn follow(&mut self, o: &Table, r: &'a ReferencingKey, own: bool) {
+        if own {
+            if let Some(f) = o.foreign_keys.iter().find(|f| f.name == r.key.name) {
+                self.foreign_keys.insert(f.id);
+            }
+        } else {
+            self.referencing.push(r);
+        }
+    }
+}
+
 /// Privileges offered as checkboxes on the security page.
 pub fn privileges(engine: Engine) -> &'static [&'static str] {
     match engine {
@@ -155,7 +265,6 @@ pub fn type_suggestions(engine: Engine) -> &'static [&'static str] {
             "integer",
             "bigint",
             "smallint",
-            "bigint GENERATED BY DEFAULT AS IDENTITY",
             "numeric(18,2)",
             "real",
             "double precision",
@@ -176,7 +285,6 @@ pub fn type_suggestions(engine: Engine) -> &'static [&'static str] {
             "bigint",
             "smallint",
             "tinyint",
-            "int IDENTITY(1,1)",
             "decimal(18,2)",
             "float",
             "bit",
@@ -247,8 +355,16 @@ pub struct Design {
     /// `None` for a table that does not exist yet.
     pub original: Option<Table>,
     pub table: Table,
-    /// Kept so an SQLite rebuild can re-create them.
-    pub foreign_keys: Vec<ForeignKeyInfo>,
+    /// Foreign keys (of other tables, or self-references) that reference
+    /// the loaded table: kept so they can be dropped and re-created around
+    /// a change to the key they use, or the change refused.
+    pub referencing: Vec<ReferencingKey>,
+    /// The CHECK constraints and referencing keys were loaded (a service
+    /// too old to list them leaves them unknown).
+    pub constraints_known: bool,
+    /// The table and column comments were loaded (a service too old to
+    /// read them leaves them unknown, and the designer doesn't change them).
+    pub comments_known: bool,
     /// Grants held `WITH GRANT OPTION`; revoking them needs `CASCADE`.
     pub grantable: BTreeSet<(String, String)>,
     next_id: u64,
@@ -269,7 +385,9 @@ impl Design {
                 schema: schema.unwrap_or(default_schema(engine)).to_string(),
                 ..Default::default()
             },
-            foreign_keys: Vec::new(),
+            referencing: Vec::new(),
+            constraints_known: true,
+            comments_known: true,
             grantable: BTreeSet::new(),
             next_id: 1,
         };
@@ -305,6 +423,9 @@ impl Design {
                 data_type: c.data_type.clone(),
                 nullable: c.nullable,
                 default: c.default.clone().unwrap_or_default(),
+                identity: c.identity.clone(),
+                generated: c.generated.clone(),
+                comment: c.comment.clone().unwrap_or_default(),
             })
             .collect();
         let find = |key: &str| {
@@ -364,12 +485,31 @@ impl Design {
                 clustered: i.clustered,
             })
             .collect();
+        let foreign_keys = foreign_keys
+            .iter()
+            .filter_map(|f| {
+                Some(ForeignKey {
+                    id: id(),
+                    name: f.name.clone(),
+                    columns: f.columns.iter().map(|c| find(c)).collect::<Option<_>>()?,
+                    ref_schema: f.ref_schema.clone().unwrap_or_else(|| schema.to_string()),
+                    ref_table: f.ref_table.clone(),
+                    ref_columns: f.ref_columns.clone(),
+                    on_delete: f.on_delete.unwrap_or_default(),
+                    on_update: f.on_update.unwrap_or_default(),
+                    options: f.options.clone().unwrap_or_default(),
+                })
+            })
+            .collect();
         let table = Table {
             schema: schema.to_string(),
             name: name.to_string(),
             columns: cols,
             primary_key,
             indexes,
+            checks: Vec::new(),
+            foreign_keys,
+            comment: String::new(),
             grants: grants
                 .iter()
                 .map(|g| (g.grantee.clone(), g.privilege.clone()))
@@ -379,7 +519,9 @@ impl Design {
             engine,
             original: Some(table.clone()),
             table,
-            foreign_keys,
+            referencing: Vec::new(),
+            constraints_known: false,
+            comments_known: false,
             grantable: grants
                 .iter()
                 .filter(|g| g.grantable)
@@ -387,6 +529,40 @@ impl Design {
                 .collect(),
             next_id,
         }
+    }
+
+    /// The loaded table's CHECK constraints and the foreign keys that
+    /// reference it, as the catalog describes them.
+    pub fn with_constraints(
+        mut self,
+        checks: &[CheckInfo],
+        referencing: Vec<ReferencingKey>,
+    ) -> Self {
+        for c in checks {
+            let check = Check {
+                id: self.fresh_id(),
+                name: c.name.clone(),
+                expression: c.expression.clone(),
+            };
+            if let Some(o) = self.original.as_mut() {
+                o.checks.push(check.clone());
+            }
+            self.table.checks.push(check);
+        }
+        self.referencing = referencing;
+        self.constraints_known = true;
+        self
+    }
+
+    /// The loaded table's comment; column comments come with the columns.
+    pub fn with_comment(mut self, comment: Option<String>) -> Self {
+        let comment = comment.unwrap_or_default();
+        if let Some(o) = self.original.as_mut() {
+            o.comment = comment.clone();
+        }
+        self.table.comment = comment;
+        self.comments_known = true;
+        self
     }
 
     pub fn is_new(&self) -> bool {
@@ -439,12 +615,150 @@ impl Design {
             data_type: data_type.into(),
             nullable: true,
             default: String::new(),
+            identity: None,
+            generated: None,
+            comment: String::new(),
         });
         id
     }
 
+    /// Whether the column can become `kind`, or why not. The current kind
+    /// is always allowed.
+    pub fn kind_allowed(&self, id: u64, kind: ValueKind) -> Result<(), &'static str> {
+        let Some(c) = self.column(id) else {
+            return Err("no such column");
+        };
+        let now = ValueKind::of(c);
+        if kind == now {
+            return Ok(());
+        }
+        if self.engine == Engine::Sqlite && now == ValueKind::IdentityByDefault {
+            return Err("this is the table's rowid: change its type or the key instead");
+        }
+        self.kind_change(id, kind)
+    }
+
+    /// Whether the loaded column (if any) can become `kind`.
+    fn kind_change(&self, id: u64, kind: ValueKind) -> Result<(), &'static str> {
+        let e = self.engine;
+        let original = self.original_column(id);
+        let was = original.map(ValueKind::of);
+        if was == Some(kind) {
+            return Ok(());
+        }
+        if matches!(
+            kind,
+            ValueKind::IdentityAlways | ValueKind::IdentityByDefault
+        ) && e == Engine::Sqlite
+        {
+            return Err(
+                "SQLite has no identity columns; a lone INTEGER PRIMARY KEY numbers itself",
+            );
+        }
+        if kind == ValueKind::IdentityByDefault && e == Engine::Mssql {
+            return Err("SQL Server identity columns are always numbered by the database");
+        }
+        let Some(was) = was else {
+            return Ok(()); // a new column takes anything
+        };
+        match e {
+            Engine::Postgres => match (was, kind) {
+                // ADD / DROP / SET GENERATED … AS IDENTITY.
+                (
+                    ValueKind::Plain | ValueKind::IdentityAlways | ValueKind::IdentityByDefault,
+                    ValueKind::Plain | ValueKind::IdentityAlways | ValueKind::IdentityByDefault,
+                ) => Ok(()),
+                // DROP EXPRESSION keeps the computed values.
+                (ValueKind::Generated, ValueKind::Plain | ValueKind::Generated) => Ok(()),
+                (_, ValueKind::Generated) => Err(
+                    "PostgreSQL cannot make an existing column generated: add a new column instead",
+                ),
+                (ValueKind::Generated, _) => {
+                    Err("PostgreSQL cannot make a generated column an identity column")
+                }
+            },
+            Engine::Mssql => Err(
+                "SQL Server cannot add or remove IDENTITY or a computed expression on an existing \
+                 column: drop the column and add a new one",
+            ),
+            // Rebuilds the table.
+            Engine::Sqlite | Engine::Unknown => Ok(()),
+        }
+    }
+
+    /// Make the column `kind` (see [`Design::kind_allowed`]). Identity
+    /// columns are NOT NULL; identity and generated columns have no default.
+    pub fn set_kind(&mut self, id: u64, kind: ValueKind) {
+        let engine = self.engine;
+        let original = self.original_column(id).cloned();
+        let Some(c) = self.column_mut(id) else { return };
+        if kind == ValueKind::of(c) {
+            return;
+        }
+        match kind {
+            ValueKind::Plain => {
+                c.identity = None;
+                c.generated = None;
+            }
+            ValueKind::IdentityAlways | ValueKind::IdentityByDefault => {
+                let mut i = original
+                    .and_then(|o| o.identity)
+                    .or(c.identity.take())
+                    .unwrap_or_default();
+                i.always = kind == ValueKind::IdentityAlways;
+                c.identity = Some(i);
+                c.generated = None;
+                c.default.clear();
+                c.nullable = false;
+            }
+            ValueKind::Generated => {
+                c.generated = Some(original.and_then(|o| o.generated).unwrap_or(GeneratedInfo {
+                    expression: String::new(),
+                    // PostgreSQL before 18 has only stored ones.
+                    stored: engine == Engine::Postgres,
+                }));
+                c.identity = None;
+                c.default.clear();
+            }
+        }
+    }
+
+    /// Whether the column's stored/virtual choice can change, or why not.
+    pub fn stored_editable(&self, id: u64) -> Result<(), &'static str> {
+        match (self.engine, self.original_column(id)) {
+            (Engine::Postgres, _) => {
+                Err("PostgreSQL 17 and older only have stored generated columns")
+            }
+            (Engine::Mssql, Some(o)) if o.generated.is_some() => {
+                Err("SQL Server cannot change a computed column in place")
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Whether a generated column's expression can be edited, or why not.
+    pub fn expression_editable(&self, id: u64) -> Result<(), &'static str> {
+        match (self.engine, self.original_column(id)) {
+            (Engine::Mssql, Some(o)) if o.generated.is_some() => Err(
+                "SQL Server cannot change a computed column in place: drop it and add a new one",
+            ),
+            _ => Ok(()),
+        }
+    }
+
+    /// Whether the column's type and nullability can be edited, or why not.
+    pub fn type_editable(&self, id: u64) -> Result<(), &'static str> {
+        match self.column(id) {
+            Some(c) if c.generated.is_some() && self.engine == Engine::Mssql => {
+                Err("a computed column takes its type from its expression")
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Remove a column, and with it its place in the key and in indexes. An
-    /// index whose filter uses the column goes too.
+    /// index whose filter uses the column goes too, and so do the foreign
+    /// keys and CHECK constraints that use it.
     pub fn remove_column(&mut self, id: u64) {
         let filtered: Vec<u64> = self
             .table
@@ -453,6 +767,19 @@ impl Design {
             .filter(|i| self.filter_columns(i).contains(&id))
             .map(|i| i.id)
             .collect();
+        let names: Vec<String> = self
+            .original_column(id)
+            .into_iter()
+            .chain(self.column(id))
+            .map(|c| c.name.clone())
+            .collect();
+        let engine = self.engine;
+        self.table.checks.retain(|ck| {
+            !filter_names(engine, &ck.expression)
+                .iter()
+                .any(|(_, n)| names.iter().any(|c| c.eq_ignore_ascii_case(n)))
+        });
+        self.table.foreign_keys.retain(|f| !f.columns.contains(&id));
         self.table.columns.retain(|c| c.id != id);
         self.table.primary_key.columns.retain(|c| *c != id);
         self.table.primary_key.descending.retain(|c| *c != id);
@@ -468,14 +795,21 @@ impl Design {
 
     /// The loaded columns an index filter names (by their loaded names).
     fn filter_columns(&self, i: &Index) -> Vec<u64> {
+        self.expr_columns(&i.filter)
+    }
+
+    /// The loaded columns an expression of the loaded table names.
+    fn expr_columns(&self, expr: &str) -> Vec<u64> {
         let Some(o) = &self.original else {
             return Vec::new();
         };
-        filter_names(self.engine, &i.filter)
+        let mut ids: Vec<u64> = filter_names(self.engine, expr)
             .iter()
             .filter_map(|(_, n)| o.columns.iter().find(|c| c.name.eq_ignore_ascii_case(n)))
             .map(|c| c.id)
-            .collect()
+            .collect();
+        ids.dedup();
+        ids
     }
 
     /// Every column an index depends on: key, included and filter columns.
@@ -495,12 +829,18 @@ impl Design {
 
     /// The filter with loaded column names changed to the current ones.
     fn filter_sql(&self, i: &Index) -> String {
-        let mut out = i.filter.clone();
+        self.expr_sql(&i.filter)
+    }
+
+    /// An expression of the loaded table with its column names changed to
+    /// the current ones.
+    fn expr_sql(&self, expr: &str) -> String {
+        let mut out = expr.to_string();
         let Some(o) = &self.original else {
             return out;
         };
         // Back to front, so earlier ranges stay valid.
-        for (range, name) in filter_names(self.engine, &i.filter).into_iter().rev() {
+        for (range, name) in filter_names(self.engine, expr).into_iter().rev() {
             let renamed = o
                 .columns
                 .iter()
@@ -645,6 +985,119 @@ impl Design {
         }
     }
 
+    // ------------------------------------------------------- foreign keys --
+
+    /// Append a foreign key with no columns yet; returns its id.
+    pub fn add_foreign_key(&mut self) -> u64 {
+        let id = self.fresh_id();
+        let base = if self.table.name.is_empty() {
+            "table"
+        } else {
+            &self.table.name
+        };
+        let mut n = 1;
+        let name = loop {
+            let candidate = format!("fk_{base}_{n}");
+            if !self.table.foreign_keys.iter().any(|f| f.name == candidate) {
+                break candidate;
+            }
+            n += 1;
+        };
+        self.table.foreign_keys.push(ForeignKey {
+            id,
+            name: if self.engine == Engine::Sqlite {
+                String::new()
+            } else {
+                name
+            },
+            columns: Vec::new(),
+            ref_schema: self.table.schema.clone(),
+            ref_table: String::new(),
+            ref_columns: Vec::new(),
+            on_delete: ReferentialAction::NoAction,
+            on_update: ReferentialAction::NoAction,
+            options: String::new(),
+        });
+        id
+    }
+
+    pub fn foreign_key_mut(&mut self, id: u64) -> Option<&mut ForeignKey> {
+        self.table.foreign_keys.iter_mut().find(|f| f.id == id)
+    }
+
+    pub fn remove_foreign_key(&mut self, id: u64) {
+        self.table.foreign_keys.retain(|f| f.id != id);
+    }
+
+    pub fn foreign_key_status(&self, fk: &ForeignKey) -> Status {
+        match self
+            .original
+            .as_ref()
+            .map(|o| o.foreign_keys.iter().find(|f| f.id == fk.id))
+        {
+            Some(None) => Status::New,
+            Some(Some(o)) if o != fk => Status::Changed,
+            _ => Status::Same,
+        }
+    }
+
+    /// Foreign keys of the loaded table that the design removed.
+    pub fn removed_foreign_keys(&self) -> Vec<ForeignKey> {
+        let Some(o) = &self.original else {
+            return Vec::new();
+        };
+        o.foreign_keys
+            .iter()
+            .filter(|f| !self.table.foreign_keys.iter().any(|n| n.id == f.id))
+            .cloned()
+            .collect()
+    }
+
+    // ------------------------------------------------------------- checks --
+
+    pub fn add_check(&mut self) -> u64 {
+        let id = self.fresh_id();
+        let base = if self.table.name.is_empty() {
+            "table"
+        } else {
+            &self.table.name
+        };
+        let mut n = 1;
+        let name = loop {
+            let candidate = format!("ck_{base}_{n}");
+            if !self.table.checks.iter().any(|c| c.name == candidate) {
+                break candidate;
+            }
+            n += 1;
+        };
+        self.table.checks.push(Check {
+            id,
+            name,
+            expression: String::new(),
+        });
+        id
+    }
+
+    pub fn check_mut(&mut self, id: u64) -> Option<&mut Check> {
+        self.table.checks.iter_mut().find(|c| c.id == id)
+    }
+
+    pub fn remove_check(&mut self, id: u64) {
+        self.table.checks.retain(|c| c.id != id);
+    }
+
+    pub fn check_status(&self, ck: &Check) -> Status {
+        match self
+            .original
+            .as_ref()
+            .map(|o| o.checks.iter().find(|c| c.id == ck.id))
+        {
+            Some(None) => Status::New,
+            Some(Some(o)) if o != ck => Status::Changed,
+            _ => Status::Same,
+        }
+    }
+
     // ------------------------------------------------------------- grants --
 
     pub fn grantees(&self) -> Vec<String> {
@@ -696,14 +1149,50 @@ impl Design {
     }
 
     fn column_def(&self, c: &Column) -> String {
+        let e = self.engine;
+        if let (Engine::Mssql, Some(g)) = (e, &c.generated) {
+            // A computed column has no type of its own, and only a
+            // persisted one can be declared NOT NULL.
+            let mut s = format!("{} AS ({})", self.q(&c.name), g.expression.trim());
+            if g.stored {
+                s.push_str(" PERSISTED");
+                if !c.nullable {
+                    s.push_str(" NOT NULL");
+                }
+            }
+            return s;
+        }
         let mut s = format!("{} {}", self.q(&c.name), c.data_type.trim());
-        match (self.engine, c.nullable) {
+        match (e, &c.identity) {
+            (Engine::Postgres, Some(i)) => {
+                s.push_str(if i.always {
+                    " GENERATED ALWAYS AS IDENTITY"
+                } else {
+                    " GENERATED BY DEFAULT AS IDENTITY"
+                });
+                s.push_str(&pg_identity_options(i));
+            }
+            (Engine::Mssql, Some(i)) => s.push_str(&format!(
+                " IDENTITY({}, {})",
+                i.seed.as_deref().unwrap_or("1"),
+                i.increment.as_deref().unwrap_or("1")
+            )),
+            _ => {}
+        }
+        if let Some(g) = &c.generated {
+            s.push_str(&format!(
+                " GENERATED ALWAYS AS ({}) {}",
+                g.expression.trim(),
+                if g.stored { "STORED" } else { "VIRTUAL" }
+            ));
+        }
+        match (e, c.nullable) {
             (Engine::Mssql, true) => s.push_str(" NULL"),
             (_, false) => s.push_str(" NOT NULL"),
             _ => {}
         }
         let d = c.default.trim();
-        if !d.is_empty() {
+        if !d.is_empty() && !self.computed(c) {
             let d = if self.engine == Engine::Sqlite {
                 sqlite_default(d)
             } else {
@@ -712,6 +1201,12 @@ impl Design {
             s.push_str(&format!(" DEFAULT {d}"));
         }
         s
+    }
+
+    /// The database fills the column (identity or generated), so it takes
+    /// no default. SQLite's rowid can have one.
+    fn computed(&self, c: &Column) -> bool {
+        c.generated.is_some() || (c.identity.is_some() && self.engine != Engine::Sqlite)
     }
 
     fn column_list(&self, ids: &[u64]) -> String {
@@ -863,6 +1358,43 @@ impl Design {
             if c.data_type.trim().is_empty() {
                 out.push(format!("Column “{}” needs a type.", c.name));
             }
+            if c.generated
+                .as_ref()
+                .is_some_and(|g| g.expression.trim().is_empty())
+            {
+                out.push(format!(
+                    "Generated column “{}” needs an expression.",
+                    c.name
+                ));
+            }
+            let original = self.original_column(c.id);
+            if let Some(o) = original {
+                if c.data_type.trim() != o.data_type.trim() && type_has_value_clause(&c.data_type) {
+                    out.push(format!(
+                        "Column “{}”: choose identity or generated in the Default column, \
+                         not in the type.",
+                        c.name
+                    ));
+                }
+                if let Err(why) = self.kind_change(c.id, ValueKind::of(c)) {
+                    out.push(format!("Column “{}”: {why}.", c.name));
+                } else if let (Some(og), Some(ng)) = (&o.generated, &c.generated) {
+                    let stored = (og.stored != ng.stored)
+                        .then(|| self.stored_editable(c.id).err())
+                        .flatten();
+                    let expr = (og.expression.trim() != ng.expression.trim())
+                        .then(|| self.expression_editable(c.id).err())
+                        .flatten();
+                    if let Some(why) = stored.or(expr) {
+                        out.push(format!("Column “{}”: {why}.", c.name));
+                    }
+                }
+            }
+        }
+        if self.engine == Engine::Mssql
+            && t.columns.iter().filter(|c| c.identity.is_some()).count() > 1
+        {
+            out.push("SQL Server allows one identity column per table.".into());
         }
         let mut seen = BTreeSet::new();
         for i in &t.indexes {
@@ -875,11 +1407,53 @@ impl Design {
                 out.push(format!("Index “{}” has no columns.", i.name));
             }
         }
+        let named = self.engine != Engine::Sqlite;
+        let mut seen = BTreeSet::new();
+        for f in &t.foreign_keys {
+            let label = if f.name.trim().is_empty() {
+                "A foreign key".to_string()
+            } else {
+                format!("Foreign key “{}”", f.name.trim())
+            };
+            if named && !f.name.trim().is_empty() && !seen.insert(f.name.trim().to_lowercase()) {
+                out.push(format!("{label} appears twice."));
+            }
+            if f.columns.is_empty() {
+                out.push(format!("{label} has no columns."));
+            }
+            if f.ref_table.trim().is_empty() {
+                out.push(format!("{label} needs the table it references."));
+            }
+            if f.ref_columns.is_empty() && named {
+                out.push(format!("{label} needs the columns it references."));
+            } else if !f.ref_columns.is_empty() && f.ref_columns.len() != f.columns.len() {
+                out.push(format!(
+                    "{label} has {} column(s) but references {}.",
+                    f.columns.len(),
+                    f.ref_columns.len()
+                ));
+            }
+        }
+        for c in &t.checks {
+            if c.expression.trim().is_empty() {
+                out.push(if c.name.trim().is_empty() {
+                    "A CHECK constraint needs an expression.".to_string()
+                } else {
+                    format!("CHECK constraint “{}” needs an expression.", c.name.trim())
+                });
+            }
+            if named && !c.name.trim().is_empty() && !seen.insert(c.name.trim().to_lowercase()) {
+                out.push(format!("Constraint “{}” appears twice.", c.name.trim()));
+            }
+        }
         if !t.grants.is_empty() && self.engine == Engine::Sqlite {
             out.push("SQLite has no table privileges.".into());
         }
         if t.grants.iter().any(|(g, _)| g.trim().is_empty()) {
             out.push("A grant needs a role or user.".into());
+        }
+        if let Some(o) = &self.original {
+            out.extend(self.dependents(o).problems);
         }
         out
     }
@@ -899,15 +1473,174 @@ impl Design {
         })
     }
 
-    fn create_body(&self, name: &str) -> String {
-        let mut lines: Vec<String> = self
-            .table
+    /// `CREATE TABLE` with the columns, the key, CHECK constraints and
+    /// foreign keys, and (`unique`, for an SQLite rebuild) the unique
+    /// constraints.
+    fn create_body(&self, name: &str, unique: bool) -> String {
+        let t = &self.table;
+        let mut lines: Vec<String> = t
             .columns
             .iter()
             .map(|c| format!("    {}", self.column_def(c)))
             .collect();
         lines.extend(self.pk_clause().map(|pk| format!("    {pk}")));
+        if unique {
+            for i in t.indexes.iter().filter(|i| self.unique_constraint(i)) {
+                lines.push(format!("    UNIQUE ({})", self.parts_sql(&i.parts)));
+            }
+        }
+        for ck in &t.checks {
+            lines.push(format!("    {}", self.check_clause(ck)));
+        }
+        for fk in &t.foreign_keys {
+            lines.push(format!("    {}", self.foreign_key_clause(fk)));
+        }
         format!("CREATE TABLE {name} (\n{}\n)", lines.join(",\n"))
+    }
+
+    /// `CONSTRAINT name ` for a named constraint (never on SQLite foreign
+    /// keys, whose names the catalog doesn't keep).
+    fn constraint_name(&self, name: &str) -> String {
+        if name.trim().is_empty() {
+            String::new()
+        } else {
+            format!("CONSTRAINT {} ", self.q(name.trim()))
+        }
+    }
+
+    /// A CHECK constraint's condition: a loaded, unchanged one follows the
+    /// column renames; one written in the designer is taken as it is.
+    fn check_sql(&self, ck: &Check) -> String {
+        let loaded = self
+            .original
+            .as_ref()
+            .and_then(|o| o.checks.iter().find(|c| c.id == ck.id));
+        match loaded {
+            Some(o) if o.expression == ck.expression => self.expr_sql(&ck.expression),
+            _ => ck.expression.trim().to_string(),
+        }
+    }
+
+    fn check_clause(&self, ck: &Check) -> String {
+        format!(
+            "{}CHECK ({})",
+            self.constraint_name(&ck.name),
+            self.check_sql(ck)
+        )
+    }
+
+    /// Whether `fk` references the table itself.
+    fn self_referencing(&self, fk: &ForeignKey) -> bool {
+        let (schema, name) = match &self.original {
+            Some(o) => (&o.schema, &o.name),
+            None => (&self.table.schema, &self.table.name),
+        };
+        fk.ref_table == *name && (self.engine == Engine::Sqlite || fk.ref_schema == *schema)
+    }
+
+    /// `[CONSTRAINT name] FOREIGN KEY (…) REFERENCES …` for one of the
+    /// table's own keys, with its columns' and (for a self-reference) the
+    /// table's current names.
+    fn foreign_key_clause(&self, fk: &ForeignKey) -> String {
+        let e = self.engine;
+        let cols: Vec<String> = fk.columns.iter().map(|c| self.column_name(*c)).collect();
+        let (target, refs) = if self.self_referencing(fk) {
+            let refs = match &self.original {
+                Some(o) => self.renamed_columns(o, &fk.ref_columns),
+                None => fk.ref_columns.clone(),
+            };
+            (self.qualified(&self.table.name), refs)
+        } else if e == Engine::Sqlite {
+            (self.q(&fk.ref_table), fk.ref_columns.clone())
+        } else {
+            let schema = Some(fk.ref_schema.as_str()).filter(|s| !s.trim().is_empty());
+            (
+                qualified_name(e, schema, fk.ref_table.trim()),
+                fk.ref_columns.clone(),
+            )
+        };
+        let named = if e == Engine::Sqlite {
+            String::new()
+        } else {
+            self.constraint_name(&fk.name)
+        };
+        format!(
+            "{named}{}",
+            self.fk_clause(
+                &cols,
+                &target,
+                &refs,
+                Some(fk.on_delete),
+                Some(fk.on_update),
+                &fk.options
+            )
+        )
+    }
+
+    /// The statement that sets a table (`column` None) or column comment.
+    fn comment_statement(&self, column: Option<&str>, old: &str, new: &str) -> String {
+        let e = self.engine;
+        let table = self.qualified(&self.table.name);
+        let (old, new) = (old.trim(), new.trim());
+        if e == Engine::Mssql {
+            let mut args = vec!["N'MS_Description'".to_string()];
+            let proc = if old.is_empty() {
+                "sp_addextendedproperty"
+            } else if new.is_empty() {
+                "sp_dropextendedproperty"
+            } else {
+                "sp_updateextendedproperty"
+            };
+            if !new.is_empty() {
+                args.push(lit(e, new));
+            }
+            args.extend([
+                "N'SCHEMA'".into(),
+                lit(e, &self.table.schema),
+                "N'TABLE'".into(),
+                lit(e, &self.table.name),
+            ]);
+            if let Some(c) = column {
+                args.extend(["N'COLUMN'".into(), lit(e, c)]);
+            }
+            return format!("EXEC sys.{proc} {}", args.join(", "));
+        }
+        let value = if new.is_empty() {
+            "NULL".to_string()
+        } else {
+            lit(e, new)
+        };
+        match column {
+            Some(c) => format!("COMMENT ON COLUMN {table}.{} IS {value}", self.q(c)),
+            None => format!("COMMENT ON TABLE {table} IS {value}"),
+        }
+    }
+
+    /// Statements for the comments that differ from the loaded ones.
+    fn comment_statements(&self) -> Vec<String> {
+        if !self.comments_known || self.engine == Engine::Sqlite {
+            return Vec::new();
+        }
+        let t = &self.table;
+        let mut out = Vec::new();
+        let old = self
+            .original
+            .as_ref()
+            .map(|o| o.comment.as_str())
+            .unwrap_or("");
+        if old.trim() != t.comment.trim() {
+            out.push(self.comment_statement(None, old, &t.comment));
+        }
+        for c in &t.columns {
+            let old = self
+                .original_column(c.id)
+                .map(|o| o.comment.as_str())
+                .unwrap_or("");
+            if old.trim() != c.comment.trim() {
+                out.push(self.comment_statement(Some(&c.name), old, &c.comment));
+            }
+        }
+        out
     }
 
     fn grant_statements(&self, from: &BTreeSet<(String, String)>, table: &str) -> Vec<String> {
@@ -931,10 +1664,11 @@ impl Design {
 
     fn create_plan(&self) -> Plan {
         let table = self.qualified(&self.table.name);
-        let mut body = vec![self.create_body(&table)];
+        let mut body = vec![self.create_body(&table, false)];
         for i in &self.table.indexes {
             body.push(self.create_index(i, &table));
         }
+        body.extend(self.comment_statements());
         body.extend(self.grant_statements(&BTreeSet::new(), &table));
         Plan {
             body,
@@ -953,6 +1687,413 @@ impl Design {
                     .then_some(oc.id)
             })
             .collect()
+    }
+
+    /// [`Design::retyped`] where it matters for indexes and keys: on SQL
+    /// Server, whose ALTER COLUMN needs them out of the way.
+    fn alter_retyped(&self, o: &Table) -> BTreeSet<u64> {
+        if self.engine == Engine::Mssql {
+            self.retyped(o)
+        } else {
+            BTreeSet::new()
+        }
+    }
+
+    /// Whether loaded index `oi` stays as it is (perhaps renamed in place),
+    /// rather than being dropped (and perhaps re-created).
+    fn index_kept(&self, oi: &Index, retyped: &BTreeSet<u64>) -> bool {
+        let Some(ni) = self.table.indexes.iter().find(|i| i.id == oi.id) else {
+            return false;
+        };
+        ni.parts == oi.parts
+            && ni.unique == oi.unique
+            && ni.descending == oi.descending
+            && ni.include == oi.include
+            && ni.filter == oi.filter
+            && ni.clustered == oi.clustered
+            && !self.index_columns(ni).iter().any(|c| retyped.contains(c))
+            && (ni.name == oi.name || self.engine != Engine::Sqlite)
+    }
+
+    /// Whether the primary key is dropped and added again.
+    fn pk_rebuilt(&self, o: &Table, retyped: &BTreeSet<u64>) -> bool {
+        let (opk, npk) = (&o.primary_key, &self.table.primary_key);
+        opk.columns != npk.columns
+            || opk.descending != npk.descending
+            || opk.clustered != npk.clustered
+            || touches_retyped_ids(retyped, &npk.columns)
+    }
+
+    /// The loaded column called `name`.
+    fn loaded_column(o: &Table, name: &str) -> Option<u64> {
+        o.columns
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(name))
+            .map(|c| c.id)
+    }
+
+    /// Whether a referencing key is one of the table's own.
+    fn self_reference(&self, o: &Table, r: &ReferencingKey) -> bool {
+        r.table == o.name && r.schema.as_deref().is_none_or(|s| s == o.schema)
+    }
+
+    /// Constraints that hang on the columns or keys the design changes: the
+    /// ones the plan drops and adds back, and why others stop it.
+    fn dependents<'a>(&'a self, o: &'a Table) -> Dependents<'a> {
+        let e = self.engine;
+        let t = &self.table;
+        let mut d = Dependents::default();
+        let col_name = |id: u64| {
+            o.columns
+                .iter()
+                .find(|c| c.id == id)
+                .map(|c| c.name.clone())
+                .unwrap_or_default()
+        };
+        let dropped = |id: u64| self.column(id).is_none();
+        let type_changed = |id: u64| {
+            let old = o.columns.iter().find(|c| c.id == id);
+            matches!((old, self.column(id)), (Some(a), Some(b)) if a.data_type.trim() != b.data_type.trim())
+        };
+        let renamed = |id: u64| self.column(id).is_some_and(|c| c.name != col_name(id));
+        let altered = self.retyped(o);
+        let retyped = self.alter_retyped(o);
+
+        // Generated (computed) columns hold on to the columns they use.
+        for g in o.columns.iter().filter(|c| c.generated.is_some()) {
+            if dropped(g.id) {
+                continue;
+            }
+            let expr = &g.generated.as_ref().expect("filtered").expression;
+            for id in self.expr_columns(expr).into_iter().filter(|c| *c != g.id) {
+                let (c, gn) = (col_name(id), &g.name);
+                let why = if dropped(id) {
+                    format!(
+                        "Column “{c}” is used by generated column “{gn}”: drop “{gn}” too, or keep “{c}”."
+                    )
+                } else if e != Engine::Sqlite && type_changed(id) {
+                    format!(
+                        "Column “{c}” is used by generated column “{gn}”, so its type can't change: \
+                         drop “{gn}” first."
+                    )
+                } else if e == Engine::Mssql && renamed(id) {
+                    format!(
+                        "SQL Server can't rename column “{c}” while computed column “{gn}” uses it: \
+                         drop “{gn}” first."
+                    )
+                } else {
+                    continue;
+                };
+                d.problems.push(why);
+            }
+        }
+
+        // CHECK constraints: PostgreSQL copes with every column change (it
+        // drops a constraint with its column); SQL Server needs them out of
+        // the way of ALTER COLUMN and sp_rename. Removing a column removes
+        // the constraints on it, so a dropped column here is one the user
+        // put back.
+        for ck in &o.checks {
+            if !t.checks.iter().any(|c| c.id == ck.id) {
+                continue;
+            }
+            let cols = self.expr_columns(&ck.expression);
+            let label = if ck.name.is_empty() {
+                "a CHECK constraint".to_string()
+            } else {
+                format!("CHECK constraint “{}”", ck.name)
+            };
+            if let Some(c) = cols.iter().find(|c| dropped(**c))
+                && e != Engine::Postgres
+            {
+                d.problems.push(format!(
+                    "Column “{}” is used by {label}: remove it on the Checks page first.",
+                    col_name(*c)
+                ));
+            } else if e == Engine::Mssql && cols.iter().any(|c| altered.contains(c) || renamed(*c))
+            {
+                d.checks.insert(ck.id);
+            }
+        }
+
+        // SQL Server: the table's own foreign keys block ALTER COLUMN.
+        if e == Engine::Mssql {
+            for fk in &o.foreign_keys {
+                if !t.foreign_keys.iter().any(|f| f.id == fk.id) || self.self_referencing(fk) {
+                    continue; // dropped anyway; self-references follow their key below
+                }
+                if let Some(c) = fk.columns.iter().find(|c| dropped(**c)) {
+                    d.problems.push(format!(
+                        "Column “{}” is in foreign key “{}”: remove it on the Foreign keys page first.",
+                        col_name(*c),
+                        fk.name
+                    ));
+                } else if fk.columns.iter().any(|c| altered.contains(c)) {
+                    d.foreign_keys.insert(fk.id);
+                }
+            }
+        }
+
+        // Keys of other tables that reference this one.
+        let opk: BTreeSet<u64> = o.primary_key.columns.iter().copied().collect();
+        for r in &self.referencing {
+            let fk = &r.key;
+            let on = if self.self_reference(o, r) {
+                "this table".to_string()
+            } else {
+                match &r.schema {
+                    Some(s) if e != Engine::Sqlite => format!("{s}.{}", r.table),
+                    _ => r.table.clone(),
+                }
+            };
+            let what = format!("foreign key “{}” on {on}", fk.name);
+            let refs: BTreeSet<u64> = if fk.ref_columns.is_empty() {
+                opk.clone()
+            } else {
+                fk.ref_columns
+                    .iter()
+                    .filter_map(|n| Self::loaded_column(o, n))
+                    .collect()
+            };
+            if let Some(c) = refs.iter().find(|c| dropped(**c)) {
+                d.problems.push(format!(
+                    "Column “{}” is referenced by {what}: drop that key first.",
+                    col_name(*c)
+                ));
+                continue;
+            }
+            if self.self_reference(o, r)
+                && o.foreign_keys
+                    .iter()
+                    .find(|f| f.name == fk.name)
+                    .is_some_and(|f| t.foreign_keys.iter().any(|n| n.id == f.id))
+                && let Some(c) = fk
+                    .columns
+                    .iter()
+                    .find(|n| Self::loaded_column(o, n).is_some_and(dropped))
+            {
+                d.problems
+                    .push(format!("Column “{c}” is in {what}: drop that key first."));
+                continue;
+            }
+            if e == Engine::Sqlite {
+                continue; // the rebuild checks the keys before COMMIT
+            }
+            if e == Engine::Mssql
+                && let Some(c) = refs.iter().find(|c| type_changed(**c))
+            {
+                d.problems.push(format!(
+                    "Column “{}” is referenced by {what}, and SQL Server needs the same type on \
+                     both sides of a key: drop that key first, or leave the type.",
+                    col_name(*c)
+                ));
+                continue;
+            }
+            if !refs.is_empty() && refs == opk {
+                if self.pk_rebuilt(o, &retyped) {
+                    let npk: BTreeSet<u64> = t.primary_key.columns.iter().copied().collect();
+                    if npk == refs {
+                        d.follow(o, r, self.self_reference(o, r));
+                    } else {
+                        d.problems.push(format!(
+                            "The primary key is referenced by {what}: keep the key's columns, \
+                             or drop that foreign key first."
+                        ));
+                    }
+                }
+            } else if let Some(oi) = o.indexes.iter().find(|i| {
+                i.unique && self.index_columns(i).into_iter().collect::<BTreeSet<_>>() == refs
+            }) && !self.index_kept(oi, &retyped)
+            {
+                let same = t.indexes.iter().find(|i| i.id == oi.id).is_some_and(|ni| {
+                    ni.unique && self.index_columns(ni).into_iter().collect::<BTreeSet<_>>() == refs
+                });
+                if same {
+                    d.follow(o, r, self.self_reference(o, r));
+                } else {
+                    d.problems.push(format!(
+                        "Index “{}” is used by {what}: keep it unique on the same columns, \
+                         or drop that foreign key first.",
+                        oi.name
+                    ));
+                }
+            }
+        }
+        d
+    }
+
+    /// `FOREIGN KEY (…) REFERENCES … (…)` with its actions and options.
+    fn fk_clause(
+        &self,
+        cols: &[String],
+        target: &str,
+        refs: &[String],
+        on_delete: Option<ReferentialAction>,
+        on_update: Option<ReferentialAction>,
+        options: &str,
+    ) -> String {
+        let list = |names: &[String]| {
+            names
+                .iter()
+                .map(|n| self.q(n))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let refs = if refs.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", list(refs))
+        };
+        // MATCH comes before the actions, the other options after.
+        let options = options.trim();
+        let (matching, rest) = match options.strip_prefix("MATCH ") {
+            Some(m) => {
+                let (kind, rest) = m.split_once(' ').unwrap_or((m, ""));
+                (format!(" MATCH {kind}"), rest.trim())
+            }
+            None => (String::new(), options),
+        };
+        let mut s = format!(
+            "FOREIGN KEY ({}) REFERENCES {target}{refs}{matching}",
+            list(cols)
+        );
+        for (on, a) in [("DELETE", on_delete), ("UPDATE", on_update)] {
+            if let Some(a) = a.filter(|a| *a != ReferentialAction::NoAction) {
+                s.push_str(&format!(" ON {on} {}", a.sql()));
+            }
+        }
+        if !rest.is_empty() {
+            s.push(' ');
+            s.push_str(rest);
+        }
+        s
+    }
+
+    /// The current names of loaded columns, by their loaded names.
+    fn renamed_columns(&self, o: &Table, names: &[String]) -> Vec<String> {
+        names
+            .iter()
+            .map(|n| {
+                Self::loaded_column(o, n)
+                    .and_then(|id| self.column(id))
+                    .map(|c| c.name.clone())
+                    .unwrap_or_else(|| n.clone())
+            })
+            .collect()
+    }
+
+    /// Statements that drop other tables' keys on this one before the change
+    /// and add them back after it.
+    fn dependent_statements(
+        &self,
+        o: &Table,
+        d: &Dependents<'_>,
+        table: &str,
+    ) -> (Vec<String>, Vec<String>) {
+        let e = self.engine;
+        let (mut drop, mut add) = (Vec::new(), Vec::new());
+        for r in &d.referencing {
+            let fk = &r.key;
+            let child = qualified_name(e, r.schema.as_deref(), &r.table);
+            drop.push(format!(
+                "ALTER TABLE {child} DROP CONSTRAINT {}",
+                self.q(&fk.name)
+            ));
+            add.push(format!(
+                "ALTER TABLE {child} ADD CONSTRAINT {} {}",
+                self.q(&fk.name),
+                self.fk_clause(
+                    &fk.columns,
+                    table,
+                    &self.renamed_columns(o, &fk.ref_columns),
+                    fk.on_delete,
+                    fk.on_update,
+                    fk.options.as_deref().unwrap_or("")
+                )
+            ));
+        }
+        (drop, add)
+    }
+
+    /// The table's own CHECK constraints and foreign keys: which loaded ones
+    /// to drop, renames, and which to add, given the ones `deps` must
+    /// re-create.
+    fn constraint_statements(
+        &self,
+        o: &Table,
+        deps: &Dependents<'_>,
+        table: &str,
+    ) -> (Vec<String>, Vec<String>, Vec<String>) {
+        let e = self.engine;
+        let t = &self.table;
+        let (mut drop, mut rename, mut add) = (Vec::new(), Vec::new(), Vec::new());
+        let rename_to = |old: &str, new: &str| match e {
+            Engine::Mssql => format!(
+                "EXEC sp_rename {}, {}, N'OBJECT'",
+                lit(e, &self.qualified(old)),
+                lit(e, new)
+            ),
+            _ => format!(
+                "ALTER TABLE {table} RENAME CONSTRAINT {} TO {}",
+                self.q(old),
+                self.q(new)
+            ),
+        };
+        let drop_named =
+            |name: &str| format!("ALTER TABLE {table} DROP CONSTRAINT {}", self.q(name));
+        for oc in &o.checks {
+            let nc = t.checks.iter().find(|c| c.id == oc.id);
+            let forced = deps.checks.contains(&oc.id);
+            match nc {
+                Some(nc) if nc == oc && !forced => {}
+                Some(nc)
+                    if nc.expression == oc.expression && !nc.name.trim().is_empty() && !forced =>
+                {
+                    rename.push(rename_to(&oc.name, nc.name.trim()));
+                }
+                _ => drop.push(drop_named(&oc.name)),
+            }
+        }
+        for nc in &t.checks {
+            // Unchanged, or only renamed (above): nothing to add.
+            let kept = o.checks.iter().find(|c| c.id == nc.id).is_some_and(|oc| {
+                oc == nc || (oc.expression == nc.expression && !nc.name.trim().is_empty())
+            });
+            if !kept || deps.checks.contains(&nc.id) {
+                add.push(format!("ALTER TABLE {table} ADD {}", self.check_clause(nc)));
+            }
+        }
+        let same_shape = |a: &ForeignKey, b: &ForeignKey| {
+            ForeignKey {
+                name: b.name.clone(),
+                ..a.clone()
+            } == *b
+        };
+        for of in &o.foreign_keys {
+            let nf = t.foreign_keys.iter().find(|f| f.id == of.id);
+            let forced = deps.foreign_keys.contains(&of.id);
+            match nf {
+                Some(nf) if nf == of && !forced => {}
+                Some(nf) if same_shape(of, nf) && !nf.name.trim().is_empty() && !forced => {
+                    rename.push(rename_to(&of.name, nf.name.trim()));
+                }
+                _ => drop.push(drop_named(&of.name)),
+            }
+        }
+        for nf in &t.foreign_keys {
+            let kept = o
+                .foreign_keys
+                .iter()
+                .find(|f| f.id == nf.id)
+                .is_some_and(|of| of == nf || (same_shape(of, nf) && !nf.name.trim().is_empty()));
+            if !kept || deps.foreign_keys.contains(&nf.id) {
+                add.push(format!(
+                    "ALTER TABLE {table} ADD {}",
+                    self.foreign_key_clause(nf)
+                ));
+            }
+        }
+        (drop, rename, add)
     }
 
     fn alter_plan(&self, o: &Table) -> Plan {
@@ -977,39 +2118,28 @@ impl Design {
             .collect();
         body.extend(revokes);
 
-        let retyped = if e == Engine::Mssql {
-            self.retyped(o)
-        } else {
-            BTreeSet::new()
-        };
-        // Key, included and filter columns all hold an index on its column.
-        let touches_retyped = |i: &Index| self.index_columns(i).iter().any(|c| retyped.contains(c));
+        // Constraints in the way of the changes, and the ones that change,
+        // go first; they come back last.
+        let deps = self.dependents(o);
+        let (drop_deps, add_deps) = self.dependent_statements(o, &deps, &table);
+        let (drop_own, rename_own, add_own) = self.constraint_statements(o, &deps, &table);
+        body.extend(drop_deps);
+        body.extend(drop_own);
+
+        let retyped = self.alter_retyped(o);
 
         // Indexes that go away or change are dropped before columns change.
         let mut recreate: Vec<&Index> = Vec::new();
         let mut renames: Vec<(&Index, &Index)> = Vec::new();
         for oi in &o.indexes {
             let ni = t.indexes.iter().find(|i| i.id == oi.id);
-            let same_shape = ni.is_some_and(|ni| {
-                ni.parts == oi.parts
-                    && ni.unique == oi.unique
-                    && ni.descending == oi.descending
-                    && ni.include == oi.include
-                    && ni.filter == oi.filter
-                    && ni.clustered == oi.clustered
-                    && !touches_retyped(ni)
-            });
-            if let (Some(ni), true) = (ni, same_shape) {
+            if let Some(ni) = ni
+                && self.index_kept(oi, &retyped)
+            {
                 if ni.name != oi.name {
-                    if e == Engine::Sqlite {
-                        recreate.push(ni);
-                    } else {
-                        renames.push((oi, ni));
-                        continue;
-                    }
-                } else {
-                    continue;
+                    renames.push((oi, ni));
                 }
+                continue;
             }
             body.push(if oi.constraint && e != Engine::Sqlite {
                 format!("ALTER TABLE {table} DROP CONSTRAINT {}", self.q(&oi.name))
@@ -1032,10 +2162,7 @@ impl Design {
 
         // The primary key.
         let (opk, npk) = (&o.primary_key, &t.primary_key);
-        let pk_rebuilt = opk.columns != npk.columns
-            || opk.descending != npk.descending
-            || opk.clustered != npk.clustered
-            || touches_retyped_ids(&retyped, &npk.columns);
+        let pk_rebuilt = self.pk_rebuilt(o, &retyped);
         if pk_rebuilt && !opk.columns.is_empty() {
             body.push(format!(
                 "ALTER TABLE {table} DROP CONSTRAINT {}",
@@ -1087,8 +2214,11 @@ impl Design {
             }
         }
 
-        // Columns: drop, rename, alter, add.
-        for oc in &o.columns {
+        // Columns: drop (generated ones before the columns they use),
+        // rename, alter, add.
+        let mut drops: Vec<&Column> = o.columns.iter().collect();
+        drops.sort_by_key(|c| c.generated.is_none());
+        for oc in drops {
             if self.column(oc.id).is_none() {
                 body.push(format!(
                     "ALTER TABLE {table} DROP COLUMN {}",
@@ -1124,29 +2254,62 @@ impl Design {
             let type_changed = ty != oc.data_type.trim();
             match e {
                 Engine::Postgres => {
+                    let alter = format!("ALTER TABLE {table} ALTER COLUMN {col}");
+                    if oc.identity.is_some() && nc.identity.is_none() {
+                        body.push(format!("{alter} DROP IDENTITY"));
+                    }
+                    if oc.generated.is_some() && nc.generated.is_none() {
+                        body.push(format!("{alter} DROP EXPRESSION"));
+                    }
+                    // The old default must be cast to a new type, which
+                    // often fails ('' to integer): drop it first and set
+                    // the new one after.
+                    let (od, nd) = (oc.default.trim(), nc.default.trim());
+                    let reset_default = type_changed && !od.is_empty();
+                    if reset_default || (od != nd && nd.is_empty()) {
+                        body.push(format!("{alter} DROP DEFAULT"));
+                    }
                     if type_changed {
-                        body.push(format!(
-                            "ALTER TABLE {table} ALTER COLUMN {col} TYPE {ty} USING {col}::{ty}"
-                        ));
+                        // A generated column is computed again; USING is
+                        // not allowed for it.
+                        body.push(if nc.generated.is_some() {
+                            format!("{alter} TYPE {ty}")
+                        } else {
+                            format!("{alter} TYPE {ty} USING {col}::{ty}")
+                        });
                     }
                     if nc.nullable != oc.nullable {
                         let what = if nc.nullable { "DROP" } else { "SET" };
-                        body.push(format!(
-                            "ALTER TABLE {table} ALTER COLUMN {col} {what} NOT NULL"
-                        ));
+                        body.push(format!("{alter} {what} NOT NULL"));
                     }
-                    if nc.default.trim() != oc.default.trim() {
-                        body.push(if nc.default.trim().is_empty() {
-                            format!("ALTER TABLE {table} ALTER COLUMN {col} DROP DEFAULT")
-                        } else {
-                            format!(
-                                "ALTER TABLE {table} ALTER COLUMN {col} SET DEFAULT {}",
-                                nc.default.trim()
-                            )
-                        });
+                    if !nd.is_empty() && (od != nd || reset_default) {
+                        body.push(format!("{alter} SET DEFAULT {nd}"));
+                    }
+                    match (&oc.identity, &nc.identity) {
+                        (None, Some(i)) => body.push(format!(
+                            "{alter} ADD GENERATED {} AS IDENTITY{}",
+                            if i.always { "ALWAYS" } else { "BY DEFAULT" },
+                            pg_identity_options(i)
+                        )),
+                        (Some(a), Some(b)) if a.always != b.always => body.push(format!(
+                            "{alter} SET GENERATED {}",
+                            if b.always { "ALWAYS" } else { "BY DEFAULT" }
+                        )),
+                        _ => {}
+                    }
+                    if let (Some(a), Some(b)) = (&oc.generated, &nc.generated)
+                        && a.expression.trim() != b.expression.trim()
+                    {
+                        body.push(format!(
+                            "{alter} SET EXPRESSION AS ({})",
+                            b.expression.trim()
+                        ));
                     }
                 }
                 Engine::Mssql => {
+                    if nc.generated.is_some() {
+                        continue; // typed by its expression; nothing to alter
+                    }
                     if type_changed || nc.nullable != oc.nullable {
                         let null = if nc.nullable { "NULL" } else { "NOT NULL" };
                         body.push(format!(
@@ -1216,6 +2379,10 @@ impl Design {
         for i in recreate {
             body.push(self.create_index(i, &table));
         }
+        body.extend(rename_own);
+        body.extend(add_own);
+        body.extend(add_deps);
+        body.extend(self.comment_statements());
 
         let grants: Vec<String> = self
             .grant_statements(&o.grants, &table)
@@ -1228,6 +2395,13 @@ impl Design {
         if e == Engine::Postgres && body.iter().any(|s| s.contains(" TYPE ")) {
             warnings.push(
                 "Changing a column type rewrites the table and fails if a value cannot be converted."
+                    .into(),
+            );
+        }
+        if e == Engine::Postgres && body.iter().any(|s| s.contains(" SET EXPRESSION AS ")) {
+            warnings.push(
+                "Changing a generated column's expression needs PostgreSQL 17 or later, \
+                 and recomputes the column for every row."
                     .into(),
             );
         }
@@ -1250,6 +2424,7 @@ impl Design {
                 c.data_type.trim() != oc.data_type.trim()
                     || c.nullable != oc.nullable
                     || c.default.trim() != oc.default.trim()
+                    || c.generated != oc.generated
             })
         });
         let pk_changed = o.primary_key.columns != t.primary_key.columns;
@@ -1259,25 +2434,21 @@ impl Design {
             .filter(|c| !o.columns.iter().any(|oc| oc.id == c.id))
             .any(|c| {
                 let d = c.default.trim();
+                // ADD COLUMN takes virtual generated columns only.
                 self.in_pk(c.id)
-                    || (!c.nullable && d.is_empty())
+                    || c.generated.as_ref().is_some_and(|g| g.stored)
+                    || (!c.nullable && d.is_empty() && c.generated.is_none())
                     || (!d.is_empty() && !sqlite_constant(d))
             });
-        let fk_columns: BTreeSet<&str> = self
-            .foreign_keys
-            .iter()
-            .flat_map(|f| f.columns.iter().map(String::as_str))
-            .collect();
-        let hard_drop = self
-            .removed_columns()
-            .iter()
-            .any(|c| fk_columns.contains(c.name.as_str()));
+        // Foreign keys and CHECK constraints live in the CREATE TABLE text.
         let constraint_changed = o
             .indexes
             .iter()
             .filter(|i| i.constraint)
-            .any(|oi| t.indexes.iter().find(|i| i.id == oi.id) != Some(oi));
-        changed || pk_changed || hard_add || hard_drop || constraint_changed
+            .any(|oi| t.indexes.iter().find(|i| i.id == oi.id) != Some(oi))
+            || o.foreign_keys != t.foreign_keys
+            || o.checks != t.checks;
+        changed || pk_changed || hard_add || constraint_changed
     }
 
     fn rebuild_plan(&self, o: &Table) -> Plan {
@@ -1286,52 +2457,16 @@ impl Design {
         let tmp_name = format!("_sqail_new_{}", t.name);
         let tmp = self.qualified(&tmp_name);
 
-        let mut create = self.create_body(&tmp);
-        // Unique constraints and surviving foreign keys go into the new table.
-        let mut extra = Vec::new();
-        for i in t.indexes.iter().filter(|i| self.unique_constraint(i)) {
-            extra.push(format!("    UNIQUE ({})", self.parts_sql(&i.parts)));
-        }
-        for fk in &self.foreign_keys {
-            let ids: Option<Vec<u64>> = fk
-                .columns
-                .iter()
-                .map(|n| {
-                    o.columns
-                        .iter()
-                        .find(|c| &c.name == n)
-                        .map(|c| c.id)
-                        .filter(|id| self.column(*id).is_some())
-                })
-                .collect();
-            let Some(ids) = ids else { continue };
-            let refs = if fk.ref_columns.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    " ({})",
-                    fk.ref_columns
-                        .iter()
-                        .map(|c| self.q(c))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            };
-            extra.push(format!(
-                "    FOREIGN KEY ({}) REFERENCES {}{refs}",
-                self.column_list(&ids),
-                self.q(&fk.ref_table)
-            ));
-        }
-        if !extra.is_empty() {
-            create.truncate(create.len() - 2); // "\n)"
-            create.push_str(&format!(",\n{}\n)", extra.join(",\n")));
-        }
+        // Unique constraints, CHECK constraints and foreign keys go into the
+        // new table.
+        let create = self.create_body(&tmp, true);
 
+        // Generated columns compute their values and can't be written.
         let kept: Vec<(&Column, &Column)> = o
             .columns
             .iter()
             .filter_map(|oc| self.column(oc.id).map(|nc| (oc, nc)))
+            .filter(|(_, nc)| nc.generated.is_none())
             .collect();
         let mut body = vec![create];
         if !kept.is_empty() {
@@ -1359,14 +2494,41 @@ impl Design {
             check: Some("PRAGMA foreign_key_check".into()),
             post: vec!["PRAGMA foreign_keys = ON".into()],
             warnings: vec![
-                "SQLite cannot make this change in place, so the table is rebuilt: \
-                 its rows are copied into a new table that replaces it. Triggers on the \
-                 table are dropped, and CHECK constraints, AUTOINCREMENT and \
-                 foreign-key actions are not carried over."
-                    .into(),
+                if self.constraints_known {
+                    "SQLite cannot make this change in place, so the table is rebuilt: \
+                     its rows are copied into a new table that replaces it. Triggers on the \
+                     table are dropped, and AUTOINCREMENT is not carried over."
+                } else {
+                    "SQLite cannot make this change in place, so the table is rebuilt: \
+                     its rows are copied into a new table that replaces it. Triggers on the \
+                     table are dropped, and CHECK constraints and AUTOINCREMENT are not \
+                     carried over (this sqail-service is too old to list them)."
+                }
+                .into(),
             ],
         }
     }
+}
+
+/// ` (START WITH s INCREMENT BY i)` for a PostgreSQL identity that doesn't
+/// start at 1 and count up by 1.
+fn pg_identity_options(i: &IdentityInfo) -> String {
+    let (start, step) = (
+        i.seed.as_deref().unwrap_or("1").trim(),
+        i.increment.as_deref().unwrap_or("1").trim(),
+    );
+    if (start, step) == ("1", "1") {
+        String::new()
+    } else {
+        format!(" (START WITH {start} INCREMENT BY {step})")
+    }
+}
+
+/// Whether a type as typed carries identity or generation clauses, which
+/// belong in the designer's value menu instead.
+fn type_has_value_clause(ty: &str) -> bool {
+    ty.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .any(|w| w.eq_ignore_ascii_case("IDENTITY") || w.eq_ignore_ascii_case("GENERATED"))
 }
 
 fn touches_retyped_ids(retyped: &BTreeSet<u64>, ids: &[u64]) -> bool {
@@ -1421,6 +2583,7 @@ mod tests {
             nullable,
             default: default.map(String::from),
             primary_key: pk,
+            ..Default::default()
         }
     }
 
@@ -1548,8 +2711,8 @@ mod tests {
                 "REVOKE SELECT ON sales.purchase FROM reporting",
                 "DROP INDEX sales.ix_customer",
                 "ALTER TABLE sales.purchase RENAME COLUMN customer TO client",
-                "ALTER TABLE sales.purchase ALTER COLUMN total TYPE numeric(12,2) USING total::numeric(12,2)",
                 "ALTER TABLE sales.purchase ALTER COLUMN total DROP DEFAULT",
+                "ALTER TABLE sales.purchase ALTER COLUMN total TYPE numeric(12,2) USING total::numeric(12,2)",
                 "ALTER TABLE sales.purchase ADD COLUMN note text",
                 "ALTER TABLE sales.purchase RENAME CONSTRAINT orders_pkey TO purchase_pkey",
                 "CREATE UNIQUE INDEX ix_customer ON sales.purchase (client)",
@@ -1812,6 +2975,7 @@ mod tests {
                 ref_schema: None,
                 ref_table: "people".into(),
                 ref_columns: vec!["id".into()],
+                ..Default::default()
             }],
             &[],
         );
@@ -1907,6 +3071,581 @@ mod tests {
         assert_eq!(
             drop_table(Engine::Sqlite, "main", "orders", false),
             "DROP TABLE orders"
+        );
+    }
+
+    fn identity(always: bool) -> Option<IdentityInfo> {
+        Some(IdentityInfo {
+            always,
+            seed: Some("1".into()),
+            increment: Some("1".into()),
+        })
+    }
+
+    fn generated(expr: &str, stored: bool) -> Option<GeneratedInfo> {
+        Some(GeneratedInfo {
+            expression: expr.into(),
+            stored,
+        })
+    }
+
+    /// `id` identity, `qty` plain with a default, `total` generated.
+    fn counted(engine: Engine) -> Design {
+        let (int, schema) = match engine {
+            Engine::Postgres => ("integer", "public"),
+            Engine::Mssql => ("int", "dbo"),
+            Engine::Sqlite | Engine::Unknown => ("INTEGER", "main"),
+        };
+        Design::from_catalog(
+            engine,
+            schema,
+            "t",
+            &[
+                ColumnInfo {
+                    identity: identity(engine != Engine::Sqlite),
+                    ..col("id", int, false, None, true)
+                },
+                col("qty", int, true, Some("0"), false),
+                ColumnInfo {
+                    generated: generated("qty * 2", true),
+                    ..col("total", int, true, None, false)
+                },
+            ],
+            &[idx("t_pkey", &["id"], true, true, true)],
+            Vec::new(),
+            &[],
+        )
+    }
+
+    #[test]
+    fn postgres_identity_and_generated_columns() {
+        let mut d = counted(Engine::Postgres);
+        assert!(d.plan().unwrap().is_empty());
+        let (id, qty, total) = (column(&d, "id"), column(&d, "qty"), column(&d, "total"));
+
+        // A plain column becomes an identity: NOT NULL, no default.
+        d.set_kind(qty, ValueKind::IdentityByDefault);
+        assert!(!d.column(qty).unwrap().nullable);
+        assert_eq!(
+            body(&d),
+            [
+                "ALTER TABLE public.t ALTER COLUMN qty DROP DEFAULT",
+                "ALTER TABLE public.t ALTER COLUMN qty SET NOT NULL",
+                "ALTER TABLE public.t ALTER COLUMN qty ADD GENERATED BY DEFAULT AS IDENTITY",
+            ]
+        );
+
+        let mut d = counted(Engine::Postgres);
+        d.set_kind(id, ValueKind::IdentityByDefault);
+        d.column_mut(id).unwrap().data_type = "bigint".into();
+        assert_eq!(
+            body(&d),
+            [
+                "ALTER TABLE public.t ALTER COLUMN id TYPE bigint USING id::bigint",
+                "ALTER TABLE public.t ALTER COLUMN id SET GENERATED BY DEFAULT",
+            ]
+        );
+        d.set_kind(id, ValueKind::Plain);
+        assert_eq!(
+            body(&d)[0],
+            "ALTER TABLE public.t ALTER COLUMN id DROP IDENTITY"
+        );
+
+        // Generated: a new expression, a new type (no USING), or plain.
+        let mut d = counted(Engine::Postgres);
+        d.column_mut(total)
+            .unwrap()
+            .generated
+            .as_mut()
+            .unwrap()
+            .expression = "qty * 3".into();
+        d.column_mut(total).unwrap().data_type = "bigint".into();
+        let p = d.plan().unwrap();
+        assert_eq!(
+            p.body,
+            [
+                "ALTER TABLE public.t ALTER COLUMN total TYPE bigint",
+                "ALTER TABLE public.t ALTER COLUMN total SET EXPRESSION AS (qty * 3)",
+            ]
+        );
+        assert!(p.warnings.iter().any(|w| w.contains("PostgreSQL 17")));
+        d.set_kind(total, ValueKind::Plain);
+        assert_eq!(
+            body(&d),
+            [
+                "ALTER TABLE public.t ALTER COLUMN total DROP EXPRESSION",
+                "ALTER TABLE public.t ALTER COLUMN total TYPE bigint USING total::bigint",
+            ]
+        );
+
+        // An existing column can't become generated; a new one can.
+        let d = counted(Engine::Postgres);
+        assert!(d.kind_allowed(qty, ValueKind::Generated).is_err());
+        let mut d = counted(Engine::Postgres);
+        let n = d.add_column();
+        d.column_mut(n).unwrap().name = "half".into();
+        d.column_mut(n).unwrap().data_type = "integer".into();
+        d.set_kind(n, ValueKind::Generated);
+        assert!(d.plan().unwrap_err()[0].contains("needs an expression"));
+        d.column_mut(n)
+            .unwrap()
+            .generated
+            .as_mut()
+            .unwrap()
+            .expression = "qty / 2".into();
+        let m = d.add_column();
+        d.column_mut(m).unwrap().name = "seq".into();
+        d.column_mut(m).unwrap().data_type = "bigint".into();
+        d.set_kind(m, ValueKind::IdentityAlways);
+        assert_eq!(
+            body(&d),
+            [
+                "ALTER TABLE public.t ADD COLUMN half integer GENERATED ALWAYS AS (qty / 2) STORED",
+                "ALTER TABLE public.t ADD COLUMN seq bigint GENERATED ALWAYS AS IDENTITY NOT NULL",
+            ]
+        );
+
+        // Identity clauses typed into the type of an existing column.
+        let mut d = counted(Engine::Postgres);
+        d.column_mut(qty).unwrap().data_type = "bigint GENERATED BY DEFAULT AS IDENTITY".into();
+        assert!(d.plan().unwrap_err()[0].contains("choose identity or generated"));
+    }
+
+    #[test]
+    fn mssql_identity_and_computed_columns() {
+        let d = counted(Engine::Mssql);
+        assert!(d.plan().unwrap().is_empty());
+        let (id, qty, total) = (column(&d, "id"), column(&d, "qty"), column(&d, "total"));
+        assert!(d.kind_allowed(qty, ValueKind::IdentityAlways).is_err());
+        assert!(d.kind_allowed(id, ValueKind::Plain).is_err());
+        assert!(d.kind_allowed(id, ValueKind::IdentityByDefault).is_err());
+        assert!(d.type_editable(total).is_err());
+        assert!(d.expression_editable(total).is_err());
+
+        let mut d = counted(Engine::Mssql);
+        d.column_mut(qty).unwrap().data_type = "int IDENTITY(1,1)".into();
+        assert!(d.plan().is_err());
+
+        // Retyping the identity column keeps it an identity.
+        let mut d = counted(Engine::Mssql);
+        d.column_mut(id).unwrap().data_type = "bigint".into();
+        assert!(
+            body(&d).contains(&"ALTER TABLE [dbo].[t] ALTER COLUMN [id] bigint NOT NULL".into())
+        );
+
+        // New columns: computed, and a second identity is refused.
+        let mut d = counted(Engine::Mssql);
+        let n = d.add_column();
+        d.column_mut(n).unwrap().name = "half".into();
+        d.set_kind(n, ValueKind::Generated);
+        d.column_mut(n)
+            .unwrap()
+            .generated
+            .as_mut()
+            .unwrap()
+            .expression = "[qty] / 2".into();
+        assert_eq!(
+            body(&d),
+            ["ALTER TABLE [dbo].[t] ADD [half] AS ([qty] / 2)"]
+        );
+        d.column_mut(n).unwrap().generated.as_mut().unwrap().stored = true;
+        d.column_mut(n).unwrap().nullable = false;
+        assert_eq!(
+            body(&d),
+            ["ALTER TABLE [dbo].[t] ADD [half] AS ([qty] / 2) PERSISTED NOT NULL"]
+        );
+        d.set_kind(n, ValueKind::IdentityAlways);
+        assert!(d.plan().unwrap_err()[0].contains("one identity column"));
+
+        let mut d = Design::new_table(Engine::Mssql, None);
+        d.table.name = "n".into();
+        let id = d.table.columns[0].id;
+        d.set_kind(id, ValueKind::IdentityAlways);
+        assert_eq!(
+            body(&d),
+            [
+                "CREATE TABLE [dbo].[n] (\n    [id] int IDENTITY(1, 1) NOT NULL,\n    PRIMARY KEY ([id])\n)"
+            ]
+        );
+    }
+
+    #[test]
+    fn sqlite_generated_columns_rebuild_without_copying_them() {
+        let d = counted(Engine::Sqlite);
+        assert!(d.plan().unwrap().is_empty());
+        let (id, qty, total) = (column(&d, "id"), column(&d, "qty"), column(&d, "total"));
+        assert_eq!(
+            ValueKind::of(d.column(id).unwrap()).label(Engine::Sqlite),
+            "rowid"
+        );
+        assert!(d.kind_allowed(id, ValueKind::Plain).is_err());
+        assert!(d.kind_allowed(qty, ValueKind::IdentityAlways).is_err());
+
+        let mut d = counted(Engine::Sqlite);
+        d.column_mut(total)
+            .unwrap()
+            .generated
+            .as_mut()
+            .unwrap()
+            .expression = "qty * 3".into();
+        let p = d.plan().unwrap();
+        assert_eq!(
+            p.body[..2],
+            [
+                "CREATE TABLE _sqail_new_t (\n    id INTEGER NOT NULL,\n    qty INTEGER DEFAULT 0,\n    \
+                 total INTEGER GENERATED ALWAYS AS (qty * 3) STORED,\n    PRIMARY KEY (id)\n)",
+                "INSERT INTO _sqail_new_t (id, qty) SELECT id, qty FROM t",
+            ]
+        );
+
+        // A virtual generated column is added in place; a stored one isn't.
+        let mut d = counted(Engine::Sqlite);
+        let n = d.add_column();
+        d.column_mut(n).unwrap().name = "half".into();
+        d.set_kind(n, ValueKind::Generated);
+        d.column_mut(n)
+            .unwrap()
+            .generated
+            .as_mut()
+            .unwrap()
+            .expression = "qty / 2".into();
+        assert_eq!(
+            body(&d),
+            ["ALTER TABLE t ADD COLUMN half TEXT GENERATED ALWAYS AS (qty / 2) VIRTUAL"]
+        );
+        d.column_mut(n).unwrap().generated.as_mut().unwrap().stored = true;
+        assert!(!d.plan().unwrap().pre.is_empty(), "rebuilt");
+    }
+
+    #[test]
+    fn postgres_type_change_resets_the_default() {
+        let mut d = orders(Engine::Postgres);
+        d.column_mut(2).unwrap().default = "''".into();
+        d.original.as_mut().unwrap().columns[1].default = "''".into();
+        d.column_mut(2).unwrap().data_type = "integer".into();
+        d.column_mut(2).unwrap().default = "0".into();
+        assert_eq!(
+            body(&d),
+            [
+                "ALTER TABLE sales.orders ALTER COLUMN customer DROP DEFAULT",
+                "ALTER TABLE sales.orders ALTER COLUMN customer TYPE integer USING customer::integer",
+                "ALTER TABLE sales.orders ALTER COLUMN customer SET DEFAULT 0",
+            ]
+        );
+        // The same default comes back after the type change.
+        d.column_mut(2).unwrap().default = "''".into();
+        assert_eq!(
+            body(&d)[2],
+            "ALTER TABLE sales.orders ALTER COLUMN customer SET DEFAULT ''"
+        );
+    }
+
+    /// `parent (id key, code unique, qty, total = qty * 2, CHECK (qty > 0))`
+    /// referenced by `child (pid) → parent (id)` and `child (pcode) →
+    /// parent (code)`.
+    fn referenced(engine: Engine) -> Design {
+        let (int, schema) = match engine {
+            Engine::Postgres => ("integer", "s"),
+            Engine::Mssql => ("int", "s"),
+            Engine::Sqlite | Engine::Unknown => ("INTEGER", "main"),
+        };
+        let fk = |name: &str, col: &str, refs: &str| ReferencingKey {
+            schema: Some(schema.into()),
+            table: "child".into(),
+            key: ForeignKeyInfo {
+                name: name.into(),
+                columns: vec![col.into()],
+                ref_schema: Some(schema.into()),
+                ref_table: "parent".into(),
+                ref_columns: vec![refs.into()],
+                on_delete: Some(ReferentialAction::Cascade),
+                options: (engine == Engine::Postgres).then(|| "MATCH FULL DEFERRABLE".into()),
+                ..Default::default()
+            },
+        };
+        Design::from_catalog(
+            engine,
+            schema,
+            "parent",
+            &[
+                col("id", int, false, None, true),
+                col("code", int, false, None, false),
+                col("qty", int, true, None, false),
+                ColumnInfo {
+                    generated: generated("qty * 2", true),
+                    ..col("total", int, true, None, false)
+                },
+            ],
+            &[
+                idx("pk_parent", &["id"], true, true, true),
+                idx("uq_code", &["code"], true, false, true),
+            ],
+            vec![ForeignKeyInfo {
+                name: "fk_parent_owner".into(),
+                columns: vec!["code".into()],
+                ref_schema: Some(schema.into()),
+                ref_table: "owner".into(),
+                ref_columns: vec!["id".into()],
+                ..Default::default()
+            }],
+            &[],
+        )
+        .with_constraints(
+            &[CheckInfo {
+                name: "ck_qty".into(),
+                expression: if engine == Engine::Mssql {
+                    "([qty]>(0))".into()
+                } else {
+                    "qty > 0".into()
+                },
+            }],
+            vec![
+                fk("fk_child", "pid", "id"),
+                fk("fk_child_code", "pcode", "code"),
+            ],
+        )
+    }
+
+    #[test]
+    fn referenced_keys_are_dropped_and_added_back() {
+        // Postgres: the key's descending order changes, so it is rebuilt
+        // and the key that references it goes and comes back.
+        let mut d = referenced(Engine::Postgres);
+        assert!(d.plan().unwrap().is_empty());
+        let id = column(&d, "id");
+        d.table.primary_key.descending = vec![id];
+        d.column_mut(id).unwrap().name = "key".into();
+        let b = body(&d);
+        assert_eq!(b[0], "ALTER TABLE s.child DROP CONSTRAINT fk_child");
+        assert_eq!(b[1], "ALTER TABLE s.parent DROP CONSTRAINT pk_parent");
+        assert_eq!(
+            b.last().unwrap(),
+            "ALTER TABLE s.child ADD CONSTRAINT fk_child FOREIGN KEY (pid) REFERENCES s.parent (key) \
+             MATCH FULL ON DELETE CASCADE DEFERRABLE"
+        );
+
+        // A key with other columns can't serve the foreign key.
+        let mut d = referenced(Engine::Postgres);
+        let code = column(&d, "code");
+        d.toggle_pk(code);
+        let p = d.plan().unwrap_err();
+        assert!(
+            p[0].contains("primary key is referenced by foreign key “fk_child” on s.child"),
+            "{p:?}"
+        );
+
+        // The unique index another key uses: changed in shape, it must stay
+        // unique on the same columns.
+        let mut d = referenced(Engine::Postgres);
+        let ix = d.table.indexes[0].id;
+        d.index_mut(ix).unwrap().clustered = Some(true);
+        let b = body(&d);
+        assert_eq!(b[0], "ALTER TABLE s.child DROP CONSTRAINT fk_child_code");
+        d.index_mut(ix).unwrap().unique = false;
+        assert!(d.plan().unwrap_err()[0].contains("Index “uq_code” is used by foreign key"));
+
+        // A referenced column can't be dropped.
+        let mut d = referenced(Engine::Postgres);
+        d.remove_column(code);
+        assert!(d.plan().unwrap_err()[0].contains("“code” is referenced by foreign key"));
+    }
+
+    #[test]
+    fn mssql_dependents_of_altered_columns() {
+        // Widening a referenced key: both sides need the same type.
+        let mut d = referenced(Engine::Mssql);
+        let id = column(&d, "id");
+        d.column_mut(id).unwrap().data_type = "bigint".into();
+        let p = d.plan().unwrap_err();
+        assert!(p[0].contains("same type on both sides"), "{p:?}");
+
+        // Retyping a column used by a CHECK constraint and the table's own
+        // foreign key: both are dropped and added back.
+        let mut d = referenced(Engine::Mssql);
+        let qty = column(&d, "qty");
+        let code = column(&d, "code");
+        d.remove_column(column(&d, "total"));
+        d.column_mut(qty).unwrap().data_type = "bigint".into();
+        d.column_mut(qty).unwrap().name = "amount".into();
+        d.column_mut(code).unwrap().nullable = true;
+        let b = body(&d);
+        assert_eq!(
+            b[..3],
+            [
+                "ALTER TABLE [s].[child] DROP CONSTRAINT [fk_child_code]",
+                "ALTER TABLE [s].[parent] DROP CONSTRAINT [ck_qty]",
+                "ALTER TABLE [s].[parent] DROP CONSTRAINT [fk_parent_owner]",
+            ]
+        );
+        assert!(b.contains(
+            &"ALTER TABLE [s].[parent] ADD CONSTRAINT [ck_qty] CHECK (([amount]>(0)))".into()
+        ));
+        assert!(
+            b.contains(
+                &"ALTER TABLE [s].[parent] ADD CONSTRAINT [fk_parent_owner] FOREIGN KEY ([code]) \
+              REFERENCES [s].[owner] ([id])"
+                    .into()
+            )
+        );
+        // ... and the unique index on code is re-created with the key that
+        // uses it.
+        assert!(
+            b.contains(&"ALTER TABLE [s].[child] DROP CONSTRAINT [fk_child_code]".into()),
+            "{b:?}"
+        );
+
+        // Computed columns hold on to their columns.
+        let mut d = referenced(Engine::Mssql);
+        d.column_mut(qty).unwrap().name = "amount".into();
+        assert!(d.plan().unwrap_err()[0].contains("can't rename column “qty”"));
+        let mut d = referenced(Engine::Mssql);
+        d.column_mut(qty).unwrap().data_type = "bigint".into();
+        assert!(d.plan().unwrap_err()[0].contains("used by generated column “total”"));
+        let mut d = referenced(Engine::Mssql);
+        d.remove_column(qty);
+        let p = d.plan().unwrap_err();
+        assert!(p.iter().any(|p| p.contains("drop “total” too")), "{p:?}");
+        // The CHECK constraint on it went with it.
+        assert!(d.table.checks.is_empty());
+    }
+
+    #[test]
+    fn generated_columns_are_dropped_before_their_columns() {
+        let mut d = referenced(Engine::Postgres);
+        d.remove_column(column(&d, "qty"));
+        d.remove_column(column(&d, "total"));
+        assert_eq!(
+            body(&d),
+            [
+                "ALTER TABLE s.parent DROP CONSTRAINT ck_qty",
+                "ALTER TABLE s.parent DROP COLUMN total",
+                "ALTER TABLE s.parent DROP COLUMN qty",
+            ]
+        );
+    }
+
+    #[test]
+    fn foreign_keys_are_added_changed_renamed_and_dropped() {
+        // Postgres: add one on a new column, rename one, change the
+        // actions of another; all after the columns, drops first.
+        let mut d = referenced(Engine::Postgres);
+        let code = column(&d, "code");
+        let owner = d.table.foreign_keys[0].id;
+        d.foreign_key_mut(owner).unwrap().name = "fk_owner".into();
+        assert_eq!(
+            body(&d),
+            ["ALTER TABLE s.parent RENAME CONSTRAINT fk_parent_owner TO fk_owner"]
+        );
+        d.foreign_key_mut(owner).unwrap().on_delete = ReferentialAction::SetNull;
+        let n = d.add_column();
+        d.column_mut(n).unwrap().name = "boss".into();
+        d.column_mut(n).unwrap().data_type = "integer".into();
+        let fk = d.add_foreign_key();
+        let f = d.foreign_key_mut(fk).unwrap();
+        f.columns = vec![n];
+        f.ref_table = "parent".into();
+        f.ref_columns = vec!["id".into()];
+        f.on_delete = ReferentialAction::Cascade;
+        assert_eq!(
+            body(&d),
+            [
+                "ALTER TABLE s.parent DROP CONSTRAINT fk_parent_owner",
+                "ALTER TABLE s.parent ADD COLUMN boss integer",
+                "ALTER TABLE s.parent ADD CONSTRAINT fk_owner FOREIGN KEY (code) REFERENCES s.owner (id) \
+                 ON DELETE SET NULL",
+                "ALTER TABLE s.parent ADD CONSTRAINT fk_parent_1 FOREIGN KEY (boss) REFERENCES s.parent (id) \
+                 ON DELETE CASCADE",
+            ]
+        );
+        // Removing the column removes its key.
+        d.remove_column(code);
+        assert!(d.table.foreign_keys.iter().all(|f| f.id != owner));
+        let fk = d.table.foreign_keys[0].id;
+        d.foreign_key_mut(fk).unwrap().ref_columns.clear();
+        assert!(d.plan().unwrap_err()[0].contains("needs the columns it references"));
+
+        // SQL Server renames with sp_rename; SQLite rebuilds without names.
+        let mut d = referenced(Engine::Mssql);
+        d.table.foreign_keys[0].name = "fk_owner".into();
+        assert_eq!(
+            body(&d),
+            ["EXEC sp_rename N'[s].[fk_parent_owner]', N'fk_owner', N'OBJECT'"]
+        );
+        let mut d = referenced(Engine::Sqlite);
+        d.table.foreign_keys[0].on_update = ReferentialAction::Cascade;
+        let p = d.plan().unwrap();
+        assert!(
+            p.body[0].contains("    FOREIGN KEY (code) REFERENCES owner (id) ON UPDATE CASCADE\n)"),
+            "{}",
+            p.body[0]
+        );
+    }
+
+    #[test]
+    fn checks_and_comments() {
+        let mut d = referenced(Engine::Postgres);
+        d.comments_known = true;
+        let ck = d.table.checks[0].id;
+        d.check_mut(ck).unwrap().expression = "qty >= 0".into();
+        let n = d.add_check();
+        d.check_mut(n).unwrap().expression = "code <> 0".into();
+        d.table.comment = "Parents".into();
+        let qty = column(&d, "qty");
+        d.column_mut(qty).unwrap().comment = "how many".into();
+        assert_eq!(
+            body(&d),
+            [
+                "ALTER TABLE s.parent DROP CONSTRAINT ck_qty",
+                "ALTER TABLE s.parent ADD CONSTRAINT ck_qty CHECK (qty >= 0)",
+                "ALTER TABLE s.parent ADD CONSTRAINT ck_parent_1 CHECK (code <> 0)",
+                "COMMENT ON TABLE s.parent IS 'Parents'",
+                "COMMENT ON COLUMN s.parent.qty IS 'how many'",
+            ]
+        );
+        d.check_mut(n).unwrap().expression.clear();
+        assert!(d.plan().unwrap_err()[0].contains("needs an expression"));
+
+        // SQL Server: extended properties, added, changed and dropped.
+        let mut d = referenced(Engine::Mssql);
+        d.comments_known = true;
+        d.original.as_mut().unwrap().comment = "old".into();
+        d.original.as_mut().unwrap().columns[2].comment = "old".into();
+        d.table.columns[2].comment = String::new();
+        let id = column(&d, "id");
+        d.column_mut(id).unwrap().comment = "it's the key".into();
+        d.table.checks[0].name = "ck_amount".into();
+        assert_eq!(
+            body(&d),
+            [
+                "EXEC sp_rename N'[s].[ck_qty]', N'ck_amount', N'OBJECT'",
+                "EXEC sys.sp_dropextendedproperty N'MS_Description', N'SCHEMA', N's', N'TABLE', N'parent'",
+                "EXEC sys.sp_addextendedproperty N'MS_Description', N'it''s the key', N'SCHEMA', N's', \
+                 N'TABLE', N'parent', N'COLUMN', N'id'",
+                "EXEC sys.sp_dropextendedproperty N'MS_Description', N'SCHEMA', N's', N'TABLE', \
+                 N'parent', N'COLUMN', N'qty'",
+            ]
+        );
+
+        // A new table carries its checks, keys and comments.
+        let mut d = Design::new_table(Engine::Postgres, Some("s"));
+        d.table.name = "t".into();
+        d.table.comment = "T".into();
+        let ck = d.add_check();
+        d.check_mut(ck).unwrap().expression = "id > 0".into();
+        let fk = d.add_foreign_key();
+        let id = d.table.columns[0].id;
+        let f = d.foreign_key_mut(fk).unwrap();
+        f.columns = vec![id];
+        f.ref_table = "owner".into();
+        f.ref_columns = vec!["id".into()];
+        assert_eq!(
+            body(&d),
+            [
+                "CREATE TABLE s.t (\n    id integer NOT NULL,\n    PRIMARY KEY (id),\n    \
+                 CONSTRAINT ck_t_1 CHECK (id > 0),\n    \
+                 CONSTRAINT fk_t_1 FOREIGN KEY (id) REFERENCES s.owner (id)\n)",
+                "COMMENT ON TABLE s.t IS 'T'",
+            ]
         );
     }
 

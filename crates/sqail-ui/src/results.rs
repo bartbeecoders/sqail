@@ -507,6 +507,79 @@ impl Selection {
     }
 }
 
+/// A keyboard move of the selection's focus cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Move {
+    Up,
+    Down,
+    Left,
+    Right,
+    PageUp,
+    PageDown,
+    /// Home: the first column.
+    RowStart,
+    /// End: the last column.
+    RowEnd,
+    /// Ctrl+Home: the first row.
+    Top,
+    /// Ctrl+End: the last row.
+    Bottom,
+    /// Tab: the next cell, wrapping to the next row.
+    Next,
+    /// Shift+Tab: the previous cell, wrapping to the previous row.
+    Prev,
+}
+
+impl Selection {
+    /// The selection after a navigation key: the focus cell moves (`page`
+    /// rows for PageUp/PageDown) and stays inside the grid. `extend`
+    /// (Shift) keeps the anchor; otherwise the selection is the new cell.
+    /// Without a selection, the first cell is selected.
+    pub fn moved(
+        current: Option<Self>,
+        mv: Move,
+        extend: bool,
+        n_rows: usize,
+        n_cols: usize,
+        page: usize,
+    ) -> Self {
+        let Some(cur) = current else {
+            return Self::default();
+        };
+        let last_row = n_rows.saturating_sub(1);
+        let last_col = n_cols.saturating_sub(1);
+        let (r, c) = (cur.focus.0.min(last_row), cur.focus.1.min(last_col));
+        let to = match mv {
+            Move::Up => (r.saturating_sub(1), c),
+            Move::Down => ((r + 1).min(last_row), c),
+            Move::Left => (r, c.saturating_sub(1)),
+            Move::Right => (r, (c + 1).min(last_col)),
+            Move::PageUp => (r.saturating_sub(page), c),
+            Move::PageDown => ((r + page).min(last_row), c),
+            Move::RowStart => (r, 0),
+            Move::RowEnd => (r, last_col),
+            Move::Top => (0, c),
+            Move::Bottom => (last_row, c),
+            Move::Next if c < last_col => (r, c + 1),
+            Move::Next if r < last_row => (r + 1, 0),
+            Move::Prev if c > 0 => (r, c - 1),
+            Move::Prev if r > 0 => (r - 1, last_col),
+            Move::Next | Move::Prev => (r, c),
+        };
+        if extend {
+            Self {
+                anchor: cur.anchor,
+                focus: to,
+            }
+        } else {
+            Self {
+                anchor: to,
+                focus: to,
+            }
+        }
+    }
+}
+
 /// Clipboard copies stop here so a million-row result cannot freeze the UI.
 pub const COPY_ROW_LIMIT: usize = 50_000;
 
@@ -782,6 +855,58 @@ pub fn tsv_field(v: &str) -> std::borrow::Cow<'_, str> {
     } else {
         v.into()
     }
+}
+
+/// Parse tab-separated text the way [`tsv_field`], Excel and LibreOffice
+/// write it: fields end at a tab, rows at a line break (`\n`, `\r\n` or
+/// `\r`); a field that starts with `"` is quoted, may hold tabs and line
+/// breaks, and has its quotes doubled. A final line break ends the last row
+/// rather than starting an empty one.
+pub fn parse_tsv(text: &str) -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    let mut row = Vec::new();
+    let mut field = String::new();
+    // At the start of a field, where a quote opens a quoted field.
+    let mut at_start = true;
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' if at_start => {
+                loop {
+                    match chars.next() {
+                        Some('"') if chars.peek() == Some(&'"') => {
+                            chars.next();
+                            field.push('"');
+                        }
+                        Some('"') | None => break,
+                        Some(c) => field.push(c),
+                    }
+                }
+                at_start = false;
+            }
+            '\t' => {
+                row.push(std::mem::take(&mut field));
+                at_start = true;
+            }
+            '\r' | '\n' => {
+                if ch == '\r' && chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                row.push(std::mem::take(&mut field));
+                rows.push(std::mem::take(&mut row));
+                at_start = true;
+            }
+            c => {
+                field.push(c);
+                at_start = false;
+            }
+        }
+    }
+    if !at_start || !row.is_empty() {
+        row.push(field);
+        rows.push(row);
+    }
+    rows
 }
 
 #[cfg(test)]
@@ -1097,6 +1222,73 @@ mod tests {
         assert_eq!(selection_tsv(rs, &cell(0), true), "s\n\"a\tb\"\n");
         assert_eq!(tsv_field("plain"), "plain");
         assert_eq!(tsv_field("say \"hi\""), "\"say \"\"hi\"\"\"");
+    }
+
+    #[test]
+    fn tsv_round_trips_through_the_parser() {
+        let rows = vec![
+            vec![json!(1), json!("a\tb")],
+            vec![json!(2), Value::Null],
+            vec![json!(3), json!("line1\r\nline2 \"q\"")],
+            vec![json!(4), json!("\"")],
+        ];
+        let run = run_with(rows);
+        let sel = Selection {
+            anchor: (0, 0),
+            focus: (3, 1),
+        };
+        assert_eq!(
+            parse_tsv(&selection_tsv(&run.results[0], &sel, false)),
+            vec![
+                vec!["1", "a\tb"],
+                vec!["2", ""],
+                vec!["3", "line1\r\nline2 \"q\""],
+                vec!["4", "\""],
+            ]
+        );
+        // Excel's line endings, an unquoted quote, a trailing empty field,
+        // no final line break.
+        assert_eq!(
+            parse_tsv("a\tb\"c\r\nd\t\r\n\"\"\te"),
+            vec![vec!["a", "b\"c"], vec!["d", ""], vec!["", "e"]]
+        );
+        assert!(parse_tsv("").is_empty());
+        assert_eq!(parse_tsv("x\n"), vec![vec!["x"]]);
+        assert_eq!(parse_tsv("\n"), vec![vec![""]]);
+    }
+
+    #[test]
+    fn keys_move_the_selection() {
+        let at = |r, c| Selection {
+            anchor: (r, c),
+            focus: (r, c),
+        };
+        let mv = |s: Selection, m: Move, shift: bool| Selection::moved(Some(s), m, shift, 10, 3, 4);
+        assert_eq!(
+            Selection::moved(None, Move::Down, false, 10, 3, 4),
+            at(0, 0)
+        );
+        assert_eq!(mv(at(0, 0), Move::Up, false), at(0, 0), "stays inside");
+        assert_eq!(mv(at(0, 0), Move::Down, false), at(1, 0));
+        assert_eq!(mv(at(0, 2), Move::Right, false), at(0, 2));
+        assert_eq!(mv(at(5, 1), Move::Left, false), at(5, 0));
+        assert_eq!(mv(at(5, 1), Move::PageDown, false), at(9, 1));
+        assert_eq!(mv(at(5, 1), Move::PageUp, false), at(1, 1));
+        assert_eq!(mv(at(5, 1), Move::RowStart, false), at(5, 0));
+        assert_eq!(mv(at(5, 1), Move::RowEnd, false), at(5, 2));
+        assert_eq!(mv(at(5, 1), Move::Top, false), at(0, 1));
+        assert_eq!(mv(at(5, 1), Move::Bottom, false), at(9, 1));
+        assert_eq!(mv(at(5, 2), Move::Next, false), at(6, 0), "wraps");
+        assert_eq!(mv(at(6, 0), Move::Prev, false), at(5, 2), "wraps back");
+        assert_eq!(mv(at(9, 2), Move::Next, false), at(9, 2));
+        assert_eq!(mv(at(0, 0), Move::Prev, false), at(0, 0));
+        // Shift extends from the anchor.
+        let s = mv(mv(at(2, 0), Move::Down, true), Move::Right, true);
+        assert_eq!(s.anchor, (2, 0));
+        assert_eq!(s.focus, (3, 1));
+        // A whole-row selection moves from its focus corner.
+        let row = Selection::click(None, GridHit::Row(4), false, 10, 3);
+        assert_eq!(mv(row, Move::Down, false), at(5, 2));
     }
 
     #[test]

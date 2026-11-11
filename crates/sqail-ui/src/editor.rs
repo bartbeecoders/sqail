@@ -110,6 +110,8 @@ pub struct Tab {
     pub in_transaction: bool,
     /// Pinned tabs come first in the tab strip and have no close button.
     pub pinned: bool,
+    /// A background export is running on the tab's session; runs wait.
+    pub session_busy: bool,
     cursor_screen: Option<egui::Pos2>,
 }
 
@@ -137,6 +139,7 @@ impl Tab {
             autocommit: true,
             in_transaction: false,
             pinned: false,
+            session_busy: false,
             cursor_screen: None,
         }
     }

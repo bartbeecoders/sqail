@@ -5,7 +5,11 @@
 ))]
 use crate::client::{tls::TlsPreloginWrapper, tls_stream::create_tls_stream};
 use crate::{
-    client::{tls::MaybeTlsStream, AuthMethod, Config},
+    client::{
+        attention::{AttentionProgress, AttentionShared},
+        tls::MaybeTlsStream,
+        AttentionHandle, AuthMethod, Config,
+    },
     tds::{
         codec::{
             self, Encode, LoginMessage, Packet, PacketCodec, PacketHeader, PacketStatus,
@@ -83,6 +87,10 @@ where
     ///
     /// [`ensure_not_poisoned`]: Self::ensure_not_poisoned
     command_desync: Arc<AtomicBool>,
+    /// sqail patch: Attention requests from an `AttentionHandle`, and how far
+    /// this connection got with the current one.
+    attention: Arc<AttentionShared>,
+    attention_progress: AttentionProgress,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin + Send> Debug for Connection<S> {
@@ -175,6 +183,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
             buf: BytesMut::new(),
             poisoned: false,
             command_desync: Arc::new(AtomicBool::new(false)),
+            attention: Arc::default(),
+            attention_progress: AttentionProgress::Idle,
         };
 
         let fed_auth_required = matches!(config.auth, AuthMethod::AADToken(_));
@@ -423,6 +433,77 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         self.transport.flush().await
     }
 
+    /// sqail patch: a handle that requests an Attention for the request in
+    /// flight from outside the future that reads its response.
+    pub(crate) fn attention_handle(&self) -> AttentionHandle {
+        AttentionHandle(Arc::clone(&self.attention))
+    }
+
+    /// sqail patch: record a DONE token that acknowledges an Attention.
+    pub(crate) fn note_attention_ack(&mut self) {
+        self.attention_progress = AttentionProgress::Acked;
+    }
+
+    /// sqail patch: called on every read of a response. Writes a requested
+    /// Attention once, between packets, so it never splits a message. Only
+    /// while a response is outstanding (`!flushed`): with no request in
+    /// flight there is nothing to cancel, and an Attention would be
+    /// acknowledged in a response nobody reads.
+    fn poll_attention(&mut self, cx: &mut task::Context<'_>) -> crate::Result<()> {
+        loop {
+            match self.attention_progress {
+                AttentionProgress::Idle => {
+                    self.attention.register(cx.waker());
+                    if self.flushed || self.poisoned || !self.attention.is_requested() {
+                        return Ok(());
+                    }
+                    match self.transport.poll_ready_unpin(cx) {
+                        Poll::Ready(r) => r?,
+                        Poll::Pending => return Ok(()),
+                    }
+                    let id = self.context.next_packet_id();
+                    let packet = Packet::new(PacketHeader::attention(id), BytesMut::new());
+                    self.transport.start_send_unpin(packet)?;
+                    self.attention_progress = AttentionProgress::Flushing;
+                    event!(Level::DEBUG, "Sent an Attention for the running request");
+                }
+                AttentionProgress::Flushing => {
+                    // A pending flush is retried on the next read; reading
+                    // goes on meanwhile.
+                    match self.transport.poll_flush_unpin(cx) {
+                        Poll::Ready(r) => r?,
+                        Poll::Pending => return Ok(()),
+                    }
+                    self.attention_progress = AttentionProgress::Sent;
+                }
+                AttentionProgress::Sent | AttentionProgress::Acked => return Ok(()),
+            }
+        }
+    }
+
+    /// sqail patch: end an Attention requested through the handle. If one
+    /// went out and its acknowledgement has not been read (the server may
+    /// send it in a message of its own), read on to it; if one was requested
+    /// but not sent while a response is still unread, send it now. Clears
+    /// the request and returns whether there was one.
+    pub(crate) async fn finish_attention(&mut self) -> crate::Result<bool> {
+        let requested = self.attention.is_requested();
+        let progress = self.attention_progress;
+        let outcome = match progress {
+            AttentionProgress::Flushing | AttentionProgress::Sent => {
+                self.cancel_request().await.map(drop)
+            }
+            AttentionProgress::Idle if requested && !self.flushed => {
+                self.cancel_request().await.map(drop)
+            }
+            AttentionProgress::Idle | AttentionProgress::Acked => Ok(()),
+        };
+        self.attention.clear();
+        self.attention_progress = AttentionProgress::Idle;
+        outcome?;
+        Ok(requested || progress != AttentionProgress::Idle)
+    }
+
     /// Sends a TDS Attention signal (packet type `0x06`, MS-TDS section
     /// 2.2.1.6) to request cancellation of the request currently in flight on
     /// this connection, then drains the token stream until the acknowledging
@@ -443,19 +524,36 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         // valid cancellation.
         self.ensure_not_poisoned()?;
 
-        let id = self.context.next_packet_id();
-        let header = PacketHeader::attention(id);
+        // sqail patch: an Attention from the `AttentionHandle` may already be
+        // out; a second one could be acknowledged separately, so wait for
+        // that one's acknowledgement instead.
+        match self.attention_progress {
+            AttentionProgress::Sent => {}
+            AttentionProgress::Flushing => {
+                self.poisoned = true;
+                self.flush_sink().await?;
+                self.poisoned = false;
+            }
+            AttentionProgress::Idle | AttentionProgress::Acked => {
+                let id = self.context.next_packet_id();
+                let header = PacketHeader::attention(id);
 
-        // Mark the connection poisoned across the write, exactly like `send`:
-        // the Attention is a single end-of-message packet, but if the writing
-        // future is dropped mid-flight the header is only partly on the wire and
-        // the connection must not be silently reused. A clean flush clears it.
-        self.poisoned = true;
+                // Mark the connection poisoned across the write, exactly like
+                // `send`: the Attention is a single end-of-message packet, but
+                // if the writing future is dropped mid-flight the header is
+                // only partly on the wire and the connection must not be
+                // silently reused. A clean flush clears it.
+                self.poisoned = true;
 
-        // Attention has an empty payload; send just the 8-byte header.
-        self.write_to_wire(header, BytesMut::new()).await?;
-        self.flush_sink().await?;
-        self.poisoned = false;
+                // Attention has an empty payload; send just the 8-byte header.
+                self.write_to_wire(header, BytesMut::new()).await?;
+                self.flush_sink().await?;
+                self.poisoned = false;
+            }
+        }
+        // sqail patch: keeps `poll_attention` from sending another while the
+        // acknowledgement is read.
+        self.attention_progress = AttentionProgress::Sent;
 
         // sqail patch: when the request was still sending results, the server
         // ends that response message first and acknowledges the Attention in
@@ -463,6 +561,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         // more) instead of failing at the end of the first.
         for _ in 0..2 {
             if let Some(done) = TokenStream::new(self).flush_done_attention().await? {
+                self.attention_progress = AttentionProgress::Idle;
                 return Ok(done);
             }
             self.flushed = false;
@@ -909,6 +1008,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
                     buf: BytesMut::new(),
                     poisoned: false,
                     command_desync,
+                    attention: Arc::default(),
+                    attention_progress: AttentionProgress::Idle,
                 })
             }
         }
@@ -955,6 +1056,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
             buf: BytesMut::new(),
             poisoned,
             command_desync: Arc::new(AtomicBool::new(false)),
+            attention: Arc::default(),
+            attention_progress: AttentionProgress::Idle,
         }
     }
 }
@@ -1219,6 +1322,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Stream for Connection<S> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+
+        if let Err(e) = this.poll_attention(cx) {
+            return Poll::Ready(Some(Err(e)));
+        }
 
         match ready!(this.transport.try_poll_next_unpin(cx)) {
             Some(Ok(packet)) => {

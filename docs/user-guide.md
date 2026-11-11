@@ -229,13 +229,28 @@ spans runs, and the status bar shows **in transaction** while one is open.
 Switch off **Auto-commit** in the toolbar and sqail sends `BEGIN` before the
 next run whenever no transaction is open. Finish with **Commit** or
 **Rollback** in the toolbar.
-Closing a tab with an open transaction asks whether to commit or roll back.
+Closing a tab or switching its connection with an open transaction asks
+first; going ahead closes the tab's session, which rolls the transaction
+back. Quitting closes every tab's session the same way (it asks first when a
+transaction is open), so nothing is left holding locks on the server.
 Idle sessions close after 30 minutes on the service, which rolls them back.
 If a tab's session is gone (it expired, the service restarted, or its database
 connection dropped), the next run opens a new session. When a transaction was
 open, sqail doesn't run the statement: it reports that the session was lost
 and the transaction rolled back, and clears **Transaction open**. Run the
 statement again to start over in a new transaction.
+**Esc** stops only the running statement: the session keeps its open
+transaction, temp tables and `SET` options, as in SSMS. (On SQL Server with
+`SET XACT_ABORT ON`, the server rolls the transaction back.)
+
+A script stops at the first statement that fails. The statements before it
+keep their effect, as in psql and SSMS: each statement commits on its own
+unless the script (or Auto-commit off) opened a transaction, which the error
+then leaves open in the tab (or, outside a session, rolls back). On
+PostgreSQL the service splits the script like psql does; only when that
+depends on how the server reads backslashes in strings (`'a\'`) does the
+script run as one transaction, and the error then says that the statements
+before it were rolled back too.
 
 **Plans:** *Explain* (Ctrl+E) shows the estimated plan as a tree, with cost
 and row estimates and the most expensive nodes highlighted. *Explain analyze*
@@ -283,6 +298,12 @@ or XML plan.
   Rows are measured as they come into view, so the scrollbar can adjust
   slightly while you scroll through a large result.
 * Double-click a cell to see its full value (long text, JSON, binary as hex).
+* Values show as the database has them. Floats print like psql: very large
+  or small ones with an exponent (`1.1805916207174113e+21`, `1e-05`), and
+  `NaN`, `Infinity`, `-Infinity`. SQL Server `money` shows its four decimals
+  (`1.1000`), `datetime` its three (`13:45:12.997`), and `time`, `datetime2`
+  and `datetimeoffset` the column's own number of fraction digits, so
+  exported values and grid edits go back to the server unchanged.
 * **Export** saves the rows in the grid, or re-runs the query and streams
   every row straight to a file, as CSV, JSON, Excel (.xlsx) or SQL `INSERT`s.
   The re-run ignores your row limit and is only bounded by the
@@ -291,11 +312,18 @@ or XML plan.
   (so temp tables and uncommitted rows are there), and only if that
   statement just reads: when it writes, or sqail can't tell which statement
   produced the result, it refuses and asks you to run the `SELECT` on its own
-  first.
+  first. A session runs one query at a time, so runs in that tab wait until
+  the export finishes.
 * **✎ Edit data** is available when a result comes from a single table with a
   primary key. Edit cells (double-click or F2), add rows and delete rows. The
-  changes are shown as SQL before **Apply** runs them in one transaction.
-  Only `*` and plain column names are editable: aliased columns
+  changes are shown as SQL before **Apply** runs them, all or none, in the
+  tab's session: the same table the result came from, even after
+  `SET search_path`, `USE` or with a temp table of the same name, and with
+  the tab's uncommitted rows visible. With Auto-commit and no transaction
+  open, they are committed at once. Otherwise (Auto-commit off, or a
+  transaction open) they become part of the tab's transaction and are not
+  committed until you click **Commit**. Only `*` and plain column names are
+  editable: aliased columns
   (`a AS b`), literals and expressions stay read-only, and the primary key
   must be selected once, without an alias. Binary columns (`bytea`,
   `varbinary`, `BLOB`) are edited as `0x` followed by hex digits, as they are
@@ -361,7 +389,9 @@ be open at once. Pages:
   only for a new table.
 * **Indexes:** name, *Unique*, and the key columns in order (click the
   column list to add, remove or reorder). An index that backs a `UNIQUE`
-  constraint is marked *constraint* and stays one.
+  constraint is marked *constraint* and stays one. Descending keys show
+  `DESC`; `INCLUDE` columns, a `WHERE` filter and *clustered* are shown next
+  to the index but can't be edited here.
 * **Primary key:** the key columns in order and, on PostgreSQL and SQL
   Server, the constraint name. Key columns are always NOT NULL.
 * **Security:** who holds which privilege on the table (`SELECT`, `INSERT`,
@@ -381,11 +411,16 @@ changed.
 Good to know:
 
 * Renames are real renames (`RENAME COLUMN`, `sp_rename`), so data stays.
-* Changing an index drops and re-creates it as a plain index: PostgreSQL
-  index methods, `INCLUDE` columns and `WHERE` clauses are not kept.
+* Changing an index drops and re-creates it. Its sort order (`DESC`),
+  `INCLUDE` columns, `WHERE` filter and, on SQL Server, `CLUSTERED` or
+  `NONCLUSTERED` are kept (the Indexes page shows them); a PostgreSQL index
+  method other than B-tree is not.
+* Dropping a column takes it out of the indexes that include it (they are
+  re-created without it); an index whose filter uses the column is dropped.
 * SQL Server: changing a column's type or NULL-ness re-creates the indexes
-  and key on it, and a default is dropped and re-added by its generated
-  name.
+  that use it (as a key, included or in the filter) and the key on it, and a
+  default is dropped and re-added by its generated name. *Open in editor*
+  gives a script that runs as one batch.
 * SQLite can change only a few things in place (renames, adding and dropping
   columns, indexes). Anything else (a type, NULL-ness, a default, the
   primary key) rebuilds the table: the rows are copied into a new table

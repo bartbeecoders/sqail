@@ -699,14 +699,39 @@ fn indexes(ui: &mut egui::Ui, d: &mut Designer) {
                         .expect("listed");
                     design.index_status(i)
                 };
-                let labels: Vec<String> = {
+                let (labels, details): (Vec<String>, Vec<String>) = {
                     let i = design
                         .table
                         .indexes
                         .iter()
                         .find(|i| i.id == iid)
                         .expect("listed");
-                    i.parts.iter().map(|p| design.part_label(p)).collect()
+                    let labels = i
+                        .parts
+                        .iter()
+                        .map(|p| {
+                            let l = design.part_label(p);
+                            if i.descending.contains(p) {
+                                format!("{l} DESC")
+                            } else {
+                                l
+                            }
+                        })
+                        .collect();
+                    // Kept when the index is re-created; not editable here.
+                    let mut details = Vec::new();
+                    if i.clustered == Some(true) {
+                        details.push("clustered".to_string());
+                    }
+                    if !i.include.is_empty() {
+                        let names: Vec<String> =
+                            i.include.iter().map(|c| design.column_name(*c)).collect();
+                        details.push(format!("INCLUDE ({})", names.join(", ")));
+                    }
+                    if !i.filter.trim().is_empty() {
+                        details.push(format!("WHERE {}", i.filter.trim()));
+                    }
+                    (labels, details)
                 };
                 let i = design.index_mut(iid).expect("listed");
                 ui.add_sized(
@@ -767,6 +792,9 @@ fn indexes(ui: &mut egui::Ui, d: &mut Designer) {
                                 "Backs a UNIQUE constraint"
                             });
                     }
+                    for d in &details {
+                        ui.label(RichText::new(d).small().weak());
+                    }
                     status_label(ui, status);
                 });
                 if ui.small_button("×").on_hover_text("Drop index").clicked() {
@@ -786,8 +814,8 @@ fn indexes(ui: &mut egui::Ui, d: &mut Designer) {
         ui.add_space(6.0);
         ui.label(
             RichText::new(
-                "An index you change is re-created as a plain B-tree index (method, \
-                 INCLUDE columns and WHERE clause are not kept).",
+                "An index you change is re-created as a B-tree index: its sort order, \
+                 INCLUDE columns and WHERE clause are kept, another index method is not.",
             )
             .small()
             .weak(),

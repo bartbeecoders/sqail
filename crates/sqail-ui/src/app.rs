@@ -85,6 +85,10 @@ pub enum Msg {
         /// with it any open transaction.
         session_gone: bool,
     },
+    /// A background export on the tab's session finished.
+    SessionFree {
+        tab: u64,
+    },
     Schema(SchemaMsg),
     OpenInTab {
         connection: Uuid,
@@ -574,6 +578,52 @@ impl SqailApp {
         self.active = self.active.min(self.tabs.len() - 1);
     }
 
+    /// Bind tab `idx` to `connection`. Sessions are per connection, so the
+    /// old one is closed; with an open transaction this asks first.
+    pub fn set_connection(&mut self, idx: usize, connection: Option<Uuid>) {
+        let Some(tab) = self.tabs.get_mut(idx) else {
+            return;
+        };
+        if tab.connection == connection {
+            return;
+        }
+        if tab.in_transaction {
+            self.dialog = Dialog::ConfirmSwitchTransaction(idx, connection);
+            return;
+        }
+        tab.connection = connection;
+        let session = tab.session.take();
+        if let (Some(client), Some((_, session))) = (self.service.client.clone(), session) {
+            self.worker.detach(async move {
+                let _ = client.close_session(session).await;
+            });
+        }
+    }
+
+    /// Cancel every running query and close every tab's session, which rolls
+    /// back open transactions. Waits at most `timeout`; used when quitting.
+    pub fn close_sessions(&mut self, timeout: Duration) {
+        let Some(client) = self.service.client.clone() else {
+            return;
+        };
+        let mut queries = Vec::new();
+        let mut sessions = Vec::new();
+        for tab in &mut self.tabs {
+            if let Some(run) = tab.run.as_ref().filter(|r| r.running) {
+                queries.extend(run.query_id);
+            }
+            sessions.extend(tab.session.take().map(|(_, s)| s));
+            tab.in_transaction = false;
+        }
+        if queries.is_empty() && sessions.is_empty() {
+            return;
+        }
+        self.worker.block_on(timeout, async move {
+            futures::future::join_all(queries.into_iter().map(|q| client.cancel(q))).await;
+            futures::future::join_all(sessions.into_iter().map(|s| client.close_session(s))).await;
+        });
+    }
+
     pub fn engine_of(&self, conn: Option<Uuid>) -> Option<Engine> {
         conn.and_then(|c| self.service.connection(c))
             .map(|c| c.engine)
@@ -594,6 +644,13 @@ impl SqailApp {
         };
         if tab.run.as_ref().is_some_and(|r| r.running) {
             self.notify("A query is already running in this tab.", true);
+            return;
+        }
+        if tab.session_busy {
+            self.notify(
+                "Wait for the export to finish; it uses this tab's session.",
+                true,
+            );
             return;
         }
         let sql = sql.trim().to_string();
@@ -771,13 +828,16 @@ impl SqailApp {
                 }
             }
             Msg::Connections(Ok(list)) => {
-                // Tabs bound to a deleted profile lose their binding.
+                // Tabs bound to a deleted profile lose their binding. The
+                // service closed its sessions, rolling back any transaction.
                 for tab in &mut self.tabs {
                     if tab
                         .connection
                         .is_some_and(|c| !list.iter().any(|x| x.id == c))
                     {
                         tab.connection = None;
+                        tab.session = None;
+                        tab.in_transaction = false;
                     }
                 }
                 if self.tabs.iter().all(|t| t.connection.is_none())
@@ -921,16 +981,26 @@ impl SqailApp {
                 error,
                 session_gone,
             } => {
-                if let Some(t) = self.tab_mut(tab) {
-                    // The session may be broken; start fresh next time.
-                    t.session = None;
+                // The session stays unless it is really gone: any other failure
+                // (e.g. 409 "session busy") leaves it, its settings and its
+                // transaction intact. Failures of stale runs change nothing.
+                if let Some(t) = self
+                    .tab_mut(tab)
+                    .filter(|t| t.run.as_ref().is_some_and(|r| r.id == run))
+                {
                     if session_gone {
+                        t.session = None;
                         t.in_transaction = false;
                     }
-                    if let Some(r) = t.run.as_mut().filter(|r| r.id == run) {
+                    if let Some(r) = t.run.as_mut() {
                         r.fail(error);
-                        self.record_history(tab);
                     }
+                    self.record_history(tab);
+                }
+            }
+            Msg::SessionFree { tab } => {
+                if let Some(t) = self.tab_mut(tab) {
+                    t.session_busy = false;
                 }
             }
             Msg::Schema(m) => {
@@ -1006,8 +1076,26 @@ impl SqailApp {
             }
             Msg::EditsApplied { tab, result } => match result {
                 Ok(n) => {
+                    let committed = matches!(
+                        &self.dialog,
+                        Dialog::ApplyEdits(d) if d.tx == crate::editing::EditTx::Commit
+                    );
                     self.dialog = Dialog::None;
-                    self.notify(format!("Applied {n} change(s)."), false);
+                    if committed {
+                        self.notify(format!("Applied {n} change(s)."), false);
+                    } else {
+                        // They are part of the tab's transaction now.
+                        if let Some(t) = self.tab_mut(tab) {
+                            t.in_transaction = true;
+                        }
+                        self.notify(
+                            format!(
+                                "Applied {n} change(s), not committed yet: \
+                                 Commit or Rollback in the toolbar."
+                            ),
+                            false,
+                        );
+                    }
                     if let Some(idx) = self.tabs.iter().position(|t| t.id == tab) {
                         let sql = self.tabs[idx].run.as_ref().map(|r| r.sql.clone());
                         if let Some(sql) = sql {
@@ -1165,6 +1253,10 @@ impl SqailApp {
         if run.results.len() != 1 {
             return Err("Only a query with a single result can be edited".into());
         }
+        // Edits run on the session the result came from, never a fresh one.
+        tab.session
+            .filter(|(c, _)| Some(*c) == tab.connection)
+            .ok_or("The tab's session was closed; run the query again to edit")?;
         crate::editing::source_table(&run.sql, conn.engine)
             .map(|_| ())
             .ok_or_else(|| {
@@ -1179,7 +1271,12 @@ impl SqailApp {
         let Some(tab) = self.tabs.get_mut(idx) else {
             return;
         };
-        let (Some(conn), Some(run)) = (tab.connection, tab.run.as_mut()) else {
+        let session = tab
+            .session
+            .filter(|(c, _)| Some(*c) == tab.connection)
+            .map(|(_, s)| s);
+        let (Some(conn), Some(session), Some(run)) = (tab.connection, session, tab.run.as_mut())
+        else {
             return;
         };
         let Some(engine) = self.service.connection(conn).map(|c| c.engine) else {
@@ -1192,8 +1289,10 @@ impl SqailApp {
         let columns = run.results[0].columns.clone();
         let (tab_id, run_id) = (tab.id, run.id);
         self.worker.run(async move {
+            // Look the table up where the query ran: the session's search
+            // path, database and temporary tables decide which table it is.
             let state = match client
-                .columns(conn, source.schema.as_deref(), &source.table)
+                .session_columns(session, source.schema.as_deref(), &source.table)
                 .await
             {
                 Ok(cols) if cols.is_empty() => Err(format!("table {} not found", source.table)),
@@ -1215,9 +1314,23 @@ impl SqailApp {
         let Some(tab) = self.tabs.get(idx) else {
             return;
         };
-        let (Some(conn), Some(run)) = (tab.connection, tab.run.as_ref()) else {
+        let session = tab
+            .session
+            .filter(|(c, _)| Some(*c) == tab.connection)
+            .map(|(_, s)| s);
+        let (Some(session), Some(run)) = (session, tab.run.as_ref()) else {
+            self.notify(
+                "The tab's session was closed; run the query again to edit.",
+                true,
+            );
             return;
         };
+        if tab.session_busy {
+            return self.notify(
+                "Wait for the export to finish; it uses this tab's session.",
+                true,
+            );
+        }
         let Some((ri, e)) = run.edit.as_ref() else {
             return;
         };
@@ -1234,7 +1347,8 @@ impl SqailApp {
             .collect();
         self.dialog = Dialog::ApplyEdits(Box::new(crate::dialogs::ApplyEdits {
             tab: tab.id,
-            connection: conn,
+            session,
+            tx: crate::editing::EditTx::for_tab(tab.autocommit, tab.in_transaction),
             engine: e.engine,
             statements: stmts,
             previews,
@@ -1313,7 +1427,15 @@ impl SqailApp {
                 Some((_, s)) => On::Session(s),
                 None => On::Connection(conn),
             };
+            // The session runs one query at a time: runs in the tab wait
+            // for the export instead of failing with "session busy".
+            let busy = matches!(on, On::Session(_));
+            if busy && tab.session_busy {
+                return self.notify("An export is already running in this tab.", true);
+            }
+            let tab_id = tab.id;
             self.worker.spawn(move |sink| async move {
+                let _free = busy.then(|| FreeSession(sink.clone(), tab_id));
                 let Some(path) = pick().await else { return };
                 let mut last = 0;
                 let progress = |n: u64| {
@@ -1339,6 +1461,9 @@ impl SqailApp {
                     },
                 });
             });
+            if busy {
+                self.tabs[idx].session_busy = true;
+            }
         } else {
             let crate::results::Pane::Result(i) = run.pane else {
                 self.notify("Show a result set to export it.", true);
@@ -2097,6 +2222,7 @@ impl SqailApp {
             return;
         };
         let mut action = None;
+        let mut switch = None;
         // Wraps rather than widening the central panel when the window is narrow.
         ui.horizontal_wrapped(|ui| {
             // Whole widgets move to the next line; their text never wraps.
@@ -2128,7 +2254,8 @@ impl SqailApp {
                     }
                 });
             if tab.connection != before {
-                tab.session = None; // sessions are per connection
+                switch = Some(tab.connection);
+                tab.connection = before; // set_connection decides
             }
             let running = tab.run.as_ref().is_some_and(|r| r.running);
             // Enabled one by one (not in a child `Ui`) so they wrap with the row.
@@ -2168,6 +2295,9 @@ impl SqailApp {
                 }
             }
         });
+        if let Some(conn) = switch {
+            self.set_connection(idx, conn);
+        }
         if let Some(a) = action {
             self.editor_action(a);
         }
@@ -2331,6 +2461,9 @@ fn is_session_gone(e: &sqail_client::Error) -> bool {
 impl eframe::App for SqailApp {
     fn on_exit(&mut self) {
         self.autosave_workspace(true);
+        // Don't leave sessions (and their transactions and locks) behind
+        // until the service's idle timeout; don't hang the quit either.
+        self.close_sessions(Duration::from_secs(2));
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -2434,5 +2567,15 @@ impl eframe::App for SqailApp {
         {
             ctx.request_repaint_after(Duration::from_secs(1));
         }
+    }
+}
+
+/// Tells the UI that a background task no longer uses the tab's session,
+/// however that task ends.
+struct FreeSession(crate::worker::Sink, u64);
+
+impl Drop for FreeSession {
+    fn drop(&mut self) {
+        self.0.send(Msg::SessionFree { tab: self.1 });
     }
 }

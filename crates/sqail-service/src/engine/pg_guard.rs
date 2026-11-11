@@ -11,6 +11,9 @@
 //! its own. Where the lexing depends on server settings
 //! (`standard_conforming_strings`), the script is lexed both ways and must
 //! pass both.
+//!
+//! The same lexer splits scripts into statements the way psql does, so that
+//! each one runs (and commits) on its own.
 
 /// A token, as far as the check needs one.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +26,8 @@ enum Tok {
     UnicodeIdent,
     Str,
     Semi,
+    Open,
+    Close,
     Other,
 }
 
@@ -34,10 +39,17 @@ fn is_ident_char(c: char) -> bool {
     is_ident_start(c) || c.is_ascii_digit() || c == '$'
 }
 
-/// Tokenize `sql`. `backslash_strings`: treat `\` as an escape in plain
-/// `'...'` strings too, as the server does with
-/// `standard_conforming_strings = off`.
 fn lex(sql: &str, backslash_strings: bool) -> Vec<Tok> {
+    lex_spans(sql, backslash_strings)
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect()
+}
+
+/// Tokenize `sql`, with the index of the character each token starts at.
+/// `backslash_strings`: treat `\` as an escape in plain `'...'` strings too,
+/// as the server does with `standard_conforming_strings = off`.
+fn lex_spans(sql: &str, backslash_strings: bool) -> Vec<(Tok, usize)> {
     let c: Vec<char> = sql.chars().collect();
     let n = c.len();
     let mut out = Vec::new();
@@ -58,6 +70,11 @@ fn lex(sql: &str, backslash_strings: bool) -> Vec<Tok> {
     while i < n {
         let ch = c[i];
         let next = c.get(i + 1).copied();
+        let start = i;
+        let mut out = Pusher {
+            out: &mut out,
+            start,
+        };
         match ch {
             _ if ch.is_whitespace() => i += 1,
             '-' if next == Some('-') => {
@@ -94,6 +111,14 @@ fn lex(sql: &str, backslash_strings: bool) -> Vec<Tok> {
             }
             ';' => {
                 out.push(Tok::Semi);
+                i += 1;
+            }
+            '(' => {
+                out.push(Tok::Open);
+                i += 1;
+            }
+            ')' => {
+                out.push(Tok::Close);
                 i += 1;
             }
             '$' => {
@@ -161,6 +186,18 @@ fn lex(sql: &str, backslash_strings: bool) -> Vec<Tok> {
         }
     }
     out
+}
+
+/// Pushes tokens with the start of the token being lexed.
+struct Pusher<'a> {
+    out: &'a mut Vec<(Tok, usize)>,
+    start: usize,
+}
+
+impl Pusher<'_> {
+    fn push(&mut self, t: Tok) {
+        self.out.push((t, self.start));
+    }
 }
 
 /// A `"quoted"` identifier body starting at `i`: its text and the index
@@ -253,9 +290,191 @@ pub fn single_query(sql: &str) -> bool {
     })
 }
 
+/// One statement of a script.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Statement<'a> {
+    /// From after the previous statement's `;` up to (not including) its
+    /// own, comments and whitespace in front included.
+    pub sql: &'a str,
+    /// Characters of the script before `sql` (server error positions count
+    /// characters).
+    pub offset: usize,
+}
+
+/// `(start, end)` character ranges of the statements in `toks`, split like
+/// psql: on `;` outside parentheses and outside the `BEGIN ... END` body of
+/// a `CREATE [OR REPLACE] FUNCTION|PROCEDURE`. Ranges without a token
+/// (`;;`, a trailing comment) are left out.
+fn statement_ranges(toks: &[(Tok, usize)], n: usize) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut has_token = false;
+    let mut parens = 0u32;
+    let mut begins = 0u32;
+    let mut words: Vec<&str> = Vec::new();
+    for (t, at) in toks {
+        match t {
+            Tok::Semi if parens == 0 && begins == 0 => {
+                if has_token {
+                    out.push((start, *at));
+                }
+                start = at + 1;
+                has_token = false;
+                words.clear();
+                continue;
+            }
+            Tok::Open => parens += 1,
+            Tok::Close => parens = parens.saturating_sub(1),
+            Tok::Word(w) => {
+                if words.len() < 4 {
+                    words.push(w);
+                }
+                let routine = matches!(
+                    words.as_slice(),
+                    ["create", "function" | "procedure", ..]
+                        | ["create", "or", "replace", "function" | "procedure", ..]
+                );
+                if routine && parens == 0 {
+                    match w.as_str() {
+                        "begin" => begins += 1,
+                        "case" if begins > 0 => begins += 1,
+                        "end" if begins > 0 => begins -= 1,
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        has_token = true;
+    }
+    if has_token {
+        out.push((start, n));
+    }
+    out
+}
+
+/// Split a script into its statements, or `None` when that depends on how
+/// the server lexes strings (`standard_conforming_strings`, `'a\'`).
+pub fn split_statements(sql: &str) -> Option<Vec<Statement<'_>>> {
+    let n = sql.chars().count();
+    let [plain, backslash] =
+        [false, true].map(|backslash| statement_ranges(&lex_spans(sql, backslash), n));
+    if plain != backslash {
+        return None;
+    }
+    let bytes: Vec<usize> = sql
+        .char_indices()
+        .map(|(b, _)| b)
+        .chain([sql.len()])
+        .collect();
+    Some(
+        plain
+            .into_iter()
+            .map(|(start, end)| Statement {
+                sql: &sql[bytes[start]..bytes[end]],
+                offset: start,
+            })
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn split(sql: &str) -> Option<Vec<&str>> {
+        split_statements(sql).map(|v| v.into_iter().map(|s| s.sql.trim()).collect())
+    }
+
+    #[test]
+    fn scripts_split_like_psql() {
+        let cases: &[(&str, &[&str])] = &[
+            ("select 1", &["select 1"]),
+            ("select 1;", &["select 1"]),
+            (
+                "insert into zz values (1); insert into zz values (2); select 1/0",
+                &[
+                    "insert into zz values (1)",
+                    "insert into zz values (2)",
+                    "select 1/0",
+                ],
+            ),
+            (
+                "select 1;; ; select 2; -- done\n",
+                &["select 1", "select 2"],
+            ),
+            (
+                "select 'a;b', \"c;d\", $$e;f$$, $t$g;h$t$, E'i\\';j' /* k; /* l; */ */; select 2",
+                &[
+                    "select 'a;b', \"c;d\", $$e;f$$, $t$g;h$t$, E'i\\';j' /* k; /* l; */ */",
+                    "select 2",
+                ],
+            ),
+            // Rules with several actions keep theirs.
+            (
+                "create rule r as on insert to t do also (insert into a values (1); insert into b values (2)); select 1",
+                &[
+                    "create rule r as on insert to t do also (insert into a values (1); insert into b values (2))",
+                    "select 1",
+                ],
+            ),
+            // SQL-standard function bodies.
+            (
+                "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; SELECT CASE WHEN true THEN 2 END; END; SELECT f()",
+                &[
+                    "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; SELECT CASE WHEN true THEN 2 END; END",
+                    "SELECT f()",
+                ],
+            ),
+            (
+                "create or replace procedure p() begin atomic insert into t values (1); end; call p()",
+                &[
+                    "create or replace procedure p() begin atomic insert into t values (1); end",
+                    "call p()",
+                ],
+            ),
+            // BEGIN/END elsewhere are statements of their own.
+            (
+                "begin; select case when true then 1 end; end; commit",
+                &["begin", "select case when true then 1 end", "end", "commit"],
+            ),
+            (
+                "create function g() returns int as $$ begin return 1; end $$ language plpgsql; select g()",
+                &[
+                    "create function g() returns int as $$ begin return 1; end $$ language plpgsql",
+                    "select g()",
+                ],
+            ),
+            ("", &[]),
+            ("-- only a comment", &[]),
+        ];
+        for (sql, want) in cases {
+            assert_eq!(split(sql).as_deref(), Some(*want), "{sql}");
+        }
+    }
+
+    #[test]
+    fn statements_know_their_offset() {
+        let sql = "select 'é'; select x";
+        let stmts = split_statements(sql).unwrap();
+        assert_eq!(stmts[1].sql, " select x");
+        assert_eq!(stmts[1].offset, 11);
+        assert_eq!(
+            sql.chars().skip(stmts[1].offset).collect::<String>(),
+            " select x"
+        );
+    }
+
+    #[test]
+    fn ambiguous_strings_are_not_split() {
+        // Two statements with standard_conforming_strings on, one with it off.
+        assert_eq!(split(r"select 'a\'; select 2; -- '"), None);
+        // A backslash that does not hide a quote is fine.
+        assert_eq!(
+            split(r"select 'C:\temp'; select 2").as_deref(),
+            Some(&[r"select 'C:\temp'", "select 2"][..])
+        );
+    }
 
     #[test]
     fn single_queries() {

@@ -17,6 +17,7 @@
 mod tls;
 
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::BytesMut;
@@ -140,7 +141,22 @@ pub struct Client {
     http: reqwest::Client,
     base: String,
     token: String,
+    observer: Option<Observer>,
 }
+
+/// What one request showed about the service (see [`Client::observe`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reach {
+    /// The service answered, with any status but 401.
+    Answered,
+    /// The service could not be reached (refused, reset, TLS failure, no
+    /// connection within the connect timeout).
+    Unreachable(String),
+    /// The service rejected the token (401).
+    Unauthorized(String),
+}
+
+type Observer = Arc<dyn Fn(Reach) + Send + Sync>;
 
 /// A running query: its id (for [`Client::cancel`]) and its event stream.
 pub struct QueryStream {
@@ -207,7 +223,22 @@ impl Client {
             http,
             base: url.to_string(),
             token: target.token.clone(),
+            observer: None,
         })
+    }
+
+    /// Call `f` after every request with what it showed about the service,
+    /// so a UI can notice the service going away or the token being revoked
+    /// whichever request runs into it. Clones share the observer.
+    pub fn observe(mut self, f: impl Fn(Reach) + Send + Sync + 'static) -> Self {
+        self.observer = Some(Arc::new(f));
+        self
+    }
+
+    fn report(&self, reach: impl FnOnce() -> Reach) {
+        if let Some(o) = &self.observer {
+            o(reach());
+        }
     }
 
     fn req(&self, method: Method, path: &str) -> RequestBuilder {
@@ -216,9 +247,21 @@ impl Client {
             .bearer_auth(&self.token)
     }
 
-    async fn send(rb: RequestBuilder) -> Result<reqwest::Response> {
-        let res = rb.send().await.map_err(Error::from_reqwest)?;
+    async fn send(&self, rb: RequestBuilder) -> Result<reqwest::Response> {
+        let res = match rb.send().await {
+            Ok(res) => res,
+            Err(e) => {
+                // A slow answer (request timeout) is not a lost service.
+                let slow = e.is_timeout() && !e.is_connect();
+                let err = Error::from_reqwest(e);
+                if !slow {
+                    self.report(|| Reach::Unreachable(err.to_string()));
+                }
+                return Err(err);
+            }
+        };
         if res.status().is_success() {
+            self.report(|| Reach::Answered);
             return Ok(res);
         }
         let status = res.status();
@@ -229,27 +272,35 @@ impl Client {
             code: "http_error".into(),
             detail: (!text.is_empty()).then_some(text),
         });
-        Err(Error::Api {
+        let err = Error::Api {
             status: status.as_u16(),
             problem,
-        })
+        };
+        self.report(|| {
+            if is_auth_error(&err) {
+                Reach::Unauthorized(err.to_string())
+            } else {
+                Reach::Answered
+            }
+        });
+        Err(err)
     }
 
-    async fn json<T: DeserializeOwned>(rb: RequestBuilder) -> Result<T> {
-        let res = Self::send(rb.timeout(Duration::from_secs(60))).await?;
+    async fn json<T: DeserializeOwned>(&self, rb: RequestBuilder) -> Result<T> {
+        let res = self.send(rb.timeout(Duration::from_secs(60))).await?;
         res.json().await.map_err(Error::from_reqwest)
     }
 
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
-        Self::json(self.req(Method::GET, path)).await
+        self.json(self.req(Method::GET, path)).await
     }
 
     async fn post<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
-        Self::json(self.req(Method::POST, path).json(body)).await
+        self.json(self.req(Method::POST, path).json(body)).await
     }
 
     async fn delete(&self, path: &str) -> Result<()> {
-        Self::send(
+        self.send(
             self.req(Method::DELETE, path)
                 .timeout(Duration::from_secs(30)),
         )
@@ -304,7 +355,7 @@ impl Client {
     }
 
     pub async fn update_connection(&self, id: Uuid, input: &ConnectionInput) -> Result<Connection> {
-        Self::json(
+        self.json(
             self.req(Method::PUT, &format!("/v1/connections/{id}"))
                 .json(input),
         )
@@ -369,12 +420,13 @@ impl Client {
             On::Connection(id) => format!("/v1/connections/{id}/query"),
             On::Session(id) => format!("/v1/sessions/{id}/query"),
         };
-        let res = Self::send(
-            self.req(Method::POST, &path)
-                .header(QUERY_ID_HEADER, query_id.to_string())
-                .json(req),
-        )
-        .await?;
+        let res = self
+            .send(
+                self.req(Method::POST, &path)
+                    .header(QUERY_ID_HEADER, query_id.to_string())
+                    .json(req),
+            )
+            .await?;
         Ok(QueryStream {
             query_id,
             events: Box::pin(ndjson(res)),

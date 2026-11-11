@@ -51,6 +51,12 @@ If the service requires client certificates (mTLS), add the certificate and
 key (PEM) to the service entry in `settings.toml`; see
 [Files](#files-and-settings).
 
+The status bar shows whether the service is reachable, as of the last
+request: when a request can't reach it, the dot turns red and a
+**Reconnect** button appears; it turns green again as soon as a request gets
+through. When the service no longer accepts the token (revoked or expired),
+sqail asks for a new one.
+
 ## Connections
 
 **+ Connection** under *Connections* in the sidebar (or *Connections → New
@@ -61,6 +67,13 @@ For PostgreSQL and SQL Server, fill in the server and login first, then click
 **⏷** next to *Database* to choose from the databases that login can access
 (you can still type a name). The admin page's *List* button does the same.
 Listing needs an admin token, as *Test* does for an unsaved connection.
+
+Each tab runs on the connection chosen in its toolbar. A tab gets one by
+itself only when the service has exactly one connection; with several,
+choose one first (new tabs take the current tab's connection).
+
+A click beside the connection form doesn't close it; *Cancel* or Esc on a
+form you changed asks before discarding it.
 
 Double-click a connection in the sidebar to edit it; *New query tab* is in
 its right-click menu. *Duplicate…* in the same menu opens the form filled in
@@ -181,8 +194,9 @@ an admin token.
 |---|---|
 | Ctrl+Enter | Run the statement under the cursor, or the selection |
 | F5 / Ctrl+Shift+Enter | Run the whole script |
-| Esc | Cancel the running query |
+| Esc | Cancel the running query (Esc in the find bar, the completion list or a grid cell closes that first) |
 | Ctrl+E | Show the plan of the statement under the cursor |
+| Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z) | Undo / redo. Typing undoes a word or a line at a time (and at each pause, paste or cursor jump); a format, completion, replace, drop, insert, indent or comment toggle is one step of its own, so undoing it keeps what you typed before it |
 | Ctrl+Space | Completion (also opens by itself while you type a name it can finish, but not when the word is already a whole name or keyword, nor in comments and strings; a space, comma or other punctuation closes it, so Enter and Tab go to the text) |
 | Ctrl+Shift+F | Format the selection or the whole tab. It only changes layout and keyword case: when the formatter would change more (some string literals, `0x…` numbers, Postgres `E'…'` or dollar-quoted strings), the text is left alone with a notice |
 | Tab / Shift+Tab | Indent / outdent the selected lines (without a selection, Tab types a tab and Shift+Tab outdents the line) |
@@ -200,6 +214,14 @@ an admin token.
 | Ctrl+Shift+A | Expand / collapse the [AI assistant](#ai-assistant) |
 | Ctrl+, | [Settings](#settings) |
 
+These shortcuts act on the editor, so they only work when the SQL editor
+has the keyboard focus, or nothing you can type in has it: while you type
+in the find bar, a filter, a grid cell, a table designer or the assistant,
+Ctrl+W, Ctrl+Enter, Ctrl+S and the like do nothing. The command palette,
+Settings and the sidebar and assistant toggles work everywhere. A shortcut
+needs exactly its modifiers (only Shift may be added, for keys like `+`
+that need it), so AltGr combinations type their character.
+
 **Pinned tabs.** Right-click a tab for *Pin tab* (or *File → Pin / unpin
 tab*). Pinned tabs get a row of their own, labelled *Pinned*, above the
 other tabs; they are tinted, marked ⚑ and have no close button, and middle
@@ -208,12 +230,29 @@ them. Untick *Pinned tabs on a separate row* (in the same menu, or Settings →
 Tabs) to keep them at the front of the one tab row instead. Pins are
 remembered with the open tabs.
 
+**File encodings.** sqail opens UTF-8 files with or without a byte-order
+mark, UTF-16 (LE or BE, with a byte-order mark, as older SSMS versions
+save), and treats any other file that isn't valid UTF-8 as Windows-1252
+("ANSI"). Windows line endings (CRLF) become plain line breaks in the
+editor. Saving writes the file back with its own encoding, byte-order mark
+and line endings (CRLF or LF, whichever the file mostly used), so saving an
+untouched file leaves it unchanged. New files are UTF-8 without a
+byte-order mark, with LF line endings on Linux and CRLF on Windows. If you
+type a character a Windows-1252 file can't hold, sqail saves that file as
+UTF-8 and says so.
+
 The script splitter understands comments, string and identifier quoting,
 Postgres dollar quotes and SQL Server `GO` lines, so *Run statement* picks
 exactly the statement you're in. On SQL Server a `CREATE`/`ALTER`
 procedure, function, trigger or view runs to the next `GO` (or the end of
 the tab), with or without `BEGIN … END`, so semicolons and blank lines in
-its body don't cut it short. Completion knows keywords, schemas, tables,
+its body don't cut it short. A SQL Server batch from a `DECLARE` on also
+runs to the next `GO`, since its variables only exist in that batch, and
+`IF … ; ELSE …` stays one statement. A `GO` line is `GO`, optionally with a
+repeat count of 1 or more (`GO 0` is not a separator, for the editor nor
+for the service). An unclosed `(` or `CASE` ends at a blank line followed by
+a new statement (`SELECT`, `DELETE`, …), so it doesn't pull the rest of the
+script into the statement under the cursor. Completion knows keywords, schemas, tables,
 columns and functions of the current connection. After `alias.` it lists
 that alias's columns: tables (`FROM orders o`), CTEs (`WITH x AS (…)`) and
 subqueries (`FROM (SELECT …) s`), with the innermost subquery winning when
@@ -251,6 +290,13 @@ PostgreSQL the service splits the script like psql does; only when that
 depends on how the server reads backslashes in strings (`'a\'`) does the
 script run as one transaction, and the error then says that the statements
 before it were rolled back too.
+
+`COPY … TO STDOUT` (text or CSV) on PostgreSQL shows its output as a result
+with one `copy` column, a row per line. `COPY … FROM STDIN`, as in pg_dump
+output, can't be run: sqail refuses the whole script before running any of
+it, so the tab's transaction and temp tables stay as they were. Use
+*Import CSV*, `INSERT` statements, or `COPY … FROM` a file on the database
+server instead.
 
 **Plans:** *Explain* (Ctrl+E) shows the estimated plan as a tree, with cost
 and row estimates and the most expensive nodes highlighted. *Explain analyze*
@@ -298,6 +344,9 @@ or XML plan.
   Rows are measured as they come into view, so the scrollbar can adjust
   slightly while you scroll through a large result.
 * Double-click a cell to see its full value (long text, JSON, binary as hex).
+  A row may take at most 64 MiB in a result: longer values are cut (they end
+  in `…`) and a warning says so. Select a part of them (`substring`) to see
+  the rest.
 * Values show as the database has them. Floats print like psql: very large
   or small ones with an exponent (`1.1805916207174113e+21`, `1e-05`), and
   `NaN`, `Infinity`, `-Infinity`. SQL Server `money` shows its four decimals
@@ -377,8 +426,8 @@ remember their state.
   characters, and every word the engine reserves, such as `"user"` or
   `"position"` on PostgreSQL.
 * **History:** every query you ran, with its connection, duration and row
-  count. Filter it, open an entry in a new tab, or clear it. The last 5 000
-  entries are kept.
+  count. Filter it, open an entry in a new tab, or clear it (*Clear* asks
+  first). The last 5 000 entries are kept.
 * **Snippets:** save a selection with *Save as snippet…*, then insert it
   from the sidebar or with Ctrl+P.
 

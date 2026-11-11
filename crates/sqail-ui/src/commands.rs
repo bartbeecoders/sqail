@@ -169,6 +169,20 @@ impl Command {
         }
     }
 
+    /// Works wherever the keyboard focus is. Every other command acts on
+    /// the editor and only fires when the SQL editor, or nothing editable,
+    /// has the focus (not while typing in a filter, the find bar, a grid
+    /// cell, a designer window or the assistant).
+    pub fn is_global(self) -> bool {
+        matches!(
+            self,
+            Command::CommandPalette
+                | Command::ToggleAssistant
+                | Command::ToggleSidebar
+                | Command::OpenSettings
+        )
+    }
+
     fn default_shortcuts(self) -> &'static [&'static str] {
         match self {
             Command::RunCurrent => &["Ctrl+Enter"],
@@ -196,6 +210,62 @@ impl Command {
             _ => &[],
         }
     }
+}
+
+/// Whether `pressed` modifiers fire `shortcut`. Unlike egui's
+/// `consume_shortcut`, an extra Alt never matches: AltGr arrives as Ctrl+Alt
+/// on Windows, and AltGr+E must type € rather than run Ctrl+E. An extra
+/// Shift only matches for punctuation keys, which some layouts need Shift
+/// for (Ctrl++ is Ctrl+Shift+= on a US keyboard).
+pub fn modifiers_match(pressed: Modifiers, shortcut: &KeyboardShortcut) -> bool {
+    let wanted = shortcut.modifiers;
+    if pressed.alt != wanted.alt || (wanted.shift && !pressed.shift) {
+        return false;
+    }
+    if pressed.shift && !wanted.shift && !is_punctuation(shortcut.logical_key) {
+        return false;
+    }
+    pressed.matches_logically(wanted)
+}
+
+fn is_punctuation(key: Key) -> bool {
+    use Key::*;
+    matches!(
+        key,
+        Colon
+            | Comma
+            | Backslash
+            | Slash
+            | Pipe
+            | Questionmark
+            | Exclamationmark
+            | OpenBracket
+            | CloseBracket
+            | OpenCurlyBracket
+            | CloseCurlyBracket
+            | Backtick
+            | Minus
+            | Period
+            | Plus
+            | Equals
+            | Semicolon
+            | Quote
+    )
+}
+
+/// Consume a press of `shortcut` with [`modifiers_match`] modifiers.
+pub fn consume_exact(input: &mut egui::InputState, shortcut: &KeyboardShortcut) -> bool {
+    let mut hit = false;
+    input.events.retain(|e| {
+        let is = matches!(
+            e,
+            egui::Event::Key { key, modifiers, pressed: true, .. }
+                if *key == shortcut.logical_key && modifiers_match(*modifiers, shortcut)
+        );
+        hit |= is;
+        !is
+    });
+    hit
 }
 
 /// `Ctrl+Shift+P`, `F5`, `Alt+Enter`, … (`Ctrl` and `Cmd` both mean the
@@ -413,6 +483,26 @@ mod tests {
         };
         assert!(pos("Ctrl+Shift+S") < pos("Ctrl+S"));
         assert!(pos("Ctrl+Shift+Enter") < pos("Ctrl+Enter"));
+    }
+
+    #[test]
+    fn shortcuts_need_exact_modifiers() {
+        let ctrl = Modifiers::COMMAND;
+        let e = parse_shortcut("Ctrl+E").unwrap();
+        assert!(modifiers_match(ctrl, &e));
+        // AltGr on Windows: Ctrl+Alt.
+        assert!(!modifiers_match(ctrl | Modifiers::ALT, &e));
+        assert!(!modifiers_match(ctrl | Modifiers::SHIFT, &e));
+        assert!(!modifiers_match(Modifiers::NONE, &e));
+        // Shift may be needed to type the key itself.
+        let plus = parse_shortcut("Ctrl+Plus").unwrap();
+        assert!(modifiers_match(ctrl | Modifiers::SHIFT, &plus));
+        assert!(!modifiers_match(ctrl | Modifiers::ALT, &plus));
+        let f3 = parse_shortcut("Shift+F3").unwrap();
+        assert!(modifiers_match(Modifiers::SHIFT, &f3));
+        assert!(!modifiers_match(Modifiers::NONE, &f3));
+        let esc = parse_shortcut("Escape").unwrap();
+        assert!(!modifiers_match(Modifiers::ALT, &esc));
     }
 
     #[test]

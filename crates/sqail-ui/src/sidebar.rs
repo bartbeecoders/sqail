@@ -138,7 +138,7 @@ fn history_ui(ui: &mut egui::Ui, app: &mut SqailApp) {
             .on_hover_text("Delete all history")
             .clicked()
         {
-            app.history.clear();
+            app.dialog = Dialog::ConfirmClearHistory;
         }
     });
     let matching = app.history_view.matching(&app.history, &app.history_filter);

@@ -60,9 +60,15 @@ pub enum Msg {
     },
     Probed(Result<(String, sqail_client::proto::Health), String>),
     Provisioned(Result<Provisioned, String>),
-    ConnTested(Result<TestResult, String>),
-    /// A PEM chosen for the connection form. `None` when the dialog is cancelled.
+    /// A connection test of the form with this nonce.
+    ConnTested {
+        form: u64,
+        result: Result<TestResult, String>,
+    },
+    /// A PEM chosen for the connection form with this nonce. `None` when the
+    /// file dialog is cancelled.
     ConnCertPicked {
+        form: u64,
         kind: crate::dialogs::PgCertKind,
         result: Option<Result<(String, String), String>>,
     },
@@ -230,6 +236,10 @@ pub struct SqailApp {
     /// With the Omarchy theme: when its colours were last read, and checked.
     omarchy_seen: Option<std::time::SystemTime>,
     theme_checked: Instant,
+    /// The keyboard focus at the end of the last frame, and whether it was
+    /// a text field. egui drops a text field's focus on Esc before the frame
+    /// runs, so shortcuts look at this instead.
+    focus_seen: (Option<egui::Id>, bool),
 }
 
 impl SqailApp {
@@ -278,6 +288,7 @@ impl SqailApp {
             designers: Default::default(),
             omarchy_seen: theme::omarchy_stamp(),
             theme_checked: Instant::now(),
+            focus_seen: (None, false),
             settings,
         };
         let workspace_error = app.restore_workspace();
@@ -1061,13 +1072,22 @@ impl SqailApp {
                     }
                 }
             },
-            Msg::ConnTested(r) => {
-                if let Dialog::Connection(form) = &mut self.dialog {
-                    form.on_tested(r);
+            Msg::ConnTested { form, result } => {
+                // Not for a form that was closed and opened again meanwhile.
+                if let Dialog::Connection(f) = &mut self.dialog
+                    && f.nonce == form
+                {
+                    f.on_tested(result);
                 }
             }
-            Msg::ConnCertPicked { kind, result } => {
-                if let Dialog::Connection(form) = &mut self.dialog {
+            Msg::ConnCertPicked {
+                form: nonce,
+                kind,
+                result,
+            } => {
+                if let Dialog::Connection(form) = &mut self.dialog
+                    && form.nonce == nonce
+                {
                     match result {
                         None => {}
                         Some(Ok((name, pem))) => form.set_cert(kind, name, pem),
@@ -1778,24 +1798,34 @@ impl SqailApp {
         if !matches!(self.dialog, Dialog::None) || self.palette.is_some() {
             return;
         }
-        let running = self
-            .tabs
-            .get(self.active)
-            .is_some_and(|t| t.run.as_ref().is_some_and(|r| r.running));
-        // Typing in the assistant: editor shortcuts (Ctrl+Enter, …) stay off.
-        let assistant_typing = ctx.memory(|m| m.has_focus(crate::assistant::panel::input_id()));
+        let tab = self.tabs.get(self.active);
+        let running = tab.is_some_and(|t| t.run.as_ref().is_some_and(|r| r.running));
+        // Where the keyboard focus is (as of the last frame).
+        let (focused, text_field) = self.focus_seen;
+        let in_editor = focused.is_some() && focused == tab.map(|t| t.editor_id());
+        let in_find =
+            focused.is_some() && focused == tab.map(|t| crate::editor::find_field_id(t.id));
+        // Typing anywhere but the SQL editor (find bar, filters, a grid cell,
+        // a designer or viewer window, the assistant): editor commands
+        // (Ctrl+W, Ctrl+Enter, Ctrl+S, …) stay off.
+        let typing_elsewhere = !in_editor && text_field;
+        let completing = in_editor && tab.is_some_and(|t| t.completion.is_some());
         let bindings = self.keymap.bindings().to_vec();
         for (sc, cmd) in bindings {
-            if assistant_typing
-                && !matches!(cmd, Command::ToggleAssistant | Command::CommandPalette)
-            {
+            let find_cmd = matches!(
+                cmd,
+                Command::Find | Command::FindNext | Command::FindPrevious
+            );
+            if typing_elsewhere && !cmd.is_global() && !(in_find && find_cmd) {
                 continue;
             }
-            // Esc only means "cancel" while something is running.
-            if cmd == Command::Cancel && !running {
+            // Esc only means "cancel" while something is running, and only
+            // when no inner widget wants it (the completion popup; the find
+            // bar and a cell editor are covered above).
+            if cmd == Command::Cancel && (!running || completing) {
                 continue;
             }
-            if ctx.input_mut(|i| i.consume_shortcut(&sc)) {
+            if ctx.input_mut(|i| crate::commands::consume_exact(i, &sc)) {
                 self.execute(ctx, cmd);
             }
         }
@@ -2819,6 +2849,7 @@ impl eframe::App for SqailApp {
         crate::palette::show(&ctx, self);
         self.autosave_workspace(false);
         crate::dialogs::show(&ctx, self);
+        self.focus_seen = (ctx.memory(|m| m.focused()), ctx.text_edit_focused());
 
         let running = self
             .tabs

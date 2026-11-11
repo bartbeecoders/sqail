@@ -72,6 +72,9 @@ Each tab runs on the connection chosen in its toolbar. A tab gets one by
 itself only when the service has exactly one connection; with several,
 choose one first (new tabs take the current tab's connection).
 
+A click beside the connection form doesn't close it; *Cancel* or Esc on a
+form you changed asks before discarding it.
+
 Double-click a connection in the sidebar to edit it; *New query tab* is in
 its right-click menu. *Duplicate…* in the same menu opens the form filled in
 from that connection, named “… (copy)”. Leave the password empty to copy the
@@ -191,7 +194,7 @@ an admin token.
 |---|---|
 | Ctrl+Enter | Run the statement under the cursor, or the selection |
 | F5 / Ctrl+Shift+Enter | Run the whole script |
-| Esc | Cancel the running query |
+| Esc | Cancel the running query (Esc in the find bar, the completion list or a grid cell closes that first) |
 | Ctrl+E | Show the plan of the statement under the cursor |
 | Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z) | Undo / redo. Typing undoes a word or a line at a time (and at each pause, paste or cursor jump); a format, completion, replace, drop, insert, indent or comment toggle is one step of its own, so undoing it keeps what you typed before it |
 | Ctrl+Space | Completion (also opens by itself while you type a name it can finish, but not when the word is already a whole name or keyword, nor in comments and strings; a space, comma or other punctuation closes it, so Enter and Tab go to the text) |
@@ -210,6 +213,14 @@ an admin token.
 | Ctrl+Shift+B | Expand / collapse the [sidebar](#sidebar) |
 | Ctrl+Shift+A | Expand / collapse the [AI assistant](#ai-assistant) |
 | Ctrl+, | [Settings](#settings) |
+
+These shortcuts act on the editor, so they only work when the SQL editor
+has the keyboard focus, or nothing you can type in has it: while you type
+in the find bar, a filter, a grid cell, a table designer or the assistant,
+Ctrl+W, Ctrl+Enter, Ctrl+S and the like do nothing. The command palette,
+Settings and the sidebar and assistant toggles work everywhere. A shortcut
+needs exactly its modifiers (only Shift may be added, for keys like `+`
+that need it), so AltGr combinations type their character.
 
 **Pinned tabs.** Right-click a tab for *Pin tab* (or *File → Pin / unpin
 tab*). Pinned tabs get a row of their own, labelled *Pinned*, above the
@@ -410,8 +421,8 @@ remember their state.
   characters, and every word the engine reserves, such as `"user"` or
   `"position"` on PostgreSQL.
 * **History:** every query you ran, with its connection, duration and row
-  count. Filter it, open an entry in a new tab, or clear it. The last 5 000
-  entries are kept.
+  count. Filter it, open an entry in a new tab, or clear it (*Clear* asks
+  first). The last 5 000 entries are kept.
 * **Snippets:** save a selection with *Save as snippet…*, then insert it
   from the sidebar or with Ctrl+P.
 

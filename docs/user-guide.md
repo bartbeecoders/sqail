@@ -473,7 +473,12 @@ functions with side effects (also when the name is quoted, like
 column or table that happens to share such a function's name is still fine. The service also refuses anything
 but a single statement for the assistant. Every assistant query also runs in
 its own transaction that is always rolled back (read-only on PostgreSQL), so
-even something that slipped through would be undone. For the strongest
+even something that slipped through would be undone. On SQL Server, locking
+table hints (`TABLOCKX`, `HOLDLOCK`, `UPDLOCK`, …) and `NEXT VALUE FOR` are
+refused, and assistant queries take no shared locks (`SNAPSHOT` isolation
+where the database allows it, else `READ UNCOMMITTED`, which can show
+changes another session hasn't committed yet) and give up after waiting five
+seconds for a lock, so they don't hold up other users. For the strongest
 guarantee, point the assistant at a connection whose login can only read
 (see [security](security.md)). The CLI gets no other tools: no shell, no files, no web.
 When you ask for changes, it writes the SQL for you to review and run

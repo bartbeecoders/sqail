@@ -38,6 +38,9 @@ pub const DEFAULT_ROWS: u64 = 100;
 /// Longest cell value shown to the model, in characters.
 const CELL_CHARS: usize = 200;
 const QUERY_TIMEOUT_MS: u64 = 30_000;
+/// How long an assistant query on SQL Server waits for a lock before it
+/// fails, in milliseconds.
+pub const MSSQL_LOCK_TIMEOUT_MS: u64 = 5_000;
 
 /// What the tools need from a database. The real one is [`ServiceBackend`].
 pub trait Backend {
@@ -351,6 +354,9 @@ pub struct ServiceBackend {
     connection: Uuid,
     engine: Engine,
     session: Mutex<Option<Uuid>>,
+    /// SQL Server: the statements that start each assistant transaction,
+    /// decided on first use (see [`ServiceBackend::mssql_begin`]).
+    mssql_begin: Mutex<Option<String>>,
 }
 
 impl ServiceBackend {
@@ -366,6 +372,7 @@ impl ServiceBackend {
             connection,
             engine,
             session: Mutex::new(None),
+            mssql_begin: Mutex::new(None),
         })
     }
 
@@ -377,6 +384,45 @@ impl ServiceBackend {
         let id = self.client.open_session(self.connection).await?.id;
         *s = Some(id);
         Ok(id)
+    }
+
+    /// SQL Server has no read-only transaction, so an assistant query must
+    /// at least not block others or wait on them for long: a lock timeout,
+    /// and an isolation level that takes no shared locks. That is SNAPSHOT
+    /// where the database allows it (consistent reads from row versions),
+    /// else READ UNCOMMITTED (which may read uncommitted changes). Set
+    /// before every transaction, so a reset connection cannot lose it.
+    async fn mssql_begin(&self, on: On) -> Result<String> {
+        let mut cached = self.mssql_begin.lock().await;
+        if let Some(sql) = &*cached {
+            return Ok(sql.clone());
+        }
+        let mut req = QueryRequest::new(
+            "SELECT snapshot_isolation_state FROM sys.databases WHERE database_id = DB_ID()",
+        );
+        req.max_rows = Some(1);
+        let snapshot = self
+            .client
+            .query_all(on, &req)
+            .await?
+            .into_iter()
+            .any(|ev| match ev {
+                QueryEvent::Rows { rows, .. } => {
+                    rows.first().and_then(|r| r.first()).and_then(Value::as_i64) == Some(1)
+                }
+                _ => false,
+            });
+        let level = if snapshot {
+            "SNAPSHOT"
+        } else {
+            "READ UNCOMMITTED"
+        };
+        let sql = format!(
+            "SET LOCK_TIMEOUT {MSSQL_LOCK_TIMEOUT_MS}; \
+             SET TRANSACTION ISOLATION LEVEL {level}; BEGIN TRANSACTION"
+        );
+        *cached = Some(sql.clone());
+        Ok(sql)
     }
 
     pub async fn close(&self) {
@@ -422,13 +468,13 @@ impl Backend for ServiceBackend {
     async fn query(&self, sql: &str, max_rows: u64) -> Result<Rows> {
         let session = On::Session(self.session().await?);
         let begin = match self.engine {
-            Engine::Postgres => "BEGIN READ ONLY",
-            Engine::Mssql => "BEGIN TRANSACTION",
-            Engine::Sqlite => "BEGIN",
+            Engine::Postgres => "BEGIN READ ONLY".to_string(),
+            Engine::Mssql => self.mssql_begin(session).await?,
+            Engine::Sqlite => "BEGIN".to_string(),
             // No known way to make it read-only, so don't run anything.
             Engine::Unknown => anyhow::bail!("this engine is not supported by this sqail version"),
         };
-        run_all(&self.client, session, begin, 1).await?;
+        run_all(&self.client, session, &begin, 1).await?;
         let mut req = QueryRequest::new(sql);
         req.max_rows = Some(max_rows);
         req.timeout_ms = Some(QUERY_TIMEOUT_MS);

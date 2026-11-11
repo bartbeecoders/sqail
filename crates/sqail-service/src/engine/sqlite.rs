@@ -131,7 +131,7 @@ fn attach_allowed(filename: Option<&str>, read_only: bool, policy: PathPolicy<'_
 
 /// Install the authorizer that keeps SQL inside the path policy.
 fn install_authorizer(
-    db: &rusqlite::Connection,
+    db: &mut rusqlite::Connection,
     read_only: bool,
     policy: Arc<OwnedPolicy>,
 ) -> Result<()> {
@@ -176,13 +176,13 @@ impl Driver for SqliteDriver {
             } else {
                 OpenFlags::SQLITE_OPEN_READ_WRITE
             };
-            let db = rusqlite::Connection::open_with_flags(&path, flags)
+            let mut db = rusqlite::Connection::open_with_flags(&path, flags)
                 .map_err(|e| DbError::Connect(format!("{}: {e}", path.display())))?;
             db.busy_timeout(std::time::Duration::from_secs(5))
                 .map_err(db_err)?;
             db.pragma_update(None, "foreign_keys", "ON")
                 .map_err(db_err)?;
-            install_authorizer(&db, read_only, policy)?;
+            install_authorizer(&mut db, read_only, policy)?;
             let interrupt = Arc::new(SqliteCancel(db.get_interrupt_handle()));
             Ok(Box::new(SqliteConn {
                 db: Arc::new(Mutex::new(db)),
@@ -338,7 +338,6 @@ fn run_stmt(
     }
     let columns: Vec<Column> = stmt
         .columns()
-        .iter()
         .map(|c| {
             let decl = c.decl_type().unwrap_or("");
             Column {

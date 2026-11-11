@@ -282,7 +282,7 @@ impl SqailApp {
             (mcp::Env::CONNECTION.to_string(), conn.id.to_string()),
             (
                 mcp::Env::MAX_ROWS.to_string(),
-                settings.max_rows.to_string(),
+                mcp::effective_max_rows(settings.max_rows).to_string(),
             ),
         ];
         if let Some(fp) = &profile.fingerprint {
@@ -308,7 +308,7 @@ impl SqailApp {
             instructions: instructions(
                 conversation.engine,
                 &conversation.connection_name,
-                settings.max_rows,
+                mcp::effective_max_rows(settings.max_rows),
             ),
             prompt,
             resume: conversation.session.clone(),

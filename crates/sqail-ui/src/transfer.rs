@@ -285,7 +285,17 @@ pub fn statement_for_result(
     const UNCLEAR: &str = "Only a result of a read-only statement can be exported whole, and \
         this script's results can't be matched to its statements. Run the SELECT on its own, \
         then export again.";
-    let reads: Vec<&str> = executed_statements(script, engine)
+    let executed = executed_statements(script, engine);
+    // A lone statement that is not a plain read: say why.
+    if let [only] = executed.as_slice()
+        && let Err(why) = crate::assistant::guard::check_read_only(only, engine)
+    {
+        return Err(format!(
+            "Only a result of a read-only statement can be exported whole, and this \
+             statement can't be run again safely ({why}). Export the rows shown instead."
+        ));
+    }
+    let reads: Vec<&str> = executed
         .into_iter()
         .filter(|s| crate::assistant::guard::check_read_only(s, engine).is_ok())
         .collect();
@@ -679,6 +689,15 @@ mod tests {
         assert!(ms("SELECT 1\nSELECT 2", 1, 2).is_err());
         assert!(ms("INSERT INTO t VALUES (1)\nSELECT * FROM t", 0, 1).is_err());
         assert_eq!(ms("SELECT 1\nGO\nSELECT 2\nGO", 1, 2).unwrap(), "SELECT 2");
+        // Tables and columns named like statements are plain reads (#185).
+        for sql in ["SELECT * FROM backup", "SELECT cluster, call, copy FROM t"] {
+            assert_eq!(pick(sql, 0, 1, true).unwrap(), sql);
+            let lite = statement_for_result(sql, Engine::Sqlite, 0, 1, true);
+            assert_eq!(lite.unwrap(), sql);
+        }
+        // A lone statement that isn't a plain read says why.
+        let err = pick("SELECT * FROM t FOR UPDATE", 0, 1, true).unwrap_err();
+        assert!(err.contains("UPDATE is not allowed"), "{err}");
     }
 
     #[test]

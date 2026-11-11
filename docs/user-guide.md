@@ -440,14 +440,30 @@ Good to know:
   re-created without it); an index whose filter uses the column is dropped.
 * SQL Server: changing a column's type or NULL-ness re-creates the indexes
   that use it (as a key, included or in the filter) and the key on it, and a
-  default is dropped and re-added by its generated name. *Open in editor*
-  gives a script that runs as one batch.
+  default is dropped and re-added by its generated name. `CHECK`
+  constraints and the table's own foreign keys on such a column (or on a
+  renamed one, for `CHECK`) are dropped and added back too. *Open in
+  editor* gives a script that runs as one batch.
+* PostgreSQL: changing a column's type drops its default first and sets the
+  new one (or the old one again) afterwards, so a default that can't be
+  cast to the new type (`''` to `integer`) doesn't stop the change.
+* Foreign keys of other tables that reference this one are dropped and
+  added back, with their actions and options, when the key they use is
+  re-created with the same columns. Changes they couldn't follow are
+  refused before anything runs, with the keys named: dropping a referenced
+  column, changing the columns of a referenced key, or (SQL Server, which
+  wants the same type on both sides) changing a referenced column's type.
+* Columns a generated or computed column uses can't be dropped or change
+  type while it exists (nor be renamed, on SQL Server); the designer says
+  which column is in the way. Dropping both together works.
+* SQL Server and SQLite: a column a `CHECK` constraint uses can't be
+  dropped until the constraint is.
 * SQLite can change only a few things in place (renames, adding and dropping
   columns, indexes). Anything else (a type, NULL-ness, a default, the
   primary key) rebuilds the table: the rows are copied into a new table
-  that replaces the old one. Triggers on the table are dropped, and `CHECK`
-  constraints, `AUTOINCREMENT` and foreign-key actions are not carried
-  over; the review says so before you apply.
+  that replaces the old one, with its `CHECK` constraints and foreign keys
+  (actions included). Triggers on the table are dropped and `AUTOINCREMENT`
+  is not carried over; the review says so before you apply.
 
 ## AI assistant
 

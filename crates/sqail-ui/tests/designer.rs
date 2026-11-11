@@ -751,6 +751,215 @@ fn sqlite_identity_and_generated_columns() {
     );
 }
 
+/// PostgreSQL: a type change with a default that can't be cast, and a key
+/// referenced by another table, apply; changes the references can't follow
+/// are refused before anything runs.
+#[test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+fn postgres_designer_handles_dependents() {
+    let s = svc();
+    let pg = pg_conn(&s);
+    let e = Engine::Postgres;
+    let schema = format!("it173_{}", &Uuid::new_v4().simple().to_string()[..8]);
+    s.rows(
+        pg,
+        &format!(
+            "CREATE SCHEMA {schema};
+             CREATE TABLE {schema}.parent (id int PRIMARY KEY, k int, code text DEFAULT '',
+                qty int CHECK (qty > 0), total int GENERATED ALWAYS AS (qty * 2) STORED);
+             CREATE UNIQUE INDEX uq_k ON {schema}.parent (k);
+             CREATE TABLE {schema}.child (pid int REFERENCES {schema}.parent (id),
+                pk int CONSTRAINT fk_child REFERENCES {schema}.parent (k)
+                ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED);
+             INSERT INTO {schema}.parent VALUES (1, 1, '7', 3);
+             INSERT INTO {schema}.child VALUES (1, 1);"
+        ),
+    );
+    let fk_def = || {
+        s.rows(
+            pg,
+            &format!(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint
+                 WHERE conname = 'fk_child' AND connamespace = '{schema}'::regnamespace"
+            ),
+        )
+    };
+    let before = fk_def();
+    assert!(before[0][0].contains("ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED"));
+
+    let mut d = s.load(pg, e, &schema, "parent");
+    no_changes(&d);
+    assert_eq!(d.referencing.len(), 2);
+    assert_eq!(d.table.checks.len(), 1);
+    let code = column(&d, "code");
+    d.column_mut(code).unwrap().data_type = "integer".into();
+    d.column_mut(code).unwrap().default = "0".into();
+    // The unique index is re-created (descending), so the child's key on
+    // it goes and comes back.
+    let k = column(&d, "k");
+    let ix = d.table.indexes[0].id;
+    d.index_mut(ix).unwrap().descending = vec![IndexPart::Column(k)];
+    s.apply(pg, e, d.plan().unwrap());
+    assert_eq!(fk_def(), before);
+
+    let mut d = s.load(pg, e, &schema, "parent");
+    no_changes(&d);
+    assert_eq!(d.column(code).unwrap().default, "0");
+    assert_eq!(
+        s.rows(pg, &format!("SELECT code FROM {schema}.parent")),
+        [["7"]]
+    );
+
+    // Refused: a key without the referenced column set, a referenced
+    // column dropped, and a type change under a generated column.
+    d.toggle_pk(code);
+    assert!(d.plan().unwrap_err()[0].contains("primary key is referenced"));
+    d.revert();
+    let id = column(&d, "id");
+    d.remove_column(id);
+    assert!(d.plan().unwrap_err()[0].contains("referenced by foreign key"));
+    d.revert();
+    let qty = column(&d, "qty");
+    d.column_mut(qty).unwrap().data_type = "bigint".into();
+    assert!(d.plan().unwrap_err()[0].contains("generated column “total”"));
+    s.rows(pg, &format!("DROP SCHEMA {schema} CASCADE"));
+}
+
+/// SQL Server: CHECK constraints and foreign keys on altered columns, and
+/// keys that reference a rebuilt primary key, are dropped and added back;
+/// widening a referenced key is refused with the reason.
+#[test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+fn mssql_designer_handles_dependents() {
+    let s = svc();
+    let ms = ms_conn(&s);
+    let e = Engine::Mssql;
+    let schema = format!("it173_{}", &Uuid::new_v4().simple().to_string()[..8]);
+    s.rows(ms, &format!("CREATE SCHEMA {schema}"));
+    s.rows(
+        ms,
+        &format!(
+            "CREATE TABLE {schema}.owner (id int PRIMARY KEY);
+             CREATE TABLE {schema}.parent (
+                id int CONSTRAINT pk_parent PRIMARY KEY NONCLUSTERED,
+                qty int CONSTRAINT ck_qty CHECK (qty > 0),
+                owner_id int CONSTRAINT fk_owner REFERENCES {schema}.owner (id) ON DELETE CASCADE);
+             CREATE TABLE {schema}.child (pid int CONSTRAINT fk_child REFERENCES {schema}.parent (id)
+                ON UPDATE CASCADE);
+             INSERT INTO {schema}.owner VALUES (1);
+             INSERT INTO {schema}.parent VALUES (1, 2, 1);
+             INSERT INTO {schema}.child VALUES (1);"
+        ),
+    );
+    let facts = || {
+        s.rows(
+            ms,
+            &format!(
+                "SELECT name, definition FROM sys.check_constraints
+                 WHERE parent_object_id = OBJECT_ID('{schema}.parent')
+                 UNION ALL
+                 SELECT fk.name, (OBJECT_NAME(fk.parent_object_id) + ' ' + fk.delete_referential_action_desc
+                                  + ' ' + fk.update_referential_action_desc) COLLATE DATABASE_DEFAULT
+                 FROM sys.foreign_keys fk WHERE SCHEMA_NAME(fk.schema_id) = '{schema}'
+                 ORDER BY 1"
+            ),
+        )
+    };
+    let mut d = s.load(ms, e, &schema, "parent");
+    no_changes(&d);
+    let id = column(&d, "id");
+    d.column_mut(id).unwrap().data_type = "bigint".into();
+    assert!(d.plan().unwrap_err()[0].contains("same type on both sides"));
+    d.revert();
+
+    // Retype and rename qty (its CHECK follows), make owner_id NOT NULL
+    // (its key follows), and cluster the key (the child's key follows).
+    let (qty, owner) = (column(&d, "qty"), column(&d, "owner_id"));
+    d.column_mut(qty).unwrap().data_type = "bigint".into();
+    d.column_mut(qty).unwrap().name = "amount".into();
+    d.column_mut(owner).unwrap().nullable = false;
+    d.table.primary_key.clustered = Some(true);
+    s.apply(ms, e, d.plan().unwrap());
+    let d = s.load(ms, e, &schema, "parent");
+    no_changes(&d);
+    assert_eq!(
+        facts(),
+        [
+            ["ck_qty", "([amount]>(0))"],
+            ["fk_child", "child NO_ACTION CASCADE"],
+            ["fk_owner", "parent CASCADE NO_ACTION"],
+        ]
+    );
+    assert_eq!(d.table.primary_key.clustered, Some(true));
+    s.rows(
+        ms,
+        &format!(
+            "DROP TABLE {schema}.child; DROP TABLE {schema}.parent; DROP TABLE {schema}.owner;
+             DROP SCHEMA {schema};"
+        ),
+    );
+}
+
+/// SQLite: a rebuild keeps CHECK constraints and foreign-key actions.
+#[test]
+fn sqlite_rebuild_keeps_checks_and_key_actions() {
+    let s = svc();
+    let conn = s.connect(
+        ConnectionParams::Sqlite(SqliteParams {
+            path: s.dir.path().join("k.db").to_string_lossy().into(),
+            create: true,
+        }),
+        None,
+    );
+    let e = Engine::Sqlite;
+    s.rows(
+        conn,
+        "CREATE TABLE owner (id INTEGER PRIMARY KEY);
+         CREATE TABLE item (id INTEGER PRIMARY KEY, qty INTEGER CHECK (qty > 0),
+            owner_id INTEGER REFERENCES owner (id) ON DELETE CASCADE,
+            CONSTRAINT ck_pair CHECK (qty < 100 OR owner_id IS NULL))",
+    );
+    let mut d = s.load(conn, e, "main", "item");
+    no_changes(&d);
+    assert_eq!(d.table.checks.len(), 2);
+    let qty = column(&d, "qty");
+    d.column_mut(qty).unwrap().data_type = "NUMERIC".into();
+    d.column_mut(qty).unwrap().name = "amount".into();
+    let p = d.plan().unwrap();
+    assert!(!p.pre.is_empty(), "rebuilt");
+    s.apply(conn, e, p);
+    let d = s.load(conn, e, "main", "item");
+    no_changes(&d);
+    let checks: Vec<(&str, &str)> = d
+        .table
+        .checks
+        .iter()
+        .map(|c| (c.name.as_str(), c.expression.as_str()))
+        .collect();
+    assert_eq!(
+        checks,
+        [
+            ("", "amount > 0"),
+            ("ck_pair", "amount < 100 OR owner_id IS NULL")
+        ]
+    );
+    assert_eq!(
+        d.foreign_keys[0].on_delete,
+        Some(sqail_client::proto::ReferentialAction::Cascade)
+    );
+
+    // The owner knows who references it, and its key column can't go.
+    let mut d = s.load(conn, e, "main", "owner");
+    assert_eq!(d.referencing.len(), 1);
+    assert_eq!(d.referencing[0].table, "item");
+    assert_eq!(d.referencing[0].key.columns, ["owner_id"]);
+    let id = column(&d, "id");
+    let n = d.add_column();
+    d.column_mut(n).unwrap().name = "other".into();
+    d.remove_column(id);
+    assert!(d.plan().unwrap_err()[0].contains("referenced by foreign key"));
+}
+
 /// A table whose column names the engine reserves, built and reloaded by the
 /// designer with a key and an index on them, then queried through the
 /// drag-and-drop SELECT: every name must come out quoted and still match.

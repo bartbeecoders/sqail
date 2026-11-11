@@ -4,7 +4,8 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use serde::Deserialize;
 use sqail_proto::{
-    ColumnInfo, Ddl, ForeignKeyInfo, IndexInfo, NamedItem, RoutineInfo, TableInfo, TablePrivileges,
+    CheckInfo, ColumnInfo, Ddl, ForeignKeyInfo, IndexInfo, NamedItem, ReferencingKey, RoutineInfo,
+    TableInfo, TablePrivileges,
 };
 use utoipa::IntoParams;
 use uuid::Uuid;
@@ -175,6 +176,34 @@ pub async fn foreign_keys(
 ) -> ApiResult<Json<Vec<ForeignKeyInfo>>> {
     catalog!(s, p, id, |c| {
         introspect::foreign_keys(c, q.schema.as_deref(), &q.name)
+    })
+}
+
+/// The foreign keys, in any table of the database, that reference a table.
+#[utoipa::path(get, path = "/v1/connections/{id}/schema/referencing-keys", tag = "schema",
+    params(("id" = Uuid, Path), ObjectRef), responses((status = 200, body = Vec<ReferencingKey>)))]
+pub async fn referencing_keys(
+    State(s): State<AppState>,
+    p: Principal,
+    Path(id): Path<Uuid>,
+    Query(q): Query<ObjectRef>,
+) -> ApiResult<Json<Vec<ReferencingKey>>> {
+    catalog!(s, p, id, |c| {
+        introspect::referencing_keys(c, q.schema.as_deref(), &q.name)
+    })
+}
+
+/// A table's CHECK constraints.
+#[utoipa::path(get, path = "/v1/connections/{id}/schema/checks", tag = "schema",
+    params(("id" = Uuid, Path), ObjectRef), responses((status = 200, body = Vec<CheckInfo>)))]
+pub async fn checks(
+    State(s): State<AppState>,
+    p: Principal,
+    Path(id): Path<Uuid>,
+    Query(q): Query<ObjectRef>,
+) -> ApiResult<Json<Vec<CheckInfo>>> {
+    catalog!(s, p, id, |c| {
+        introspect::checks(c, q.schema.as_deref(), &q.name)
     })
 }
 

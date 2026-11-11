@@ -1071,6 +1071,7 @@ mod tests {
                     ref_schema: Some("sales".into()),
                     ref_table: "customers".into(),
                     ref_columns: vec!["id".into()],
+                    ..Default::default()
                 }],
                 _ => vec![],
             })

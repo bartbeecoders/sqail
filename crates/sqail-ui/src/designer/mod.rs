@@ -161,11 +161,13 @@ pub async fn fetch(
     table: &str,
 ) -> Result<Loaded, String> {
     let s = Some(schema);
-    let (cols, idx, fks, privs) = futures::join!(
+    let (cols, idx, fks, privs, checks, referencing) = futures::join!(
         client.columns(conn, s, table),
         client.indexes(conn, s, table),
         client.foreign_keys(conn, s, table),
         client.privileges(conn, s, table),
+        client.checks(conn, s, table),
+        client.referencing_keys(conn, s, table),
     );
     let err = |e: sqail_client::Error| e.to_string();
     let cols = cols.map_err(err)?;
@@ -179,10 +181,18 @@ pub async fn fetch(
         .as_ref()
         .map(|p| p.grants.clone())
         .unwrap_or_default();
-    Ok(Loaded {
-        design: Design::from_catalog(engine, schema, table, &cols, &idx, fks, &grants),
-        privileges,
-    })
+    let mut design = Design::from_catalog(engine, schema, table, &cols, &idx, fks, &grants);
+    // A service older than these calls answers 404: the constraints stay
+    // unknown, as before.
+    let older = |e: &sqail_client::Error| e.status() == Some(404);
+    match (checks, referencing) {
+        (Ok(checks), Ok(referencing)) => {
+            design = design.with_constraints(&checks, referencing);
+        }
+        (Err(e), _) | (_, Err(e)) if !older(&e) => return Err(err(e)),
+        _ => {}
+    }
+    Ok(Loaded { design, privileges })
 }
 
 /// Handle [`Msg::DesignerLoaded`].

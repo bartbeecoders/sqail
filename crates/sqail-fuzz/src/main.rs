@@ -174,6 +174,7 @@ impl sqail_ui::sql::complete::Catalog for Catalog {
             ref_schema: Some("sales".into()),
             ref_table: "orders".into(),
             ref_columns: vec!["id".into()],
+            ..Default::default()
         }])
     }
 }

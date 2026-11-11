@@ -3381,6 +3381,70 @@
         ]
       }
     },
+    "/v1/sessions/{id}/schema/columns": {
+      "get": {
+        "operationId": "session_columns",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Defaults to the connection's current schema.",
+            "in": "query",
+            "name": "schema",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Table, view or routine name.",
+            "in": "query",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ColumnInfo"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Columns of a table as a session sees it: its search path, current\ndatabase and temporary tables. Without `schema`, the table is resolved\nthe way an unqualified name in a statement on the session would be.",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
     "/v1/tokens": {
       "get": {
         "operationId": "list",

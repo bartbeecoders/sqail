@@ -1006,8 +1006,26 @@ impl SqailApp {
             }
             Msg::EditsApplied { tab, result } => match result {
                 Ok(n) => {
+                    let committed = matches!(
+                        &self.dialog,
+                        Dialog::ApplyEdits(d) if d.tx == crate::editing::EditTx::Commit
+                    );
                     self.dialog = Dialog::None;
-                    self.notify(format!("Applied {n} change(s)."), false);
+                    if committed {
+                        self.notify(format!("Applied {n} change(s)."), false);
+                    } else {
+                        // They are part of the tab's transaction now.
+                        if let Some(t) = self.tab_mut(tab) {
+                            t.in_transaction = true;
+                        }
+                        self.notify(
+                            format!(
+                                "Applied {n} change(s), not committed yet: \
+                                 Commit or Rollback in the toolbar."
+                            ),
+                            false,
+                        );
+                    }
                     if let Some(idx) = self.tabs.iter().position(|t| t.id == tab) {
                         let sql = self.tabs[idx].run.as_ref().map(|r| r.sql.clone());
                         if let Some(sql) = sql {
@@ -1165,6 +1183,10 @@ impl SqailApp {
         if run.results.len() != 1 {
             return Err("Only a query with a single result can be edited".into());
         }
+        // Edits run on the session the result came from, never a fresh one.
+        tab.session
+            .filter(|(c, _)| Some(*c) == tab.connection)
+            .ok_or("The tab's session was closed; run the query again to edit")?;
         crate::editing::source_table(&run.sql, conn.engine)
             .map(|_| ())
             .ok_or_else(|| {
@@ -1179,7 +1201,12 @@ impl SqailApp {
         let Some(tab) = self.tabs.get_mut(idx) else {
             return;
         };
-        let (Some(conn), Some(run)) = (tab.connection, tab.run.as_mut()) else {
+        let session = tab
+            .session
+            .filter(|(c, _)| Some(*c) == tab.connection)
+            .map(|(_, s)| s);
+        let (Some(conn), Some(session), Some(run)) = (tab.connection, session, tab.run.as_mut())
+        else {
             return;
         };
         let Some(engine) = self.service.connection(conn).map(|c| c.engine) else {
@@ -1192,8 +1219,10 @@ impl SqailApp {
         let columns = run.results[0].columns.clone();
         let (tab_id, run_id) = (tab.id, run.id);
         self.worker.run(async move {
+            // Look the table up where the query ran: the session's search
+            // path, database and temporary tables decide which table it is.
             let state = match client
-                .columns(conn, source.schema.as_deref(), &source.table)
+                .session_columns(session, source.schema.as_deref(), &source.table)
                 .await
             {
                 Ok(cols) if cols.is_empty() => Err(format!("table {} not found", source.table)),
@@ -1215,7 +1244,15 @@ impl SqailApp {
         let Some(tab) = self.tabs.get(idx) else {
             return;
         };
-        let (Some(conn), Some(run)) = (tab.connection, tab.run.as_ref()) else {
+        let session = tab
+            .session
+            .filter(|(c, _)| Some(*c) == tab.connection)
+            .map(|(_, s)| s);
+        let (Some(session), Some(run)) = (session, tab.run.as_ref()) else {
+            self.notify(
+                "The tab's session was closed; run the query again to edit.",
+                true,
+            );
             return;
         };
         let Some((ri, e)) = run.edit.as_ref() else {
@@ -1234,7 +1271,8 @@ impl SqailApp {
             .collect();
         self.dialog = Dialog::ApplyEdits(Box::new(crate::dialogs::ApplyEdits {
             tab: tab.id,
-            connection: conn,
+            session,
+            tx: crate::editing::EditTx::for_tab(tab.autocommit, tab.in_transaction),
             engine: e.engine,
             statements: stmts,
             previews,

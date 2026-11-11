@@ -7,6 +7,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -183,6 +184,8 @@ pub struct History {
     path: PathBuf,
     /// Oldest first.
     pub entries: Vec<HistoryEntry>,
+    /// Changes whenever `entries` does (views cache on it).
+    revision: u64,
 }
 
 impl History {
@@ -198,7 +201,11 @@ impl History {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let mut h = Self { path, entries };
+        let mut h = Self {
+            path,
+            entries,
+            revision: 0,
+        };
         h.trim();
         h
     }
@@ -210,7 +217,12 @@ impl History {
         }
     }
 
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     pub fn push(&mut self, e: HistoryEntry) {
+        self.revision += 1;
         let line = serde_json::to_string(&e).unwrap_or_default();
         self.entries.push(e);
         let res = (|| -> std::io::Result<()> {
@@ -243,6 +255,7 @@ impl History {
     }
 
     pub fn clear(&mut self) {
+        self.revision += 1;
         self.entries.clear();
         let _ = std::fs::remove_file(&self.path);
     }
@@ -327,7 +340,7 @@ pub struct SavedTab {
 }
 
 impl Workspace {
-    fn path() -> PathBuf {
+    pub fn path() -> PathBuf {
         config_dir().join("workspace.json")
     }
 
@@ -347,9 +360,89 @@ impl Workspace {
     }
 }
 
+/// The open tabs as autosave writes them: the same JSON as [`Workspace`],
+/// but the texts are shared with the previous snapshot, so a tab that did
+/// not change is neither copied nor compared beyond a pointer check.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct WorkspaceSnapshot {
+    pub tabs: Vec<TabSnapshot>,
+    pub active: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TabSnapshot {
+    pub title: String,
+    pub path: Option<PathBuf>,
+    #[serde(serialize_with = "serialize_text")]
+    pub text: Arc<str>,
+    pub connection: Option<Uuid>,
+    pub cursor: usize,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<crate::textfile::FileFormat>,
+}
+
+fn serialize_text<S: serde::Serializer>(text: &Arc<str>, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(text)
+}
+
+/// Writes workspace snapshots in order: snapshot `seq` is written only if
+/// no later one was written first (writes run on worker threads).
+#[derive(Clone, Default)]
+pub struct WorkspaceWriter {
+    written: Arc<Mutex<u64>>,
+}
+
+impl WorkspaceWriter {
+    /// Serialise and write `ws` atomically to `path` (blocking; call it off
+    /// the UI thread except when quitting).
+    pub fn write(&self, path: &Path, ws: &WorkspaceSnapshot, seq: u64) {
+        let mut written = self.written.lock().unwrap_or_else(|e| e.into_inner());
+        if *written >= seq {
+            return; // a newer snapshot is on disk already
+        }
+        let body = serde_json::to_vec(ws).unwrap_or_default();
+        match write_atomic(path, &body) {
+            Ok(()) => *written = seq,
+            Err(e) => tracing::warn!(error = %e, "could not save workspace"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_snapshots_read_back_as_workspaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let snap = |text: &str| WorkspaceSnapshot {
+            tabs: vec![TabSnapshot {
+                title: "q".into(),
+                path: None,
+                text: Arc::from(text),
+                connection: None,
+                cursor: 3,
+                pinned: true,
+                format: Some(crate::textfile::FileFormat {
+                    bom: true,
+                    ..Default::default()
+                }),
+            }],
+            active: 0,
+        };
+        let w = WorkspaceWriter::default();
+        w.write(&path, &snap("SELECT 2"), 2);
+        // An older snapshot that arrives late does not overwrite it.
+        w.write(&path, &snap("SELECT 1"), 1);
+        let ws: Workspace = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(ws.tabs[0].text, "SELECT 2");
+        assert_eq!(ws.tabs[0].cursor, 3);
+        assert!(ws.tabs[0].pinned);
+        assert!(ws.tabs[0].format.is_some_and(|f| f.bom));
+    }
 
     #[test]
     fn history_entries_round_trip_as_json_lines() {

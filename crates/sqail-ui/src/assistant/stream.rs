@@ -33,6 +33,11 @@ pub enum Event {
         message: Option<String>,
         cost_usd: Option<f64>,
     },
+    /// An MCP server the CLI could not start (`status` is not `connected`),
+    /// from Claude Code's `system/init` event.
+    McpFailed { server: String, status: String },
+    /// Something went wrong outside the model's answer; shown as an error.
+    Error(String),
 }
 
 /// Tools the CLIs use to find MCP tools; not interesting to show.
@@ -54,10 +59,22 @@ impl Parser {
         };
         let s = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(String::from);
         match v.get("type").and_then(Value::as_str).unwrap_or("") {
-            "system" if s(&v, "subtype").as_deref() == Some("init") => s(&v, "session_id")
-                .map(Event::Session)
-                .into_iter()
-                .collect(),
+            "system" if s(&v, "subtype").as_deref() == Some("init") => {
+                let mut out: Vec<Event> = s(&v, "session_id")
+                    .map(Event::Session)
+                    .into_iter()
+                    .collect();
+                for server in v["mcp_servers"].as_array().into_iter().flatten() {
+                    let status = s(server, "status").unwrap_or_default();
+                    if status != "connected" {
+                        out.push(Event::McpFailed {
+                            server: s(server, "name").unwrap_or_default(),
+                            status,
+                        });
+                    }
+                }
+                out
+            }
             "stream_event" => {
                 let ev = &v["event"];
                 match ev.get("type").and_then(Value::as_str).unwrap_or("") {
@@ -285,6 +302,24 @@ mod tests {
                     message: Some("cancelled".into()),
                     cost_usd: None
                 },
+            ]
+        );
+    }
+
+    #[test]
+    fn mcp_servers_that_did_not_connect_are_reported() {
+        let events = parse(&[
+            json!({"type": "system", "subtype": "init", "session_id": "s1",
+            "mcp_servers": [{"name": "sqail", "status": "failed"}, {"name": "ok", "status": "connected"}]}),
+        ]);
+        assert_eq!(
+            events,
+            [
+                Event::Session("s1".into()),
+                Event::McpFailed {
+                    server: "sqail".into(),
+                    status: "failed".into()
+                }
             ]
         );
     }

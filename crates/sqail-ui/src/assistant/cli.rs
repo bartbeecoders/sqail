@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -66,11 +67,31 @@ pub struct Request {
     /// Environment for the CLI, which passes it on to the MCP server
     /// (service URL, token, connection). Kept out of files and arguments.
     pub env: Vec<(String, String)>,
+    /// Timeouts of the turn.
+    pub limits: Limits,
 }
 
 pub enum Outcome {
     Finished,
     Stopped,
+}
+
+/// How long a turn may take before sqail gives up on the CLI.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    /// No output at all for this long (e.g. a CLI waiting for a login).
+    pub idle: Duration,
+    /// The whole turn.
+    pub total: Duration,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            idle: Duration::from_secs(5 * 60),
+            total: Duration::from_secs(30 * 60),
+        }
+    }
 }
 
 /// Run one turn, sending every event to `on_event`, until the CLI exits or
@@ -91,12 +112,17 @@ pub async fn run(
             )
         })?,
     };
-    std::fs::create_dir_all(&req.workdir)
+    create_private_dir(&req.workdir)
         .with_context(|| format!("creating {}", req.workdir.display()))?;
+    // Grok's prompt file lives only as long as the turn.
+    let _prompt_file = RemoveOnDrop(req.workdir.join(PROMPT_FILE));
     let (args, stdin) = arguments(&req)?;
-    let mut cmd = tokio::process::Command::new(&program);
-    cmd.args(&args)
+    let (exe, pre_args) = launcher(&program);
+    let mut cmd = tokio::process::Command::new(&exe);
+    cmd.args(&pre_args)
+        .args(&args)
         .current_dir(&req.workdir)
+        .envs(cli_env(req.provider))
         .envs(req.env.iter().map(|(k, v)| (k, v)))
         .stdin(if stdin.is_some() {
             Stdio::piped()
@@ -114,11 +140,17 @@ pub async fn run(
     let mut child = cmd
         .spawn()
         .with_context(|| format!("starting {}", program.display()))?;
-    if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
-        pipe.write_all(text.as_bytes()).await?;
-        // Dropping the pipe closes it, so the CLI stops reading.
-    }
-    let stdout = child.stdout.take().context("no stdout")?;
+    // The prompt is written while stdout is read: a CLI that exits at once
+    // (unknown flag, old version) then reports its own error, not a broken
+    // pipe.
+    let writer = match (stdin, child.stdin.take()) {
+        (Some(text), Some(mut pipe)) => Some(tokio::spawn(async move {
+            // Dropping the pipe closes it, so the CLI stops reading.
+            pipe.write_all(text.as_bytes()).await
+        })),
+        _ => None,
+    };
+    let mut stdout = BufReader::new(child.stdout.take().context("no stdout")?);
     let mut stderr = child.stderr.take().context("no stderr")?;
     let stderr_task = tokio::spawn(async move {
         let mut buf = Vec::new();
@@ -126,49 +158,207 @@ pub async fn run(
         String::from_utf8_lossy(&buf).into_owned()
     });
 
-    let mut lines = BufReader::new(stdout).lines();
+    let label = req.provider.label();
     let mut parser = Parser::default();
     let mut done = false;
+    // Whether the turn left anything to show in the conversation.
+    let mut answered = false;
+    // Output that is not the CLI's JSON (e.g. plain text from a CLI that
+    // ignored the output format), shown when nothing else came.
+    let mut stray = String::new();
+    let deadline = tokio::time::Instant::now() + req.limits.total;
+    let mut buf = Vec::new();
     loop {
+        buf.clear();
+        let read = tokio::time::timeout_at(
+            deadline.min(tokio::time::Instant::now() + req.limits.idle),
+            stdout.read_until(b'\n', &mut buf),
+        );
         tokio::select! {
-            line = lines.next_line() => match line? {
-                Some(line) => {
-                    for ev in parser.line(&line) {
+            read = read => match read {
+                Ok(Ok(0)) => break,
+                Ok(Ok(_)) => {
+                    // Lossy: one odd byte must not end the turn.
+                    let text = String::from_utf8_lossy(&buf);
+                    let line = text.trim_end_matches(['\r', '\n']);
+                    let events = parser.line(line);
+                    if events.is_empty() && !line.trim_start().starts_with('{') {
+                        stray.push_str(line);
+                        stray.push('\n');
+                        keep_tail(&mut stray, TAIL_CHARS);
+                    }
+                    for ev in events {
                         done |= matches!(ev, Event::Done { .. });
+                        answered |= shows_something(&ev);
+                        let ev = match ev {
+                            Event::McpFailed { server, status } => {
+                                let why = tokio::select! {
+                                    why = diagnose_mcp(&req) => why,
+                                    _ = &mut stop => {
+                                        kill_tree(&mut child).await;
+                                        return Ok(Outcome::Stopped);
+                                    }
+                                };
+                                Event::Error(mcp_failed_message(&server, &status, &why))
+                            }
+                            ev => ev,
+                        };
                         on_event(ev);
                     }
                 }
-                None => break,
+                Ok(Err(e)) => {
+                    kill_tree(&mut child).await;
+                    return Err(anyhow!(e).context(format!("reading {label}'s output")));
+                }
+                Err(_) => {
+                    kill_tree(&mut child).await;
+                    let stderr = stderr_tail(stderr_task).await;
+                    let what = if tokio::time::Instant::now() >= deadline {
+                        format!("did not finish within {}", minutes(req.limits.total))
+                    } else {
+                        format!(
+                            "printed nothing for {} (is it waiting for a sign-in?)",
+                            minutes(req.limits.idle)
+                        )
+                    };
+                    bail!("{label} {what}, so sqail stopped it{}", with_tail(&stderr));
+                }
             },
             _ = &mut stop => {
-                let _ = child.kill().await;
+                kill_tree(&mut child).await;
                 return Ok(Outcome::Stopped);
             }
         }
     }
     let status = child.wait().await?;
-    let stderr = stderr_task.await.unwrap_or_default();
+    let stderr = stderr_tail(stderr_task).await;
+    let written = match writer {
+        Some(w) => w.await.unwrap_or(Ok(())),
+        None => Ok(()),
+    };
     if !status.success() && !done {
-        let tail: String = stderr
-            .trim()
-            .chars()
-            .rev()
-            .take(1500)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        bail!(
-            "{} exited with {status}{}",
-            req.provider.label(),
-            if tail.is_empty() {
-                String::new()
-            } else {
-                format!(":\n{tail}")
+        bail!("{label} exited with {status}{}", with_tail(&stderr));
+    }
+    if let Err(e) = written
+        && e.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        bail!("sending the question to {label}: {e}{}", with_tail(&stderr));
+    }
+    if !answered {
+        let mut why = stray.trim().to_string();
+        if !stderr.is_empty() {
+            if !why.is_empty() {
+                why.push('\n');
             }
-        );
+            why.push_str(&stderr);
+        }
+        keep_tail(&mut why, TAIL_CHARS);
+        bail!("No answer received from {label}{}", with_tail(&why));
     }
     Ok(Outcome::Finished)
+}
+
+/// The most of a CLI's stderr or stray output shown in an error.
+const TAIL_CHARS: usize = 1500;
+
+/// Whether an event leaves something visible in the conversation.
+fn shows_something(ev: &Event) -> bool {
+    match ev {
+        Event::Session(_) => false,
+        Event::Done {
+            is_error, message, ..
+        } => *is_error || message.is_some(),
+        Event::TextDelta(t) | Event::Text(t) => !t.is_empty(),
+        Event::ToolUse { .. }
+        | Event::ToolResult { .. }
+        | Event::McpFailed { .. }
+        | Event::Error(_) => true,
+    }
+}
+
+fn minutes(d: Duration) -> String {
+    match d.as_secs() {
+        s if s < 120 => format!("{s} seconds"),
+        s => format!("{} minutes", s / 60),
+    }
+}
+
+/// The end of the CLI's stderr, once it is closed.
+async fn stderr_tail(task: tokio::task::JoinHandle<String>) -> String {
+    // A grandchild (the MCP server) may keep stderr open after a kill.
+    let text = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default();
+    let mut text = text.trim().to_string();
+    keep_tail(&mut text, TAIL_CHARS);
+    text
+}
+
+/// Keep the last `max` characters of `s`.
+fn keep_tail(s: &mut String, max: usize) {
+    let n = s.chars().count();
+    if n > max {
+        let cut = s.char_indices().nth(n - max).map_or(0, |(i, _)| i);
+        s.drain(..cut);
+    }
+}
+
+fn with_tail(tail: &str) -> String {
+    if tail.is_empty() {
+        ".".into()
+    } else {
+        format!(":\n{tail}")
+    }
+}
+
+fn mcp_failed_message(server: &str, status: &str, why: &str) -> String {
+    let what = if server == "sqail" {
+        "sqail's database tools did not start".to_string()
+    } else {
+        format!("The MCP server `{server}` did not start")
+    };
+    format!(
+        "{what} (status: {status}), so the assistant cannot see the database{}",
+        with_tail(why)
+    )
+}
+
+/// Why `sqail mcp` fails: start it the way the CLI does, with no input, and
+/// return its error. It connects to the service before it reads anything,
+/// so a stopped service, a rejected token or a deleted connection shows here.
+async fn diagnose_mcp(req: &Request) -> String {
+    let Some((exe, args)) = req.mcp_command.split_first() else {
+        return "no MCP server command".into();
+    };
+    let mut cmd = tokio::process::Command::new(exe);
+    cmd.args(args)
+        .current_dir(&req.workdir)
+        .envs(req.env.iter().map(|(k, v)| (k, v)))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = match tokio::time::timeout(Duration::from_secs(20), cmd.output()).await {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => return format!("starting {exe}: {e}"),
+        Err(_) => return "it did not finish starting within 20 seconds".into(),
+    };
+    let mut text = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    keep_tail(&mut text, TAIL_CHARS);
+    if !text.is_empty() {
+        text
+    } else if out.status.success() {
+        "it starts when sqail runs it directly; the CLI's own logs may say more".into()
+    } else {
+        format!("it exited with {}", out.status)
+    }
 }
 
 /// The CLI arguments, and the prompt when it goes through stdin. Also writes
@@ -199,6 +389,10 @@ fn arguments(req: &Request) -> Result<(Vec<String>, Option<String>)> {
                 s("--mcp-config"),
                 path.to_string_lossy().into_owned(),
                 s("--strict-mcp-config"),
+                // None of the user's own settings: no hooks, plugins, skills
+                // or CLAUDE.md files; sign-in still works.
+                s("--setting-sources"),
+                s(""),
                 s("--allowedTools"),
                 allowed.join(","),
                 s("--append-system-prompt"),
@@ -230,16 +424,16 @@ fn arguments(req: &Request) -> Result<(Vec<String>, Option<String>)> {
             let dir = req.workdir.join(".grok");
             std::fs::create_dir_all(&dir)?;
             std::fs::write(dir.join("config.toml"), toml::to_string(&root)?)?;
-            // Grok has no system-prompt append; the first turn carries the
-            // instructions, later turns continue that session.
-            let prompt = if req.resume.is_some() {
-                req.prompt.clone()
-            } else {
-                format!("{}\n\n{}", req.instructions, req.prompt)
-            };
+            // The prompt goes through a file only the user can read: not on
+            // the command line, where other users could see it and Windows
+            // limits its length.
+            let prompt_file = req.workdir.join(PROMPT_FILE);
+            write_private(&prompt_file, req.prompt.as_bytes())?;
             let mut args = vec![
-                // One argument, so a prompt starting with `-` is not a flag.
-                format!("--single={prompt}"),
+                s("--prompt-file"),
+                prompt_file.to_string_lossy().into_owned(),
+                // One argument, so instructions starting with `-` are no flag.
+                format!("--rules={}", req.instructions),
                 s("--trust"),
                 s("--output-format"),
                 s("streaming-messages-json"),
@@ -268,9 +462,8 @@ fn arguments(req: &Request) -> Result<(Vec<String>, Option<String>)> {
     })
 }
 
-/// `name` on PATH. On Windows also `name.exe` / `.cmd` / `.bat`, and an npm
-/// `.cmd` shim is resolved to the native executable it starts, because
-/// batch files cannot take multi-line arguments.
+/// `name` on PATH. On Windows also `name.exe` / `.cmd` / `.bat` (see
+/// [`launcher`] for what runs a `.cmd`).
 pub fn find_program(name: &str) -> Option<PathBuf> {
     let exts: &[&str] = if cfg!(windows) {
         &["exe", "cmd", "bat"]
@@ -286,11 +479,6 @@ pub fn find_program(name: &str) -> Option<PathBuf> {
                 dir.join(format!("{name}.{ext}"))
             };
             if p.is_file() {
-                if matches!(*ext, "cmd" | "bat")
-                    && let Some(native) = shim_target(&p)
-                {
-                    return Some(native);
-                }
                 return Some(p);
             }
         }
@@ -298,26 +486,236 @@ pub fn find_program(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// The `.exe` an npm `.cmd` shim runs (`"%dp0%\node_modules\…\x.exe" %*`).
-fn shim_target(shim: &Path) -> Option<PathBuf> {
-    let text = std::fs::read_to_string(shim).ok()?;
-    let rel = shim_exe(&text)?;
-    let p = shim.parent()?.join(rel);
-    p.is_file().then_some(p)
+/// What to start for `program`, and the arguments that go first. An npm
+/// `.cmd` shim is replaced by what it runs: batch files cannot take
+/// multi-line arguments, and stopping the `cmd.exe` of a shim would leave
+/// the real CLI running.
+fn launcher(program: &Path) -> (PathBuf, Vec<String>) {
+    let shim = program
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"));
+    if shim && let Some(target) = shim_launcher(program) {
+        return target;
+    }
+    (program.to_path_buf(), Vec::new())
 }
 
-fn shim_exe(text: &str) -> Option<String> {
+/// The program an npm `.cmd` shim runs: a native `.exe`
+/// (`"%dp0%\node_modules\…\x.exe" %*`) or a script run by node
+/// (`"%_prog%" "%dp0%\node_modules\…\cli.js" %*`).
+fn shim_launcher(shim: &Path) -> Option<(PathBuf, Vec<String>)> {
+    let text = std::fs::read_to_string(shim).ok()?;
+    let dir = shim.parent()?;
+    match shim_target(&text)? {
+        ShimTarget::Exe(rel) => {
+            let p = dir.join(rel);
+            p.is_file().then_some((p, Vec::new()))
+        }
+        ShimTarget::Node(rel) => {
+            let script = dir.join(rel);
+            if !script.is_file() {
+                return None;
+            }
+            // The shim prefers a node.exe next to itself.
+            let node = Some(dir.join("node.exe"))
+                .filter(|p| p.is_file())
+                .or_else(|| find_program("node"))?;
+            Some((node, vec![script.to_string_lossy().into_owned()]))
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum ShimTarget {
+    Exe(String),
+    Node(String),
+}
+
+fn shim_target(text: &str) -> Option<ShimTarget> {
+    let mut script = None;
     for marker in ["%dp0%\\", "%~dp0\\", "%~dp0"] {
         for (i, _) in text.match_indices(marker) {
             let rest = &text[i + marker.len()..];
             let end = rest.find(['"', ' ', '\r', '\n']).unwrap_or(rest.len());
             let rel = &rest[..end];
-            if rel.to_ascii_lowercase().ends_with(".exe") {
-                return Some(rel.replace('\\', std::path::MAIN_SEPARATOR_STR));
+            let lower = rel.to_ascii_lowercase();
+            let native = || rel.replace('\\', std::path::MAIN_SEPARATOR_STR);
+            // `IF EXIST "%dp0%\node.exe"` is the interpreter, not the CLI.
+            if lower.ends_with(".exe") && lower != "node.exe" {
+                return Some(ShimTarget::Exe(native()));
+            }
+            if script.is_none() && (lower.ends_with(".js") || lower.ends_with(".mjs")) {
+                script = Some(ShimTarget::Node(native()));
             }
         }
     }
-    None
+    script
+}
+
+/// Stop the CLI. On Windows the whole process tree: killing a process does
+/// not end its children there.
+async fn kill_tree(child: &mut tokio::process::Child) {
+    #[cfg(windows)]
+    {
+        if let Some(pid) = child.id() {
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            let _ = tokio::process::Command::new("taskkill")
+                .args(["/T", "/F", "/PID", &pid.to_string()])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .creation_flags(CREATE_NO_WINDOW)
+                .status()
+                .await;
+        }
+    }
+    let _ = child.kill().await;
+}
+
+/// Environment for the CLI itself (on top of sqail's MCP settings).
+fn cli_env(provider: Provider) -> Vec<(&'static str, &'static str)> {
+    match provider {
+        // `--setting-sources ""` leaves out the user's settings, but not the
+        // auto-memory of the working directory.
+        Provider::ClaudeCode => vec![("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")],
+        Provider::Grok => Vec::new(),
+    }
+}
+
+/// Grok's prompt, in the conversation's private folder during a turn.
+const PROMPT_FILE: &str = "prompt.txt";
+
+struct RemoveOnDrop(PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// `dir` and its parents, with `dir` readable only by the user.
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// Write a file only the user can read.
+fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        opts.mode(0o600);
+        // An older file keeps its mode; tighten it first.
+        if path.exists() {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    use std::io::Write;
+    opts.open(path)?.write_all(data)
+}
+
+/// Remove a conversation's private folder and what the CLIs keep about it
+/// under their own data folders (Claude Code: `~/.claude/projects/<folder>`,
+/// Grok: `~/.grok/sessions/<folder>`), which hold the whole transcript,
+/// including query results. Blocking file work: call it off the UI thread
+/// where that matters.
+pub fn remove_conversation_data(workdir: &Path) {
+    remove_conversation_data_in(workdir, &cli_session_dirs());
+}
+
+/// Where the CLIs keep a folder per working directory.
+fn cli_session_dirs() -> Vec<PathBuf> {
+    let home = directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf());
+    let claude = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| home.as_ref().map(|h| h.join(".claude")));
+    let grok = home.map(|h| h.join(".grok"));
+    [
+        claude.map(|d| d.join("projects")),
+        grok.map(|d| d.join("sessions")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+fn remove_conversation_data_in(workdir: &Path, session_dirs: &[PathBuf]) {
+    let _ = std::fs::remove_dir_all(workdir);
+    // The folder's name is a random UUID; the CLIs name their folder after
+    // the whole path (`-home-me--config-sqail-assistant-<uuid>`,
+    // `%2Fhome%2Fme%2F.config%2Fsqail%2Fassistant%2F<uuid>`), so it ends
+    // with that UUID, and nothing else does.
+    let Some(id) = workdir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| uuid::Uuid::parse_str(n).is_ok())
+    else {
+        return;
+    };
+    for dir in session_dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            if name.len() > id.len() && name.ends_with(id) {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+    }
+}
+
+/// Remove conversations left behind by an earlier run (a crash, or a sqail
+/// from before they were removed on exit): folders under `root` not used for
+/// `max_age`. Another sqail still running keeps using its folder, which then
+/// is recent.
+pub fn sweep_stale(root: &Path, max_age: Duration) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    let session_dirs = cli_session_dirs();
+    for e in entries.flatten() {
+        let path = e.path();
+        let is_conversation = e.file_type().is_ok_and(|t| t.is_dir())
+            && e.file_name()
+                .to_str()
+                .is_some_and(|n| uuid::Uuid::parse_str(n).is_ok());
+        let idle = last_used(&path)
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|d| d > max_age);
+        if is_conversation && idle {
+            remove_conversation_data_in(&path, &session_dirs);
+        }
+    }
+}
+
+/// The newest modification time of `dir` and the files in it (each turn
+/// rewrites the MCP configuration there).
+fn last_used(dir: &Path) -> Option<std::time::SystemTime> {
+    let mut newest = std::fs::metadata(dir).ok()?.modified().ok()?;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let Ok(meta) = e.metadata() else { continue };
+            if let Ok(m) = meta.modified() {
+                newest = newest.max(m);
+            }
+            if meta.is_dir() {
+                stack.push(e.path());
+            }
+        }
+    }
+    Some(newest)
 }
 
 #[cfg(test)]
@@ -335,6 +733,7 @@ mod tests {
             workdir: dir.to_path_buf(),
             mcp_command: vec!["/opt/sqail/sqail".into(), "mcp".into()],
             env: vec![],
+            limits: Limits::default(),
         }
     }
 
@@ -372,7 +771,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (args, stdin) = arguments(&req(Provider::Grok, dir.path(), None)).unwrap();
         assert!(stdin.is_none());
-        assert_eq!(args[0], "--single=INSTR\n\nline one\nline two");
+        // The prompt is in a private file, not on the command line.
+        let file = dir.path().join(PROMPT_FILE);
+        assert_eq!(after(&args, "--prompt-file"), [file.to_str().unwrap()]);
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "line one\nline two"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        assert!(args.iter().all(|a| !a.contains("line one")), "{args:?}");
+        assert!(!args.iter().any(|a| a.starts_with("--single")));
+        assert!(args.contains(&"--rules=INSTR".to_string()));
         assert_eq!(after(&args, "--tools"), ["search_tool,use_tool"]);
         assert_eq!(after(&args, "--permission-mode"), ["dontAsk"]);
         assert_eq!(after(&args, "--allow").len(), 4);
@@ -387,7 +801,226 @@ mod tests {
 
         let (args, _) = arguments(&req(Provider::Grok, dir.path(), Some("g1"))).unwrap();
         assert!(args.contains(&"--continue".to_string()));
-        assert_eq!(args[0], "--single=line one\nline two");
+        assert!(args.contains(&"--rules=INSTR".to_string()));
+    }
+
+    #[test]
+    fn conversation_data_is_removed_with_the_cli_transcripts() {
+        let root = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let other = uuid::Uuid::new_v4().to_string();
+        let workdir = root.path().join("cfg/assistant").join(&id);
+        std::fs::create_dir_all(workdir.join(".grok")).unwrap();
+        let claude = root.path().join("claude/projects");
+        let grok = root.path().join("grok/sessions");
+        let mine = [
+            claude.join(format!("-x-cfg-assistant-{id}")),
+            grok.join(format!("%2Fx%2Fcfg%2Fassistant%2F{id}")),
+        ];
+        let kept = [
+            claude.join(format!("-x-cfg-assistant-{other}")),
+            claude.join("-home-me-project"),
+            grok.join("%2Fhome%2Fme"),
+        ];
+        for d in mine.iter().chain(&kept) {
+            std::fs::create_dir_all(d).unwrap();
+            std::fs::write(d.join("s.jsonl"), "rows").unwrap();
+        }
+        remove_conversation_data_in(&workdir, &[claude.clone(), grok.clone()]);
+        assert!(!workdir.exists());
+        for d in &mine {
+            assert!(!d.exists(), "{}", d.display());
+        }
+        for d in &kept {
+            assert!(d.exists(), "{}", d.display());
+        }
+
+        // A folder that is not a conversation's never matches anything.
+        let odd = root.path().join("project");
+        std::fs::create_dir_all(&odd).unwrap();
+        remove_conversation_data_in(&odd, std::slice::from_ref(&claude));
+        assert!(claude.join("-home-me-project").exists());
+    }
+
+    #[test]
+    fn stale_conversations_are_swept() {
+        let root = tempfile::tempdir().unwrap();
+        let conv = root.path().join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&conv).unwrap();
+        std::fs::write(conv.join("sqail-mcp.json"), "{}").unwrap();
+        let other = root.path().join("not-a-conversation");
+        std::fs::create_dir_all(&other).unwrap();
+        // Recently used: kept.
+        sweep_stale(root.path(), Duration::from_secs(3600));
+        assert!(conv.exists());
+        // Unused for longer than the limit: removed (but only conversations).
+        std::thread::sleep(Duration::from_millis(20));
+        sweep_stale(root.path(), Duration::from_millis(1));
+        assert!(!conv.exists());
+        assert!(other.exists());
+    }
+
+    #[test]
+    fn claude_code_runs_without_the_users_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let (args, _) = arguments(&req(Provider::ClaudeCode, dir.path(), None)).unwrap();
+        assert_eq!(after(&args, "--setting-sources"), [""]);
+        assert_eq!(
+            cli_env(Provider::ClaudeCode),
+            [("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn grok_prompt_file_is_removed_after_the_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = req(Provider::Grok, &dir.path().join("work"), None);
+        let seen = dir.path().join("seen.txt");
+        r.program = Some(script(
+            dir.path(),
+            "grok",
+            &format!(
+                "while [ \"$1\" != --prompt-file ]; do shift; done; cp \"$2\" '{}'; echo '{RESULT}'",
+                seen.display()
+            ),
+        ));
+        let workdir = r.workdir.clone();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (_stop, rx) = oneshot::channel();
+        let outcome = rt.block_on(run(r, |_| {}, rx)).unwrap();
+        assert!(matches!(outcome, Outcome::Finished));
+        assert_eq!(
+            std::fs::read_to_string(&seen).unwrap(),
+            "line one\nline two"
+        );
+        assert!(!workdir.join(PROMPT_FILE).exists());
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&workdir).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
+
+    /// An executable shell script in `dir`.
+    #[cfg(unix)]
+    fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// One turn of a fake `claude` whose script is `body`.
+    #[cfg(unix)]
+    fn turn(body: &str, edit: impl FnOnce(&mut Request)) -> (Result<Outcome>, Vec<Event>) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = req(Provider::ClaudeCode, &dir.path().join("work"), None);
+        r.program = Some(script(dir.path(), "claude", body));
+        edit(&mut r);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (_stop, rx) = oneshot::channel();
+        let mut events = Vec::new();
+        let outcome = rt.block_on(run(r, |e| events.push(e), rx));
+        (outcome, events)
+    }
+
+    #[cfg(unix)]
+    const RESULT: &str = r#"{"type":"result","is_error":false,"result":"fine","session_id":"s"}"#;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_turn_without_an_answer_says_so_with_the_output() {
+        let (outcome, events) = turn(
+            "cat > /dev/null; echo 'Hello from plain text'; echo 'some warning' >&2",
+            |_| {},
+        );
+        let err = format!("{:#}", outcome.err().expect("an error"));
+        assert!(
+            err.starts_with("No answer received from Claude Code"),
+            "{err}"
+        );
+        assert!(err.contains("Hello from plain text"), "{err}");
+        assert!(err.contains("some warning"), "{err}");
+        assert!(events.is_empty(), "{events:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_that_exits_at_once_reports_its_stderr() {
+        // It never reads the prompt, which is larger than a pipe buffer.
+        let (outcome, _) = turn("echo 'error: unknown option --foo' >&2; exit 2", |r| {
+            r.prompt = "x".repeat(1 << 20);
+        });
+        let err = format!("{:#}", outcome.err().expect("an error"));
+        assert!(err.contains("exited with"), "{err}");
+        assert!(err.contains("unknown option --foo"), "{err}");
+        assert!(!err.to_lowercase().contains("broken pipe"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_utf8_does_not_end_the_turn() {
+        let (outcome, events) = turn(
+            &format!("cat > /dev/null; printf 'bad \\377 byte\\n'; echo '{RESULT}'"),
+            |_| {},
+        );
+        assert!(matches!(outcome, Ok(Outcome::Finished)));
+        assert!(
+            matches!(events.last(), Some(Event::Done { message: Some(m), .. }) if m == "fine"),
+            "{events:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_silent_cli_times_out() {
+        let (outcome, _) = turn("echo 'waiting for login' >&2; exec sleep 30", |r| {
+            r.limits.idle = Duration::from_millis(300);
+        });
+        let err = format!("{:#}", outcome.err().expect("an error"));
+        assert!(err.contains("printed nothing for 0 seconds"), "{err}");
+        assert!(err.contains("waiting for login"), "{err}");
+
+        let (outcome, _) = turn(
+            "while true; do echo '{\"type\":\"keepalive\"}'; sleep 0.1; done",
+            |r| r.limits.total = Duration::from_millis(500),
+        );
+        let err = format!("{:#}", outcome.err().expect("an error"));
+        assert!(err.contains("did not finish within"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_mcp_server_is_reported_with_its_reason() {
+        let init = r#"{"type":"system","subtype":"init","session_id":"s","mcp_servers":[{"name":"sqail","status":"failed"}]}"#;
+        let (outcome, events) = turn(
+            &format!("cat > /dev/null; echo '{init}'; echo '{RESULT}'"),
+            |r| {
+                let mcp = script(
+                    r.workdir.parent().unwrap(),
+                    "fake-sqail",
+                    "echo \"sqail mcp: looking up the connection: $SQAIL_TEST_WHY\" >&2; exit 1",
+                );
+                r.mcp_command = vec![mcp.to_string_lossy().into_owned(), "mcp".into()];
+                r.env = vec![("SQAIL_TEST_WHY".into(), "404 not found".into())];
+            },
+        );
+        assert!(matches!(outcome, Ok(Outcome::Finished)));
+        let error = events
+            .iter()
+            .find_map(|e| match e {
+                Event::Error(e) => Some(e.as_str()),
+                _ => None,
+            })
+            .expect("an error event");
+        assert!(
+            error.contains("sqail's database tools did not start (status: failed)"),
+            "{error}"
+        );
+        assert!(
+            error.contains("looking up the connection: 404 not found"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -395,10 +1028,42 @@ mod tests {
         let shim = "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n\"%dp0%\\node_modules\\@xai-official\\grok\\bin\\grok.exe\"   %*\r\n";
         let sep = std::path::MAIN_SEPARATOR_STR;
         assert_eq!(
-            shim_exe(shim).unwrap(),
-            ["node_modules", "@xai-official", "grok", "bin", "grok.exe"].join(sep)
+            shim_target(shim).unwrap(),
+            ShimTarget::Exe(["node_modules", "@xai-official", "grok", "bin", "grok.exe"].join(sep))
         );
-        let js = "\"%_prog%\"  \"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js\" %*\r\n";
-        assert_eq!(shim_exe(js), None);
+        // Claude Code's npm shim runs a script with node, preferably the
+        // node.exe next to it, which is not the CLI itself.
+        let js = "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n\r\nIF EXIST \"%dp0%\\node.exe\" (\r\n  SET \"_prog=%dp0%\\node.exe\"\r\n) ELSE (\r\n  SET \"_prog=node\"\r\n  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n)\r\n\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js\" %*\r\n";
+        assert_eq!(
+            shim_target(js).unwrap(),
+            ShimTarget::Node(["node_modules", "@anthropic-ai", "claude-code", "cli.js"].join(sep))
+        );
+    }
+
+    #[test]
+    fn a_node_shim_launches_node_with_the_script() {
+        let dir = tempfile::tempdir().unwrap();
+        let shim = dir.path().join("claude.cmd");
+        std::fs::write(
+            &shim,
+            "\"%_prog%\"  \"%dp0%\\node_modules\\pkg\\cli.js\" %*\r\n",
+        )
+        .unwrap();
+        let script = dir
+            .path()
+            .join(["node_modules", "pkg", "cli.js"].join(std::path::MAIN_SEPARATOR_STR));
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(&script, "").unwrap();
+        std::fs::write(dir.path().join("node.exe"), "").unwrap();
+        assert_eq!(
+            launcher(&shim),
+            (
+                dir.path().join("node.exe"),
+                vec![script.to_string_lossy().into_owned()]
+            )
+        );
+        // Anything else starts as it is.
+        let exe = dir.path().join("claude");
+        assert_eq!(launcher(&exe), (exe.clone(), Vec::<String>::new()));
     }
 }

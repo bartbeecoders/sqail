@@ -116,11 +116,11 @@ impl Assistant {
         self.running.is_some()
     }
 
-    /// Forget the conversation (and its CLI session folder).
+    /// Forget the conversation, with its folder and the CLI's transcript.
     pub fn new_chat(&mut self) {
         self.stop();
         if let Some(c) = self.conversation.take() {
-            let _ = std::fs::remove_dir_all(&c.workdir);
+            cli::remove_conversation_data(&c.workdir);
         }
         self.entries.clear();
     }
@@ -192,6 +192,10 @@ impl Assistant {
                     self.entries.push(Entry::Note(format!("${cost:.4}")));
                 }
             }
+            Update::Event(Event::Error(e)) => self.entries.push(Entry::Error(e)),
+            Update::Event(Event::McpFailed { server, status }) => self.entries.push(Entry::Error(
+                format!("The MCP server `{server}` did not start (status: {status})."),
+            )),
             Update::Finished(result) => {
                 self.running = None;
                 if let Err(e) = result {
@@ -200,6 +204,20 @@ impl Assistant {
             }
         }
     }
+}
+
+/// Where conversations keep their private folders.
+fn conversations_dir() -> PathBuf {
+    crate::settings::config_dir().join("assistant")
+}
+
+/// Remove, in the background, conversations an earlier run left behind
+/// (conversations do not outlive sqail, but a crash skips the clean-up).
+pub fn sweep_stale_conversations() {
+    let root = conversations_dir();
+    std::thread::spawn(move || {
+        cli::sweep_stale(&root, std::time::Duration::from_secs(24 * 3600));
+    });
 }
 
 /// Instructions for the model: one line, so they survive any command line.
@@ -219,9 +237,60 @@ fn instructions(engine: Engine, connection: &str, max_rows: u64) -> String {
 
 const EDITOR_CONTEXT_CHARS: usize = 8000;
 
+/// Whether `tab` is on the chat's connection: only then does its SQL go
+/// with a question, and does Insert put an answer into it.
+pub fn same_connection(tab: Option<&crate::editor::Tab>, conversation: &Conversation) -> bool {
+    tab.and_then(|t| t.connection) == Some(conversation.connection)
+}
+
+/// What goes with the question besides itself (appended to the prompt),
+/// and a note for the conversation about what was left out.
+fn editor_context(
+    tab: Option<&crate::editor::Tab>,
+    conversation: &Conversation,
+    include_editor: bool,
+) -> (String, Option<String>) {
+    let Some(sql) = tab
+        .map(|t| t.text.trim())
+        .filter(|s| include_editor && !s.is_empty())
+    else {
+        return (String::new(), None);
+    };
+    if !same_connection(tab, conversation) {
+        return (
+            String::new(),
+            Some(format!(
+                "The active tab is not on this chat's connection “{}”, so its SQL was not sent.",
+                conversation.connection_name
+            )),
+        );
+    }
+    let mut shown: String = sql.chars().take(EDITOR_CONTEXT_CHARS).collect();
+    let cut = shown.len() < sql.len();
+    if cut {
+        shown.push_str("\n-- …");
+    }
+    let mut context = format!("\n\nThe SQL in my editor:\n```sql\n{shown}\n```");
+    if cut {
+        context.push_str(&format!(
+            "\n(Truncated: this is only the first {EDITOR_CONTEXT_CHARS} characters of the editor.)"
+        ));
+    }
+    (context, None)
+}
+
 impl SqailApp {
     pub fn assistant_update(&mut self, run: u64, update: Update) {
         self.assistant.apply(run, update);
+    }
+
+    /// Whether the active tab is on the chat's connection (true before a
+    /// chat has started: it will be).
+    pub fn assistant_tab_matches(&self) -> bool {
+        self.assistant
+            .conversation
+            .as_ref()
+            .is_none_or(|c| same_connection(self.tabs.get(self.active), c))
     }
 
     /// Send the text in the input box as the next turn.
@@ -232,15 +301,25 @@ impl SqailApp {
         }
         let tab = self.tabs.get(self.active);
         // A chat stays on the connection it started with.
-        let conn_id = match &self.assistant.conversation {
-            Some(c) => Some(c.connection),
-            None => tab.and_then(|t| t.connection),
+        let conn = match &self.assistant.conversation {
+            Some(c) => self.service.connection(c.connection).ok_or_else(|| {
+                format!(
+                    "This chat's connection “{}” is no longer available (deleted, or another \
+                     service is connected). Start a new chat.",
+                    c.connection_name
+                )
+            }),
+            None => tab
+                .and_then(|t| t.connection)
+                .and_then(|id| self.service.connection(id))
+                .ok_or_else(|| "Choose a connection for the editor tab first.".to_string()),
         };
-        let Some(conn) = conn_id.and_then(|id| self.service.connection(id)).cloned() else {
-            self.assistant.entries.push(Entry::Error(
-                "Choose a connection for the editor tab first.".into(),
-            ));
-            return;
+        let conn = match conn {
+            Ok(c) => c.clone(),
+            Err(e) => {
+                self.assistant.entries.push(Entry::Error(e));
+                return;
+            }
         };
         let (Some(profile), true) = (self.service.profile.clone(), self.service.client.is_some())
         else {
@@ -264,18 +343,11 @@ impl SqailApp {
                 connection: conn.id,
                 connection_name: conn.name.clone(),
                 engine: conn.engine,
-                workdir: crate::settings::config_dir()
-                    .join("assistant")
-                    .join(Uuid::new_v4().to_string()),
+                workdir: conversations_dir().join(Uuid::new_v4().to_string()),
                 session: None,
             });
-        let mut prompt = question.clone();
-        if settings.include_editor
-            && let Some(sql) = tab.map(|t| t.text.trim()).filter(|s| !s.is_empty())
-        {
-            let sql: String = sql.chars().take(EDITOR_CONTEXT_CHARS).collect();
-            prompt.push_str(&format!("\n\nThe SQL in my editor:\n```sql\n{sql}\n```"));
-        }
+        let (context, note) = editor_context(tab, conversation, settings.include_editor);
+        let prompt = format!("{question}{context}");
         let mut env = vec![
             (mcp::Env::URL.to_string(), profile.url.clone()),
             (mcp::Env::TOKEN.to_string(), token),
@@ -315,8 +387,10 @@ impl SqailApp {
             workdir: conversation.workdir.clone(),
             mcp_command: vec![exe, "mcp".into()],
             env,
+            limits: cli::Limits::default(),
         };
         self.assistant.entries.push(Entry::User(question));
+        self.assistant.entries.extend(note.map(Entry::Note));
         self.assistant.input.clear();
         let run = self.assistant.next_run;
         self.assistant.next_run += 1;
@@ -420,6 +494,55 @@ mod tests {
             }),
         );
         assert_eq!(a.entries.last(), Some(&Entry::Answer("Answer".into())));
+    }
+
+    #[test]
+    fn editor_sql_goes_only_from_a_tab_on_the_chats_connection() {
+        let chat = Uuid::new_v4();
+        let conversation = Conversation {
+            provider: Provider::ClaudeCode,
+            connection: chat,
+            connection_name: "pg".into(),
+            engine: Engine::Postgres,
+            workdir: PathBuf::new(),
+            session: None,
+        };
+        let mut tab = crate::editor::Tab::new(1, "t".into(), Some(chat));
+        tab.text = "SELECT 1".into();
+        assert_eq!(
+            editor_context(Some(&tab), &conversation, true),
+            (
+                "\n\nThe SQL in my editor:\n```sql\nSELECT 1\n```".into(),
+                None
+            )
+        );
+        assert_eq!(
+            editor_context(Some(&tab), &conversation, false),
+            (String::new(), None)
+        );
+
+        for other in [Some(Uuid::new_v4()), None] {
+            tab.connection = other;
+            let (context, note) = editor_context(Some(&tab), &conversation, true);
+            assert_eq!(context, "");
+            assert!(note.unwrap().contains("not on this chat's connection “pg”"));
+        }
+
+        tab.connection = Some(chat);
+        tab.text = "x".repeat(EDITOR_CONTEXT_CHARS + 10);
+        let (context, _) = editor_context(Some(&tab), &conversation, true);
+        assert!(context.contains("\n-- …\n```"), "{context}");
+        assert!(
+            context.ends_with("(Truncated: this is only the first 8000 characters of the editor.)")
+        );
+        assert_eq!(context.matches('x').count(), EDITOR_CONTEXT_CHARS);
+    }
+
+    #[test]
+    fn error_events_become_error_entries() {
+        let mut a = running();
+        a.apply(1, Update::Event(Event::Error("tools failed".into())));
+        assert_eq!(a.entries, [Entry::Error("tools failed".into())]);
     }
 
     #[test]

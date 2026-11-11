@@ -450,10 +450,14 @@ most last quarter?"* or *"Why is the query in my editor slow?"*. The answer
 streams in. Each query it proposes gets **Insert** (at the cursor in the
 editor), **New tab** and **Copy** buttons. Follow-up questions continue the
 same conversation; **New chat** starts over. Enter sends, Shift+Enter adds a
-line. *Include editor SQL* sends the active tab's SQL along with your question.
+line. *Include editor SQL* sends the active tab's SQL along with your question
+(at most 8,000 characters; the assistant is told when it was cut off).
 
 A conversation stays on the connection of the tab that was active when it
-started (shown under the title). The assistant can:
+started (shown under the title). When the active tab is on another
+connection, its SQL is not sent (the conversation says so) and **Insert** is
+off; use **New tab**, which opens on the chat's connection, or start a new
+chat. The assistant can:
 
 | Tool | What it does |
 |---|---|
@@ -493,8 +497,29 @@ allowed to share with them.
 | `claude_model`, `grok_model` | the CLI's default | e.g. `"sonnet"` |
 | `max_rows` | `100` | Most rows one assistant query returns to the model |
 
-On Windows, sqail uses the native `grok.exe` behind npm's `grok.cmd`. If it
-can't find it, set `grok_path`.
+On Windows, sqail starts what npm's `.cmd` shims run (the native `grok.exe`
+behind `grok.cmd`; `node … cli.js` behind `claude.cmd`), so **Stop** ends
+the CLI itself. If it can't find them, set `grok_path` / `claude_path`.
+
+The CLI runs with sqail's context only: Claude Code without your own
+settings, hooks, plugins, skills, CLAUDE.md files or memory (your sign-in
+still works). Your question goes to Claude Code on stdin and to Grok in a
+file only you can read, not on the command line. **New chat** and quitting
+sqail delete the conversation, including the transcript the CLI keeps (see
+[security](security.md) for the details and what stays).
+
+**When a turn fails** the conversation shows why, in red:
+
+* *sqail's database tools did not start* — the CLI could not start `sqail mcp`.
+  sqail runs it once itself and shows its error (service not running, token
+  rejected, connection deleted, …).
+* *No answer received* — the CLI ended without an answer; its output and the
+  end of its error output follow.
+* *printed nothing for 5 minutes* — the CLI went quiet (for example, it waits
+  for a sign-in in a terminal), so sqail stopped it. A turn also stops after
+  30 minutes.
+* *This chat's connection … is no longer available* — the connection was
+  deleted, or sqail is connected to another service. Start a **New chat**.
 
 ## Settings
 

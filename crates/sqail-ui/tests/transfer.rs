@@ -113,6 +113,7 @@ fn round_trip(
             None,
             &csv,
             Format::Csv,
+            &transfer::ExportOptions::default(),
             |_| {},
         ))
         .unwrap()
@@ -304,6 +305,7 @@ fn whole_export_reruns_one_statement_on_the_session() {
             Some(cols),
             &path,
             Format::Csv,
+            &transfer::ExportOptions::default(),
             |_| {},
         ))
     };
@@ -345,6 +347,7 @@ fn whole_export_reports_the_service_row_limit() {
             None,
             &path,
             Format::Csv,
+            &transfer::ExportOptions::default(),
             |_| {},
         ))
         .unwrap()
@@ -359,6 +362,65 @@ fn whole_export_reports_the_service_row_limit() {
 
     let done = export("SELECT 1 AS i UNION ALL SELECT 2");
     assert_eq!((done.rows, done.truncated), (2, false));
+}
+
+/// An export that fails midway (here a runtime error after some rows)
+/// leaves no partial file, and an existing file untouched.
+#[test]
+fn failed_export_leaves_no_partial_file() {
+    let s = svc();
+    let conn = s.connect(
+        "lite",
+        ConnectionParams::Sqlite(SqliteParams {
+            path: s.dir.path().join("fail.db").to_string_lossy().into(),
+            create: true,
+        }),
+        None,
+    );
+    let out = s.dir.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+    let sql = "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 5000) \
+               SELECT CASE WHEN i < 4000 THEN i ELSE abs(-9223372036854775807 - 1) END AS i FROM n";
+    for format in Format::ALL {
+        let path = out.join(format!("fail.{}", format.extension()));
+        let mut written = 0;
+        let err =
+            s.rt.block_on(transfer::export_query(
+                &s.client,
+                On::Connection(conn),
+                Engine::Sqlite,
+                sql,
+                None,
+                &path,
+                format,
+                &transfer::ExportOptions::default(),
+                |n| written = n,
+            ))
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("overflow"), "{err:#}");
+        // Rows were written before the error.
+        assert!(written > 0, "{format:?}");
+    }
+    let left: Vec<_> = std::fs::read_dir(&out).unwrap().collect();
+    assert!(left.is_empty(), "{left:?}");
+
+    let path = out.join("keep.csv");
+    std::fs::write(&path, "old").unwrap();
+    assert!(
+        s.rt.block_on(transfer::export_query(
+            &s.client,
+            On::Connection(conn),
+            Engine::Sqlite,
+            sql,
+            None,
+            &path,
+            Format::Csv,
+            &transfer::ExportOptions::default(),
+            |_| {},
+        ))
+        .is_err()
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "old");
 }
 
 #[test]
@@ -477,6 +539,92 @@ fn rss_kb() -> u64 {
         .unwrap_or(0)
 }
 
+/// SQL INSERT and JSON exports of Postgres numeric NaN, bigints and jsonb
+/// give valid SQL and native JSON.
+#[test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+fn postgres_exports_keep_values_exact() {
+    let s = svc();
+    let pg = s.connect(
+        "pg",
+        ConnectionParams::Postgres(PostgresParams {
+            host: "127.0.0.1".into(),
+            port: 55432,
+            database: "sqail_test".into(),
+            user: "sqail".into(),
+            ssl_mode: PgSslMode::Disable,
+            ssl_root_cert: None,
+            ssl_client_cert: None,
+        }),
+        Some("sqail_dev_pw"),
+    );
+    let sql = "SELECT 'NaN'::numeric AS n, 1234567890123456789::bigint AS id, \
+               '{\"k\": 1}'::jsonb AS j";
+    let export = |format: Format, table: Option<&str>| {
+        let path = s.dir.path().join(format!("pg.{}", format.extension()));
+        s.rt.block_on(transfer::export_query(
+            &s.client,
+            On::Connection(pg),
+            Engine::Postgres,
+            sql,
+            None,
+            &path,
+            format,
+            &transfer::ExportOptions {
+                table: table.map(String::from),
+                ..Default::default()
+            },
+            |_| {},
+        ))
+        .unwrap();
+        std::fs::read_to_string(&path).unwrap()
+    };
+    let json: serde_json::Value = serde_json::from_str(&export(Format::Json, None)).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!([{"n": "NaN", "id": 1234567890123456789i64, "j": {"k": 1}}])
+    );
+    let t = format!("it_exact_{}", &Uuid::new_v4().simple().to_string()[..8]);
+    let insert = export(Format::Sql, Some(&t));
+    assert!(insert.contains("'NaN'"), "{insert}");
+    let session = s.rt.block_on(s.client.open_session(pg)).unwrap().id;
+    let run = |sql: &str| {
+        let events =
+            s.rt.block_on(
+                s.client
+                    .query_all(On::Session(session), &QueryRequest::new(sql)),
+            )
+            .unwrap();
+        for e in &events {
+            if let QueryEvent::Error { message, .. } = e {
+                panic!("{sql}: {message}");
+            }
+        }
+        events
+    };
+    run(&format!(
+        "CREATE TEMP TABLE {t} (n numeric, id bigint, j jsonb)"
+    ));
+    run(&insert);
+    let rows: Vec<_> = run(&format!("SELECT n::text, id, j->>'k' FROM {t}"))
+        .into_iter()
+        .filter_map(|e| match e {
+            QueryEvent::Rows { rows, .. } => Some(rows),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(
+        rows,
+        vec![vec![
+            serde_json::json!("NaN"),
+            serde_json::json!(1234567890123456789i64),
+            serde_json::json!("1")
+        ]]
+    );
+    let _ = s.rt.block_on(s.client.close_session(session));
+}
+
 #[test]
 #[ignore = "needs podman test databases (scripts/db.sh up)"]
 fn million_row_export_streams_with_flat_memory() {
@@ -506,6 +654,7 @@ fn million_row_export_streams_with_flat_memory() {
             None,
             &path,
             Format::Csv,
+            &transfer::ExportOptions::default(),
             |_| peak = peak.max(rss_kb()),
         ))
         .unwrap()

@@ -5,6 +5,7 @@
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
 use futures::StreamExt;
@@ -51,6 +52,40 @@ impl Format {
 /// Excel's hard limit is 1,048,576 rows per sheet (one is the header).
 const XLSX_ROWS_PER_SHEET: u32 = 1_048_575;
 
+/// How an export writes its file, besides the format.
+#[derive(Debug, Clone, Default)]
+pub struct ExportOptions {
+    /// Target of SQL INSERT exports, already quoted; `exported` when unknown.
+    pub table: Option<String>,
+    /// CSV: start with a UTF-8 byte order mark (Excel on Windows needs it to
+    /// read the file as UTF-8).
+    pub csv_bom: bool,
+    /// CSV: text written for NULL (empty: NULL and '' look the same).
+    pub csv_null: String,
+}
+
+/// Cell formats for dates and times in Excel exports.
+struct XlsxFormats {
+    date: rust_xlsxwriter::Format,
+    datetime: rust_xlsxwriter::Format,
+    datetime_ms: rust_xlsxwriter::Format,
+    time: rust_xlsxwriter::Format,
+    time_ms: rust_xlsxwriter::Format,
+}
+
+impl XlsxFormats {
+    fn new() -> Self {
+        let f = |n: &str| rust_xlsxwriter::Format::new().set_num_format(n);
+        Self {
+            date: f("yyyy-mm-dd"),
+            datetime: f("yyyy-mm-dd hh:mm:ss"),
+            datetime_ms: f("yyyy-mm-dd hh:mm:ss.000"),
+            time: f("hh:mm:ss"),
+            time_ms: f("hh:mm:ss.000"),
+        }
+    }
+}
+
 enum Sink {
     Csv(Box<csv::Writer<BufWriter<File>>>),
     Json {
@@ -61,7 +96,7 @@ enum Sink {
         book: Box<rust_xlsxwriter::Workbook>,
         sheet: usize,
         row: u32,
-        path: PathBuf,
+        formats: Box<XlsxFormats>,
     },
     Sql {
         out: BufWriter<File>,
@@ -69,28 +104,71 @@ enum Sink {
     },
 }
 
-/// Writes one result set to a file, a row at a time.
+/// Writes one result set to a file, a row at a time. The rows go to a
+/// temporary file next to the target, which replaces the target only when
+/// [`Exporter::finish`] succeeds: a failed or abandoned export leaves no
+/// partial file (and an existing file untouched).
 pub struct Exporter {
-    sink: Sink,
+    /// `None` once finished (or while being finished).
+    sink: Option<Sink>,
     columns: Vec<Column>,
     engine: Engine,
+    csv_null: String,
+    path: PathBuf,
+    tmp: PathBuf,
     pub rows: u64,
 }
 
 impl Exporter {
-    /// `table` names the target of SQL INSERT exports.
     pub fn create(
         path: &Path,
         format: Format,
         columns: Vec<Column>,
         engine: Engine,
-        table: &str,
+        opts: &ExportOptions,
     ) -> Result<Self> {
-        let file = || File::create(path).with_context(|| format!("creating {}", path.display()));
-        let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = match path.parent() {
+            Some(d) if !d.as_os_str().is_empty() => d,
+            _ => Path::new("."),
+        };
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let tmp = dir.join(format!(
+            ".{name}.{}.{}.part",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut ex = Self {
+            sink: None,
+            columns,
+            engine,
+            csv_null: opts.csv_null.clone(),
+            path: path.to_path_buf(),
+            tmp,
+            rows: 0,
+        };
+        // On an error below, dropping `ex` removes the temporary file.
+        ex.sink = Some(ex.open(format, opts)?);
+        Ok(ex)
+    }
+
+    fn open(&self, format: Format, opts: &ExportOptions) -> Result<Sink> {
+        let (engine, path) = (self.engine, &self.tmp);
+        let file = || {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .with_context(|| format!("creating {}", self.path.display()))
+        };
+        let names: Vec<&str> = self.columns.iter().map(|c| c.name.as_str()).collect();
         let sink = match format {
             Format::Csv => {
-                let mut w = csv::Writer::from_writer(BufWriter::new(file()?));
+                let mut out = BufWriter::new(file()?);
+                if opts.csv_bom {
+                    out.write_all(b"\xEF\xBB\xBF")?;
+                }
+                let mut w = csv::Writer::from_writer(out);
                 w.write_record(&names)?;
                 Sink::Csv(Box::new(w))
             }
@@ -107,36 +185,38 @@ impl Exporter {
                     book,
                     sheet: 0,
                     row: 1,
-                    path: path.to_path_buf(),
+                    formats: Box::new(XlsxFormats::new()),
                 }
             }
             Format::Sql => {
                 let cols: Vec<String> = names.iter().map(|n| quote_ident(engine, n)).collect();
-                let table = format!("INSERT INTO {table} ({}) VALUES ", cols.join(", "));
+                let table = format!(
+                    "INSERT INTO {} ({}) VALUES ",
+                    opts.table.as_deref().unwrap_or("exported"),
+                    cols.join(", ")
+                );
                 Sink::Sql {
                     out: BufWriter::new(file()?),
                     table,
                 }
             }
         };
-        Ok(Self {
-            sink,
-            columns,
-            engine,
-            rows: 0,
-        })
+        Ok(sink)
     }
 
     pub fn row(&mut self, cells: &[Cell]) -> Result<()> {
         self.rows += 1;
-        match &mut self.sink {
+        let Some(sink) = self.sink.as_mut() else {
+            bail!("the export is finished");
+        };
+        match sink {
             Sink::Csv(w) => {
                 let fields: Vec<String> = cells
                     .iter()
                     .zip(&self.columns)
                     .map(|(c, col)| {
                         if c.is_null() {
-                            String::new()
+                            self.csv_null.clone()
                         } else {
                             c.display(col.logical).into_owned()
                         }
@@ -153,6 +233,15 @@ impl Exporter {
                     }
                     serde_json::to_writer(&mut *out, &col.name)?;
                     out.write_all(b": ")?;
+                    // JSON columns are embedded as JSON, exactly as the
+                    // database sent them (no number rounding on the way).
+                    if let Cell::Text(s) = c
+                        && col.logical == LogicalType::Json
+                        && serde_json::from_str::<serde::de::IgnoredAny>(s).is_ok()
+                    {
+                        out.write_all(s.trim().as_bytes())?;
+                        continue;
+                    }
                     let v = match c {
                         Cell::Null => serde_json::Value::Null,
                         Cell::Bool(b) => serde_json::Value::Bool(*b),
@@ -167,7 +256,10 @@ impl Exporter {
                 out.write_all(b"}")?;
             }
             Sink::Xlsx {
-                book, sheet, row, ..
+                book,
+                sheet,
+                row,
+                formats,
             } => {
                 if *row > XLSX_ROWS_PER_SHEET {
                     let ws = book.add_worksheet_with_constant_memory()?;
@@ -179,25 +271,25 @@ impl Exporter {
                 let ws = book.worksheet_from_index(*sheet)?;
                 for (i, (c, col)) in cells.iter().zip(&self.columns).enumerate() {
                     let i = i as u16;
-                    match c {
-                        Cell::Null => {}
-                        Cell::Bool(b) => {
-                            ws.write_boolean(*row, i, *b)?;
+                    match xlsx_value(c, col.logical) {
+                        XlsxValue::Empty => {}
+                        XlsxValue::Bool(b) => {
+                            ws.write_boolean(*row, i, b)?;
                         }
-                        Cell::Int(v) => {
-                            ws.write_number(*row, i, *v as f64)?;
+                        XlsxValue::Number(v) => {
+                            ws.write_number(*row, i, v)?;
                         }
-                        Cell::Float(v) => {
-                            ws.write_number(*row, i, *v)?;
-                        }
-                        Cell::Text(_) => {
-                            // Excel cells hold at most 32,767 characters.
-                            let text = c.display(col.logical);
-                            let text: String = if text.chars().count() > 32_767 {
-                                text.chars().take(32_767).collect()
-                            } else {
-                                text.into_owned()
+                        XlsxValue::Date(d, kind) => {
+                            let f = match kind {
+                                DateKind::Date => &formats.date,
+                                DateKind::DateTime => &formats.datetime,
+                                DateKind::DateTimeMs => &formats.datetime_ms,
+                                DateKind::Time => &formats.time,
+                                DateKind::TimeMs => &formats.time_ms,
                             };
+                            ws.write_number_with_format(*row, i, d, f)?;
+                        }
+                        XlsxValue::Text(text) => {
                             ws.write_string(*row, i, text)?;
                         }
                     }
@@ -216,17 +308,211 @@ impl Exporter {
         Ok(())
     }
 
-    pub fn finish(self) -> Result<u64> {
-        match self.sink {
-            Sink::Csv(mut w) => w.flush()?,
-            Sink::Json { mut out, .. } => {
-                out.write_all(b"\n]\n")?;
-                out.flush()?;
+    /// Complete the file and move it into place. On an error the target is
+    /// left as it was.
+    pub fn finish(mut self) -> Result<u64> {
+        let Some(sink) = self.sink.take() else {
+            bail!("the export is finished");
+        };
+        // Close the file before it is renamed (Windows can't rename an open
+        // file).
+        let closed: Result<()> = (|| {
+            let file = match sink {
+                Sink::Csv(w) => Some(
+                    w.into_inner()
+                        .map_err(|e| e.into_error())?
+                        .into_inner()
+                        .map_err(|e| e.into_error())?,
+                ),
+                Sink::Json { mut out, .. } => {
+                    out.write_all(b"\n]\n")?;
+                    Some(out.into_inner().map_err(|e| e.into_error())?)
+                }
+                Sink::Xlsx { mut book, .. } => {
+                    book.save(&self.tmp)?;
+                    None
+                }
+                Sink::Sql { out, .. } => Some(out.into_inner().map_err(|e| e.into_error())?),
+            };
+            if let Some(f) = file {
+                f.sync_all()?;
             }
-            Sink::Xlsx { mut book, path, .. } => book.save(&path)?,
-            Sink::Sql { mut out, .. } => out.flush()?,
-        }
+            Ok(())
+        })();
+        closed?;
+        std::fs::rename(&self.tmp, &self.path)
+            .with_context(|| format!("writing {}", self.path.display()))?;
         Ok(self.rows)
+    }
+}
+
+impl Drop for Exporter {
+    fn drop(&mut self) {
+        // Unfinished (failed or abandoned): close and remove the partial file.
+        // After a successful finish it was renamed and this finds nothing.
+        drop(self.sink.take());
+        let _ = std::fs::remove_file(&self.tmp);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DateKind {
+    Date,
+    DateTime,
+    DateTimeMs,
+    Time,
+    TimeMs,
+}
+
+/// What an Excel cell gets for a value.
+#[derive(Debug, PartialEq)]
+enum XlsxValue {
+    Empty,
+    Bool(bool),
+    Number(f64),
+    /// An Excel serial date (days since 1900), shown with a date format.
+    Date(f64, DateKind),
+    Text(String),
+}
+
+/// Excel keeps 15 significant digits: numbers with more are written as
+/// text so no digit is lost; decimals, dates and times that Excel holds
+/// exactly become real numbers and dates.
+fn xlsx_value(c: &Cell, logical: LogicalType) -> XlsxValue {
+    match c {
+        Cell::Null => XlsxValue::Empty,
+        Cell::Bool(b) => XlsxValue::Bool(*b),
+        Cell::Int(v) if v.unsigned_abs() < 1_000_000_000_000_000 => XlsxValue::Number(*v as f64),
+        Cell::Int(v) => XlsxValue::Text(v.to_string()),
+        Cell::Float(v) if v.is_finite() => XlsxValue::Number(*v),
+        Cell::Float(v) => XlsxValue::Text(crate::results::float_text(*v)),
+        Cell::Text(s) => {
+            let s = s.as_str();
+            if logical == LogicalType::Decimal
+                && let Some(v) = excel_exact_decimal(s)
+            {
+                return XlsxValue::Number(v);
+            }
+            if let Some((d, kind)) = excel_datetime(s, logical) {
+                return XlsxValue::Date(d.to_excel(), kind);
+            }
+            // Excel cells hold at most 32,767 characters.
+            let text = c.display(logical);
+            XlsxValue::Text(if text.chars().count() > 32_767 {
+                text.chars().take(32_767).collect()
+            } else {
+                text.into_owned()
+            })
+        }
+    }
+}
+
+/// `-?digits[.digits][e±digits]`: a number literal SQL reads as a number.
+fn plain_number(s: &str) -> bool {
+    let s = s.strip_prefix('-').unwrap_or(s);
+    let (mantissa, exp) = match s.split_once(['e', 'E']) {
+        Some((m, e)) => (m, Some(e)),
+        None => (s, None),
+    };
+    let digits = |t: &str| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit());
+    let mantissa_ok = match mantissa.split_once('.') {
+        Some((i, f)) => digits(i) && digits(f),
+        None => digits(mantissa),
+    };
+    let exp_ok = exp.is_none_or(|e| digits(e.strip_prefix(['+', '-']).unwrap_or(e)));
+    mantissa_ok && exp_ok
+}
+
+/// A decimal Excel shows exactly: plain digits, at most 15 significant.
+fn excel_exact_decimal(s: &str) -> Option<f64> {
+    if !plain_number(s) || s.contains(['e', 'E']) {
+        return None;
+    }
+    let unsigned = s.trim_start_matches('-');
+    let (int, frac) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    let all = format!("{int}{frac}");
+    let significant = all.trim_start_matches('0').trim_end_matches('0').len();
+    if significant > 15 {
+        return None;
+    }
+    s.parse().ok()
+}
+
+/// A date, time or timestamp as the service sends it (`2024-01-31`,
+/// `13:45:12.997`, `2024-01-31T13:45:12.5` or with a space), when Excel holds
+/// it exactly: years 1900 to 9999, at most millisecond precision. Time zones
+/// are kept as text: Excel has none, and dropping the offset would change
+/// the value.
+fn excel_datetime(
+    s: &str,
+    logical: LogicalType,
+) -> Option<(rust_xlsxwriter::ExcelDateTime, DateKind)> {
+    use rust_xlsxwriter::ExcelDateTime;
+    fn num<T: std::str::FromStr>(t: &str, len: usize) -> Option<T> {
+        (t.len() == len && t.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| t.parse().ok())
+            .flatten()
+    }
+    fn date(t: &str) -> Option<ExcelDateTime> {
+        let mut p = t.split('-');
+        let (y, m, d) = (p.next()?, p.next()?, p.next()?);
+        if p.next().is_some() {
+            return None;
+        }
+        let y: u16 = num(y, 4)?;
+        // Day 0 (1899-12-31) and earlier don't show as dates in Excel.
+        if y < 1900 {
+            return None;
+        }
+        ExcelDateTime::from_ymd(y, num(m, 2)?, num(d, 2)?).ok()
+    }
+    /// (hour, minute, second, millisecond, has a fraction)
+    fn time(t: &str) -> Option<(u16, u8, u8, u16, bool)> {
+        let (hms, frac) = t.split_once('.').unwrap_or((t, ""));
+        let mut p = hms.split(':');
+        let (h, m, sec) = (p.next()?, p.next()?, p.next()?);
+        if p.next().is_some() || !frac.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        // Excel keeps milliseconds; finer digits must be zero.
+        if frac.len() > 3 && frac[3..].bytes().any(|b| b != b'0') {
+            return None;
+        }
+        let ms = format!("{:0<3}", &frac[..frac.len().min(3)]);
+        let (h, m, sec): (u16, u8, u8) = (num(h, 2)?, num(m, 2)?, num(sec, 2)?);
+        if h > 23 || m > 59 || sec > 59 {
+            return None;
+        }
+        Some((h, m, sec, ms.parse().ok()?, !frac.is_empty()))
+    }
+    match logical {
+        LogicalType::Date => Some((date(s)?, DateKind::Date)),
+        LogicalType::Time => {
+            let (h, m, sec, ms, frac) = time(s)?;
+            let d = ExcelDateTime::from_hms_milli(h, m, sec, ms).ok()?;
+            Some((
+                d,
+                if frac {
+                    DateKind::TimeMs
+                } else {
+                    DateKind::Time
+                },
+            ))
+        }
+        LogicalType::Timestamp => {
+            let (d, t) = s.split_once(['T', ' '])?;
+            let (h, m, sec, ms, frac) = time(t)?;
+            let d = date(d)?.and_hms_milli(h, m, sec, ms).ok()?;
+            Some((
+                d,
+                if frac {
+                    DateKind::DateTimeMs
+                } else {
+                    DateKind::DateTime
+                },
+            ))
+        }
+        _ => None,
     }
 }
 
@@ -254,9 +540,9 @@ pub fn sql_literal(engine: Engine, c: &Cell, logical: LogicalType) -> String {
             Engine::Mssql => format!("0x{s}"),
             Engine::Sqlite | Engine::Unknown => format!("X'{s}'"),
         },
-        Cell::Text(s) if logical == LogicalType::Decimal && s.parse::<f64>().is_ok() => {
-            s.to_string()
-        }
+        // Only digits go in bare: `NaN` and `Infinity` parse as floats but
+        // are not SQL literals.
+        Cell::Text(s) if logical == LogicalType::Decimal && plain_number(s) => s.to_string(),
         Cell::Text(s) => {
             let quoted = format!("'{}'", s.replace('\'', "''"));
             if engine == Engine::Mssql {
@@ -298,6 +584,24 @@ pub fn statement_for_result(
         Some(s) if lines_up && result < results => Ok(s.to_string()),
         _ => Err(UNCLEAR.into()),
     }
+}
+
+/// The quoted table an SQL INSERT export of result `result` targets: the
+/// single table its statement reads from, when that is known.
+pub fn insert_target(
+    script: &str,
+    engine: Engine,
+    result: usize,
+    results: usize,
+    finished: bool,
+) -> Option<String> {
+    let sql = statement_for_result(script, engine, result, results, finished).ok()?;
+    let src = crate::editing::source_table(&sql, engine)?;
+    let table = quote_ident(engine, &src.table);
+    Some(match src.schema {
+        Some(s) => format!("{}.{table}", quote_ident(engine, &s)),
+        None => table,
+    })
 }
 
 /// Statements as the engine sees them: the editor's splitter also breaks at
@@ -355,6 +659,7 @@ pub async fn export_query(
     expect_columns: Option<&[String]>,
     path: &Path,
     format: Format,
+    opts: &ExportOptions,
     mut progress: impl FnMut(u64),
 ) -> Result<Exported> {
     let req = QueryRequest {
@@ -377,7 +682,7 @@ pub async fn export_query(
                 {
                     bail!("the query now returns different columns than the result shown");
                 }
-                exporter = Some(Exporter::create(path, format, columns, engine, "exported")?);
+                exporter = Some(Exporter::create(path, format, columns, engine, opts)?);
             }
             QueryEvent::Rows { index: 0, rows } => {
                 if let Some(ex) = exporter.as_mut() {
@@ -817,6 +1122,224 @@ mod tests {
         );
     }
 
+    fn column(name: &str, logical: LogicalType) -> Column {
+        Column {
+            name: name.into(),
+            type_name: String::new(),
+            logical,
+        }
+    }
+
+    #[test]
+    fn insert_literals_quote_what_is_not_a_number() {
+        let dec = |s: &str| {
+            sql_literal(
+                Engine::Postgres,
+                &Cell::Text(s.into()),
+                LogicalType::Decimal,
+            )
+        };
+        assert_eq!(dec("NaN"), "'NaN'");
+        assert_eq!(dec("Infinity"), "'Infinity'");
+        assert_eq!(dec("-inf"), "'-inf'");
+        assert_eq!(dec("-12.50"), "-12.50");
+        assert_eq!(dec("1.5e+3"), "1.5e+3");
+        assert_eq!(dec("12345678901234567890.123"), "12345678901234567890.123");
+        assert_eq!(dec("1."), "'1.'");
+        // SQL Server money and decimal arrive as exact text.
+        assert_eq!(
+            sql_literal(
+                Engine::Mssql,
+                &Cell::Text("1.1000".into()),
+                LogicalType::Decimal
+            ),
+            "1.1000"
+        );
+    }
+
+    #[test]
+    fn excel_cells_keep_values_exact() {
+        let v = |c: Cell, l| xlsx_value(&c, l);
+        let t = |s: &str, l| xlsx_value(&Cell::Text(s.into()), l);
+        assert_eq!(v(Cell::Int(42), LogicalType::Int), XlsxValue::Number(42.0));
+        assert_eq!(
+            v(Cell::Int(999_999_999_999_999), LogicalType::Int),
+            XlsxValue::Number(999_999_999_999_999.0)
+        );
+        assert_eq!(
+            v(Cell::Int(1_234_567_890_123_456_789), LogicalType::Int),
+            XlsxValue::Text("1234567890123456789".into())
+        );
+        assert_eq!(t("1.50", LogicalType::Decimal), XlsxValue::Number(1.5));
+        assert_eq!(t("1.1000", LogicalType::Decimal), XlsxValue::Number(1.1));
+        assert_eq!(t("-0.001", LogicalType::Decimal), XlsxValue::Number(-0.001));
+        assert_eq!(
+            t("1234567890.1234567", LogicalType::Decimal),
+            XlsxValue::Text("1234567890.1234567".into())
+        );
+        assert_eq!(
+            t("NaN", LogicalType::Decimal),
+            XlsxValue::Text("NaN".into())
+        );
+        let date = |s: &str, l| match t(s, l) {
+            XlsxValue::Date(d, k) => Some((d, k)),
+            _ => None,
+        };
+        // 2024-01-31 is Excel day 45322.
+        assert_eq!(
+            date("2024-01-31", LogicalType::Date),
+            Some((45322.0, DateKind::Date))
+        );
+        assert_eq!(
+            date("2024-01-31T12:00:00", LogicalType::Timestamp),
+            Some((45322.5, DateKind::DateTime))
+        );
+        assert_eq!(
+            date("2024-01-31 12:00:00", LogicalType::Timestamp).map(|d| d.1),
+            Some(DateKind::DateTime)
+        );
+        assert_eq!(
+            date("2024-01-31T13:45:12.997", LogicalType::Timestamp).map(|d| d.1),
+            Some(DateKind::DateTimeMs)
+        );
+        assert_eq!(
+            date("2024-01-31T13:45:12.5000000", LogicalType::Timestamp).map(|d| d.1),
+            Some(DateKind::DateTimeMs)
+        );
+        assert_eq!(
+            date("12:00:00", LogicalType::Time),
+            Some((0.5, DateKind::Time))
+        );
+        // Finer than milliseconds, outside Excel's years, time zones and
+        // special values stay text.
+        for (s, l) in [
+            ("2024-01-31T13:45:12.1234567", LogicalType::Timestamp),
+            ("13:45:12.1234567", LogicalType::Time),
+            ("1899-12-31", LogicalType::Date),
+            ("infinity", LogicalType::Date),
+            ("2024-01-31 BC", LogicalType::Date),
+            ("2024-01-31T13:45:12+01:00", LogicalType::TimestampTz),
+            ("2024-01-31T13:45:12+01:00", LogicalType::Timestamp),
+        ] {
+            assert_eq!(t(s, l), XlsxValue::Text(s.into()), "{s}");
+        }
+    }
+
+    #[test]
+    fn json_columns_are_embedded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("j.json");
+        let columns = vec![
+            column("j", LogicalType::Json),
+            column("t", LogicalType::Text),
+        ];
+        let mut ex = Exporter::create(
+            &path,
+            Format::Json,
+            columns,
+            Engine::Postgres,
+            &ExportOptions::default(),
+        )
+        .unwrap();
+        ex.row(&[
+            Cell::Text(r#"{"k": 1, "big": 123456789012345678901234567890}"#.into()),
+            Cell::Text("{\"k\":1}".into()),
+        ])
+        .unwrap();
+        ex.row(&[Cell::Text("not json".into()), Cell::Null])
+            .unwrap();
+        ex.finish().unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        // The number is written as the database sent it, digit for digit.
+        assert!(text.contains("123456789012345678901234567890"), "{text}");
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json[0]["j"]["k"], 1);
+        assert_eq!(json[0]["t"], "{\"k\":1}");
+        assert_eq!(json[1]["j"], "not json");
+    }
+
+    #[test]
+    fn csv_bom_and_null_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("n.csv");
+        let opts = ExportOptions {
+            csv_bom: true,
+            csv_null: "NULL".into(),
+            ..Default::default()
+        };
+        let columns = vec![
+            column("a", LogicalType::Text),
+            column("b", LogicalType::Text),
+        ];
+        let mut ex =
+            Exporter::create(&path, Format::Csv, columns, Engine::Postgres, &opts).unwrap();
+        ex.row(&[Cell::Null, Cell::Text("".into())]).unwrap();
+        ex.row(&[Cell::Text("é".into()), Cell::Null]).unwrap();
+        ex.finish().unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            "\u{feff}a,b\nNULL,\né,NULL\n".as_bytes()
+        );
+    }
+
+    #[test]
+    fn unfinished_exports_leave_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.csv");
+        let columns = vec![column("a", LogicalType::Int)];
+        for f in Format::ALL {
+            let path = path.with_extension(f.extension());
+            let opts = ExportOptions::default();
+            let mut ex =
+                Exporter::create(&path, f, columns.clone(), Engine::Sqlite, &opts).unwrap();
+            ex.row(&[Cell::Int(1)]).unwrap();
+            drop(ex);
+            assert!(!path.exists(), "{f:?}");
+        }
+        // An existing file stays as it was until the export completes.
+        std::fs::write(&path, "old").unwrap();
+        let opts = ExportOptions::default();
+        let mut ex =
+            Exporter::create(&path, Format::Csv, columns.clone(), Engine::Sqlite, &opts).unwrap();
+        ex.row(&[Cell::Int(1)]).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old");
+        drop(ex);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old");
+        let ex = Exporter::create(&path, Format::Csv, columns, Engine::Sqlite, &opts).unwrap();
+        ex.finish().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\n");
+        // No temporary files are left next to it.
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("out.csv")]);
+    }
+
+    #[test]
+    fn insert_target_is_the_source_table() {
+        let pg = Engine::Postgres;
+        assert_eq!(
+            insert_target(
+                "SELECT * FROM sales.\"Products\" WHERE id > 1",
+                pg,
+                0,
+                1,
+                true
+            ),
+            Some("sales.\"Products\"".into())
+        );
+        assert_eq!(
+            insert_target("SELECT id FROM orders", Engine::Mssql, 0, 1, true),
+            Some("[orders]".into())
+        );
+        assert_eq!(
+            insert_target("SELECT * FROM a JOIN b ON a.id = b.id", pg, 0, 1, true),
+            None
+        );
+        assert_eq!(insert_target("SELECT 1", pg, 0, 1, true), None);
+    }
+
     #[test]
     fn exports_every_format() {
         let dir = tempfile::tempdir().unwrap();
@@ -838,8 +1361,12 @@ mod tests {
         ];
         for f in Format::ALL {
             let path = dir.path().join(format!("out.{}", f.extension()));
+            let opts = ExportOptions {
+                table: Some("t".into()),
+                ..Default::default()
+            };
             let mut ex =
-                Exporter::create(&path, f, columns.clone(), Engine::Postgres, "t").unwrap();
+                Exporter::create(&path, f, columns.clone(), Engine::Postgres, &opts).unwrap();
             for r in &rows {
                 ex.row(r).unwrap();
             }
@@ -878,7 +1405,9 @@ mod tests {
                 logical: LogicalType::Text,
             },
         ];
-        let mut ex = Exporter::create(&path, Format::Xlsx, columns, Engine::Postgres, "t").unwrap();
+        let opts = ExportOptions::default();
+        let mut ex =
+            Exporter::create(&path, Format::Xlsx, columns, Engine::Postgres, &opts).unwrap();
         ex.row(&[Cell::Int(1), Cell::Text("a".into())]).unwrap();
         ex.row(&[Cell::Int(2), Cell::Null]).unwrap();
         assert_eq!(ex.finish().unwrap(), 2);

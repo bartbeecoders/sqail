@@ -1384,6 +1384,20 @@ impl SqailApp {
             })
             .collect();
         let file_name = format!("{stem}.{}", format.extension());
+        let mut opts = crate::transfer::ExportOptions {
+            table: None,
+            csv_bom: self.settings.export_csv_bom,
+            csv_null: self.settings.export_csv_null.clone(),
+        };
+        if let crate::results::Pane::Result(i) = run.pane {
+            opts.table = crate::transfer::insert_target(
+                &run.sql,
+                engine,
+                i,
+                run.results.len(),
+                !(run.failed || run.cancelled),
+            );
+        }
         let pick = move || async move {
             rfd::AsyncFileDialog::new()
                 .add_filter(format.label(), &[format.extension()])
@@ -1448,8 +1462,10 @@ impl SqailApp {
                     }
                 };
                 let cols = Some(columns.as_slice());
-                let res =
-                    export_query(&client, on, engine, &sql, cols, &path, format, progress).await;
+                let res = export_query(
+                    &client, on, engine, &sql, cols, &path, format, &opts, progress,
+                )
+                .await;
                 sink.send(match res {
                     Ok(done) => {
                         let (text, error) =
@@ -1477,7 +1493,7 @@ impl SqailApp {
                 let Some(path) = pick().await else { return };
                 let res = tokio::task::spawn_blocking(move || {
                     let width = columns.len().max(1);
-                    let mut ex = Exporter::create(&path, format, columns, engine, "exported")?;
+                    let mut ex = Exporter::create(&path, format, columns, engine, &opts)?;
                     for r in cells.chunks(width) {
                         ex.row(r)?;
                     }

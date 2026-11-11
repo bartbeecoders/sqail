@@ -317,6 +317,16 @@ or XML plan.
   returns, the notice says so in red: a shown result that stopped at your
   row limit points you to *Whole query*, and a whole-query export that
   stopped at `limits.max_rows` points you to that service setting.
+  Each format keeps values exact: SQL `INSERT`s quote anything that isn't
+  plain digits (a `numeric` `NaN` becomes `'NaN'`) and insert into the
+  result's table when it comes from a single table (`exported` otherwise);
+  Excel gets numbers and dates as real number and date cells, but integers
+  and decimals with more than 15 significant digits, times finer than a
+  millisecond and values with a time zone as text, so no digit is lost; JSON
+  columns are written as JSON, not as strings. CSV files can start with a
+  UTF-8 BOM and write NULL as a marker such as `NULL` (Settings → Queries).
+  The file is written under a temporary name and only replaces the target
+  when the export succeeds, so a failed export leaves no partial file.
 * **✎ Edit data** is available when a result comes from a single table with a
   primary key. Edit cells (double-click or F2), add rows and delete rows. The
   changes are shown as SQL before **Apply** runs them, all or none, in the
@@ -509,7 +519,7 @@ window. Changes apply right away and are saved to `settings.toml`.
 | Appearance | **Theme**, **interface size** (75–200 %), **editor font size** |
 | Editor | Complete while typing; formatter keyword case and indent (2 or 4 spaces) |
 | Tabs | Pinned tabs on a separate row. **Ask before closing a tab with unsaved changes** (on by default). Off, such a tab closes at once and its changes are lost. A tab with an open transaction always asks, because closing it rolls the transaction back. |
-| Queries | Row limit per result set |
+| Queries | Row limit per result set; multi-line rows; CSV export: write a UTF-8 BOM (on by default on Windows, so Excel reads accented text correctly) and the text written for NULL (empty by default) |
 | Service | Start the local service when sqail starts |
 | AI assistant | Provider, model and program path per provider, rows shown to the model, sending the active tab's SQL |
 

@@ -57,7 +57,10 @@ pub async fn on_connection(
         explain::explain(c.conn(), &req.sql, req.analyze),
     )
     .await;
-    if broken || matches!(res, Err(DbError::Connect(_) | DbError::Timeout)) {
+    if broken
+        || matches!(res, Err(DbError::Timeout))
+        || res.as_ref().is_err_and(DbError::is_connection_gone)
+    {
         c.discard();
     } else {
         // The statement is user SQL: reset (SQL Server: close) before reuse.

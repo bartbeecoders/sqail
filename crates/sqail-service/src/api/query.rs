@@ -190,18 +190,41 @@ async fn drive(
     let sink = EventSink::Channel(tx);
     let _ = sink.send(QueryEvent::Started { query_id }).await;
 
+    let mut retried = false;
+    let (result, mut broken) = loop {
+        let conn: &mut dyn Conn = match &mut target {
+            Target::Pooled(c) => c.conn(),
+            Target::Session { guard, .. } => guard.as_deref_mut().expect("checked before start"),
+        };
+        let r = run_controlled(conn, &exec, &sink, &cancel, timeout).await;
+        // A pooled connection found dead before the script was sent (the
+        // server restarted, or killed it while idle): nothing ran, so run
+        // it once more on a fresh one. A session's connection holds state
+        // a fresh one would not have, so a session reports it instead.
+        if let (Err(DbError::Stale), _) = &r
+            && let Target::Pooled(c) = &mut target
+            && !retried
+        {
+            retried = true;
+            tracing::debug!("pooled connection was dead; retrying on a fresh one");
+            match c.reconnect().await {
+                Ok(()) => continue,
+                Err(e) => break (Err(e), true),
+            }
+        }
+        break r;
+    };
     let conn: &mut dyn Conn = match &mut target {
         Target::Pooled(c) => c.conn(),
         Target::Session { guard, .. } => guard.as_deref_mut().expect("checked before start"),
     };
-    let (result, mut broken) = run_controlled(conn, &exec, &sink, &cancel, timeout).await;
 
     if matches!(result, Err(DbError::Cancelled | DbError::Timeout)) && !broken {
         broken = tokio::time::timeout(Duration::from_secs(3), conn.ping())
             .await
             .map_or(true, |r| r.is_err());
     }
-    if matches!(result, Err(DbError::Connect(_))) {
+    if result.as_ref().is_err_and(DbError::is_connection_gone) {
         broken = true;
     }
 

@@ -2735,6 +2735,159 @@ async fn columns_of(h: &Harness, c: Uuid, qs: &str) -> Vec<ColumnInfo> {
         .await
 }
 
+/// The 502 detail of a pooled query on profile `c`.
+async fn connect_failure(h: &Harness, c: Uuid) -> String {
+    let res = h
+        .post(
+            &format!("/v1/connections/{c}/query"),
+            &json!({"sql": "select 1"}),
+            &h.admin,
+        )
+        .await;
+    assert_eq!(res.status(), 502);
+    let p: Value = res.json().await.unwrap();
+    assert_eq!(p["code"], "connect_failed", "{p}");
+    p["detail"].as_str().unwrap().to_string()
+}
+
+async fn pg_at(h: &Harness, host: &str, port: u16, ssl_mode: &str) -> Uuid {
+    h.create_connection(json!({
+        "name": format!("pg {host}:{port} {ssl_mode}"),
+        "params": {"engine": "postgres", "host": host, "port": port, "database": "sqail_test",
+                   "user": "sqail", "ssl_mode": ssl_mode},
+        "password": "sqail_dev_pw",
+    }))
+    .await
+}
+
+/// PostgreSQL connect errors say where and why, not only "error connecting
+/// to server" (#188).
+#[tokio::test]
+async fn postgres_connect_errors_name_the_cause() {
+    let h = harness().await;
+    let c = pg_at(&h, "127.0.0.1", 1, "disable").await;
+    let detail = connect_failure(&h, c).await;
+    assert!(
+        detail.starts_with("cannot connect: 127.0.0.1:1: error connecting to server: ")
+            && detail.to_lowercase().contains("refused"),
+        "{detail}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn postgres_connect_errors_name_the_cause_live() {
+    let h = harness().await;
+    let c = pg_at(&h, "no-such-host.invalid", 5432, "disable").await;
+    let detail = connect_failure(&h, c).await;
+    assert!(
+        detail
+            .starts_with("cannot connect: no-such-host.invalid:5432: error connecting to server: "),
+        "{detail}"
+    );
+    #[cfg(target_os = "linux")]
+    assert!(detail.contains("lookup"), "{detail}");
+    // The test server has no SSL.
+    let c = pg_at(&h, "127.0.0.1", 55432, "require").await;
+    let detail = connect_failure(&h, c).await;
+    assert!(
+        detail.contains("server does not support TLS") && detail.contains("does not accept SSL"),
+        "{detail}"
+    );
+    // Wrong password: the server's own message, with where.
+    let c = h
+        .create_connection(json!({
+            "name": "pg bad password",
+            "params": postgres().profile,
+            "password": "wrong",
+        }))
+        .await;
+    let detail = connect_failure(&h, c).await;
+    assert!(
+        detail
+            .starts_with("cannot connect: 127.0.0.1:55432: FATAL: password authentication failed"),
+        "{detail}"
+    );
+}
+
+/// A pooled connection the server closed while idle (restart, idle kill,
+/// pg_terminate_backend) is replaced without failing the next query; a
+/// session's connection lost mid-statement is reported as lost (#188).
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn postgres_dead_connections_are_replaced_or_reported() {
+    let h = single_connection_harness(30).await;
+    let c = profile(&h, &postgres(), false).await;
+    let pid = one(&h.query(c, "select pg_backend_pid()").await);
+    let killer: SessionInfo = h
+        .post("/v1/sessions", &json!({"connection_id": c}), &h.admin)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let kill_path = format!("/v1/sessions/{}/query", killer.id);
+    let kill = |pid: Value| {
+        h.query_on(
+            &kill_path,
+            json!({"sql": format!("select pg_terminate_backend({pid})")}),
+            None,
+        )
+    };
+    assert_eq!(one(&kill(pid.clone()).await), json!(true));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let ev = h.query(c, "select pg_backend_pid()").await;
+    assert_ne!(one(&ev), pid, "a fresh connection");
+    // The catalog routes share the pool.
+    let pid = one(&h.query(c, "select pg_backend_pid()").await);
+    assert_eq!(one(&kill(pid).await), json!(true));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _: Vec<NamedItem> = h
+        .get_json(&format!("/v1/connections/{c}/schema/schemas"))
+        .await;
+
+    // A session whose connection the server ends during a statement.
+    let s: SessionInfo = h
+        .post("/v1/sessions", &json!({"connection_id": c}), &h.admin)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let path = format!("/v1/sessions/{}/query", s.id);
+    let ev = h
+        .query_on(
+            &path,
+            json!({"sql": "select pg_terminate_backend(pg_backend_pid())"}),
+            None,
+        )
+        .await;
+    let (code, message) = error(&ev).expect("lost");
+    assert_eq!(code, "connection_lost");
+    assert!(
+        message.starts_with("connection to the database was lost: FATAL: terminating connection"),
+        "{message}"
+    );
+    assert!(connection_lost(&ev), "{ev:?}");
+
+    // A session whose connection died while idle: nothing is sent.
+    let s: SessionInfo = h
+        .post("/v1/sessions", &json!({"connection_id": c}), &h.admin)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let path = format!("/v1/sessions/{}/query", s.id);
+    let pid = one(&h
+        .query_on(&path, json!({"sql": "select pg_backend_pid()"}), None)
+        .await);
+    assert_eq!(one(&kill(pid).await), json!(true));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let ev = h.query_on(&path, json!({"sql": "select 1"}), None).await;
+    let (code, message) = error(&ev).expect("lost");
+    assert_eq!(code, "connection_lost");
+    assert!(message.contains("nothing was run"), "{message}");
+    assert!(connection_lost(&ev), "{ev:?}");
+}
+
 #[tokio::test]
 #[ignore = "needs podman test databases (scripts/db.sh up)"]
 async fn postgres_pooled_connections_are_reset() {

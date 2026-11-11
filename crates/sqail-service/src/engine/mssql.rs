@@ -756,7 +756,7 @@ fn db_err(e: tiberius::error::Error) -> DbError {
             code: Some(t.code().to_string()),
             message: ms_message(&e),
         },
-        tiberius::error::Error::Io { .. } => DbError::Connect(e.to_string()),
+        tiberius::error::Error::Io { .. } => DbError::Lost(e.to_string()),
         _ => DbError::Database {
             code: None,
             message: e.to_string(),

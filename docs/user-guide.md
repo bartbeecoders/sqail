@@ -183,6 +183,7 @@ an admin token.
 | F5 / Ctrl+Shift+Enter | Run the whole script |
 | Esc | Cancel the running query |
 | Ctrl+E | Show the plan of the statement under the cursor |
+| Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z) | Undo / redo. Typing undoes a word or a line at a time (and at each pause, paste or cursor jump); a format, completion, replace, drop, insert, indent or comment toggle is one step of its own, so undoing it keeps what you typed before it |
 | Ctrl+Space | Completion (also opens by itself while you type a name it can finish, but not when the word is already a whole name or keyword, nor in comments and strings; a space, comma or other punctuation closes it, so Enter and Tab go to the text) |
 | Ctrl+Shift+F | Format the selection or the whole tab. It only changes layout and keyword case: when the formatter would change more (some string literals, `0x…` numbers, Postgres `E'…'` or dollar-quoted strings), the text is left alone with a notice |
 | Tab / Shift+Tab | Indent / outdent the selected lines (without a selection, Tab types a tab and Shift+Tab outdents the line) |
@@ -208,12 +209,29 @@ them. Untick *Pinned tabs on a separate row* (in the same menu, or Settings →
 Tabs) to keep them at the front of the one tab row instead. Pins are
 remembered with the open tabs.
 
+**File encodings.** sqail opens UTF-8 files with or without a byte-order
+mark, UTF-16 (LE or BE, with a byte-order mark, as older SSMS versions
+save), and treats any other file that isn't valid UTF-8 as Windows-1252
+("ANSI"). Windows line endings (CRLF) become plain line breaks in the
+editor. Saving writes the file back with its own encoding, byte-order mark
+and line endings (CRLF or LF, whichever the file mostly used), so saving an
+untouched file leaves it unchanged. New files are UTF-8 without a
+byte-order mark, with LF line endings on Linux and CRLF on Windows. If you
+type a character a Windows-1252 file can't hold, sqail saves that file as
+UTF-8 and says so.
+
 The script splitter understands comments, string and identifier quoting,
 Postgres dollar quotes and SQL Server `GO` lines, so *Run statement* picks
 exactly the statement you're in. On SQL Server a `CREATE`/`ALTER`
 procedure, function, trigger or view runs to the next `GO` (or the end of
 the tab), with or without `BEGIN … END`, so semicolons and blank lines in
-its body don't cut it short. Completion knows keywords, schemas, tables,
+its body don't cut it short. A SQL Server batch from a `DECLARE` on also
+runs to the next `GO`, since its variables only exist in that batch, and
+`IF … ; ELSE …` stays one statement. A `GO` line is `GO`, optionally with a
+repeat count of 1 or more (`GO 0` is not a separator, for the editor nor
+for the service). An unclosed `(` or `CASE` ends at a blank line followed by
+a new statement (`SELECT`, `DELETE`, …), so it doesn't pull the rest of the
+script into the statement under the cursor. Completion knows keywords, schemas, tables,
 columns and functions of the current connection. After `alias.` it lists
 that alias's columns: tables (`FROM orders o`), CTEs (`WITH x AS (…)`) and
 subqueries (`FROM (SELECT …) s`), with the innermost subquery winning when
@@ -251,6 +269,13 @@ PostgreSQL the service splits the script like psql does; only when that
 depends on how the server reads backslashes in strings (`'a\'`) does the
 script run as one transaction, and the error then says that the statements
 before it were rolled back too.
+
+`COPY … TO STDOUT` (text or CSV) on PostgreSQL shows its output as a result
+with one `copy` column, a row per line. `COPY … FROM STDIN`, as in pg_dump
+output, can't be run: sqail refuses the whole script before running any of
+it, so the tab's transaction and temp tables stay as they were. Use
+*Import CSV*, `INSERT` statements, or `COPY … FROM` a file on the database
+server instead.
 
 **Plans:** *Explain* (Ctrl+E) shows the estimated plan as a tree, with cost
 and row estimates and the most expensive nodes highlighted. *Explain analyze*
@@ -298,6 +323,9 @@ or XML plan.
   Rows are measured as they come into view, so the scrollbar can adjust
   slightly while you scroll through a large result.
 * Double-click a cell to see its full value (long text, JSON, binary as hex).
+  A row may take at most 64 MiB in a result: longer values are cut (they end
+  in `…`) and a warning says so. Select a part of them (`substring`) to see
+  the rest.
 * Values show as the database has them. Floats print like psql: very large
   or small ones with an exponent (`1.1805916207174113e+21`, `1e-05`), and
   `NaN`, `Infinity`, `-Infinity`. SQL Server `money` shows its four decimals

@@ -14,7 +14,7 @@ use serde_json::Value;
 use sqail_proto::{Column, Engine, LogicalType, Param, QueryEvent, SqliteParams};
 
 use super::value::{bytes, float, int, text};
-use super::{Cancel, Canceller, Conn, DbError, Driver, EventSink, ExecRequest, ROW_BATCH, Result};
+use super::{Cancel, Canceller, Conn, DbError, Driver, EventSink, ExecRequest, Result, RowBatch};
 
 pub struct SqliteDriver {
     path: PathBuf,
@@ -355,7 +355,7 @@ fn run_stmt(
         columns,
     })?;
     let mut rows = stmt.query(params).map_err(db_err)?;
-    let mut batch = Vec::with_capacity(ROW_BATCH);
+    let mut batch = RowBatch::new();
     let mut count = 0u64;
     let mut truncated = false;
     while let Some(row) = rows.next().map_err(db_err)? {
@@ -369,18 +369,23 @@ fn run_stmt(
             .enumerate()
             .map(|(i, &l)| row.get_ref(i).map(|v| cell(l, v)).map_err(db_err))
             .collect::<Result<Vec<_>>>()?;
-        batch.push(cells);
-        if batch.len() >= ROW_BATCH {
+        if let Some(text) = batch.push(cells) {
+            sink.send_blocking(QueryEvent::Message {
+                severity: "warning".into(),
+                text,
+            })?;
+        }
+        if batch.is_full() {
             sink.send_blocking(QueryEvent::Rows {
                 index: my_index,
-                rows: std::mem::replace(&mut batch, Vec::with_capacity(ROW_BATCH)),
+                rows: batch.take(),
             })?;
         }
     }
     if !batch.is_empty() {
         sink.send_blocking(QueryEvent::Rows {
             index: my_index,
-            rows: batch,
+            rows: batch.take(),
         })?;
     }
     sink.send_blocking(QueryEvent::ResultEnd {

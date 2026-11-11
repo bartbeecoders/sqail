@@ -23,7 +23,8 @@ pinning and a typed event stream.
   Status codes: 400 invalid request, 401
   missing or unknown token, 403 insufficient scope, 404 not found, 409
   conflict (for example a session that is already running a query), 413 body
-  too large, 429 rate limited, 502 database unreachable, 504 timeout.
+  larger than `limits.body_limit_bytes` (8 MiB by default; code
+  `payload_too_large`), 429 rate limited, 502 database unreachable, 504 timeout.
 
 ```bash
 URL=https://127.0.0.1:7443
@@ -143,6 +144,16 @@ api $URL/v1/connections/$ID/query -d '{"sql": "SELECT id, name FROM customers; U
 * Once the stream has started, the HTTP status is 200. Failures inside the
   script arrive as `error` events (`code`, `message` and `db_code`, which holds
   the SQLSTATE or SQL Server error number).
+* Connections: a 502 `connect_failed` names `host:port` and the cause
+  (refused, unknown host, timed out, no SSL on the server, the server's own
+  message). A connection that dies after it was opened is
+  `connection_lost` ("connection to the database was lost", with the
+  server's reason when it gave one). A pooled connection the server closed
+  while it was idle (restart, `pg_terminate_backend`, idle timeout) is
+  replaced before use, and a pooled query whose connection turns out dead
+  before anything was sent is retried once on a fresh one. A session's
+  connection is never replaced silently: the query fails with
+  `connection_lost` and the session is closed (open a new one).
 * Cells: `null`; bools and ints (i64) as JSON bool and number; floats as
   numbers (`"NaN"`, `"Infinity"` and `"-Infinity"` as strings; a 4-byte
   `real`/`float4` with its own shortest digits, `3.14`); bytes as lowercase
@@ -153,6 +164,10 @@ api $URL/v1/connections/$ID/query -d '{"sql": "SELECT id, name FROM customers; U
   `datetime` 3, rounded as the server shows it, and `smalldatetime` none), so
   the text parses back to the same value. JSON columns are JSON text.
   `logical` says which applies.
+* Rows come in `rows` events of up to 500 rows or about 1 MiB of JSON,
+  whichever comes first, so a line stays small however wide the rows are.
+  A row may take at most 64 MiB: longer values are cut to fit and end in
+  `…`, and a `warning` message (once per result set) says so.
 * `type_name` is the engine's type name. PostgreSQL enums and extension
   types (hstore, PostGIS, ...) have their own name (`format_type`), or
   `oid:<n>` if the service could not look it up. SQL Server CLR types
@@ -182,6 +197,12 @@ api $URL/v1/connections/$ID/query -d '{"sql": "SELECT id, name FROM customers; U
   quote in a plain string), the script is sent as one message instead:
   PostgreSQL then runs it as one transaction, and the error message says
   that the statements before it were rolled back.
+* **PostgreSQL `COPY`:** `COPY … TO STDOUT` in text or CSV format is a
+  result set with one `text` column, `copy`, and a row per line the server
+  sends (a CSV value with a line break stays in its row). `COPY … FROM
+  STDIN` and binary `COPY … TO STDOUT` are refused with an `unsupported`
+  error before any statement of the script runs, so a session keeps its
+  connection, transaction and temp tables.
 * **`single_statement: true`** refuses (with an `error` event, before running
   anything) a script that is more than one statement. Postgres parses it as a
   prepared statement and SQLite checks what follows the first statement, so
@@ -193,8 +214,11 @@ api $URL/v1/connections/$ID/query -d '{"sql": "SELECT id, name FROM customers; U
 `started`, then call `DELETE /v1/queries/{query_id}`. The stream finishes with
 `done` and `cancelled: true`. Only the running batch stops: a session keeps
 its connection, open transaction and temp tables. SQL Server is sent a TDS
-Attention (as SSMS does); only if it does not acknowledge that within 3 s
-does the service fall back to `KILL`, which ends the session. Closing the HTTP
+Attention (as SSMS does); only if it does not acknowledge that and the
+connection receives nothing for 3 s does the service fall back to `KILL`,
+which ends the session. Rows the server sent before the Attention reached it
+are read (and dropped) on the way to the acknowledgement, which over a slow
+link can take a while; the service waits for them, up to a minute. Closing the HTTP
 connection stops the query too:
 the service notices when it can no longer deliver events, and it discards a
 connection that was interrupted instead of returning it to the pool.

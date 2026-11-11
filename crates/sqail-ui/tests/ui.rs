@@ -421,6 +421,83 @@ fn tabs_close_with_the_close_button() {
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "SELECT 2");
 }
 
+/// Files keep their encoding, byte-order mark and line endings: the editor
+/// sees `\n` and no BOM, and saving writes the file back the way it was
+/// (#143).
+#[test]
+fn files_keep_their_encoding_bom_and_line_endings() {
+    let e = env();
+    let mut h = app([1280.0, 800.0]);
+    let open = |h: &mut Harness<'_, SqailApp>, path: &std::path::Path| {
+        h.state_mut().open_path(path.to_path_buf());
+        wait(h, "file opened", |a| {
+            a.tabs[a.active].path.as_deref() == Some(path)
+        });
+        h.state().active
+    };
+    // Empty the file first, so the wait sees the save land even when the
+    // tab was clean already.
+    let save = |h: &mut Harness<'_, SqailApp>, idx: usize| {
+        let path = h.state().tabs[idx].path.clone().unwrap();
+        std::fs::write(&path, b"").unwrap();
+        h.state_mut().save_tab(idx, false);
+        wait(h, "file saved", |a| {
+            !a.tabs[idx].is_dirty() && std::fs::metadata(&path).is_ok_and(|m| m.len() > 0)
+        });
+    };
+
+    // UTF-8 with BOM and CRLF (as SSMS writes it).
+    let ssms = e.dir.path().join("ssms.sql");
+    std::fs::write(&ssms, b"\xEF\xBB\xBFSELECT 1\r\nSELECT 2\r\n").unwrap();
+    let idx = open(&mut h, &ssms);
+    assert_eq!(h.state().tabs[idx].text, "SELECT 1\nSELECT 2\n");
+    assert!(!h.state().tabs[idx].is_dirty());
+    save(&mut h, idx);
+    assert_eq!(
+        std::fs::read(&ssms).unwrap(),
+        b"\xEF\xBB\xBFSELECT 1\r\nSELECT 2\r\n",
+        "an untouched file is written back byte for byte"
+    );
+    h.state_mut().tabs[idx].text = "SELECT 1X\nSELECT 2\nSELECT 3".into();
+    save(&mut h, idx);
+    assert_eq!(
+        std::fs::read(&ssms).unwrap(),
+        b"\xEF\xBB\xBFSELECT 1X\r\nSELECT 2\r\nSELECT 3"
+    );
+
+    // UTF-16 LE with BOM opens instead of failing.
+    let wide = e.dir.path().join("wide.sql");
+    let mut bytes = vec![0xFF, 0xFE];
+    "SELECT N'é'\r\n"
+        .encode_utf16()
+        .for_each(|u| bytes.extend_from_slice(&u.to_le_bytes()));
+    std::fs::write(&wide, &bytes).unwrap();
+    let idx = open(&mut h, &wide);
+    assert_eq!(h.state().tabs[idx].text, "SELECT N'é'\n");
+    save(&mut h, idx);
+    assert_eq!(std::fs::read(&wide).unwrap(), bytes);
+
+    // The workspace remembers the format; a restored tab is clean and saves
+    // the same way.
+    let restored = sqail_ui::editor::Tab::restore(99, &h.state().tabs[idx].snapshot());
+    assert!(!restored.is_dirty());
+    assert_eq!(restored.format, h.state().tabs[idx].format);
+
+    // Not UTF-8 and no BOM: Windows-1252. A character it cannot hold makes
+    // the save fall back to UTF-8, with a notice.
+    let ansi = e.dir.path().join("ansi.sql");
+    std::fs::write(&ansi, b"SELECT 'caf\xE9'\n").unwrap();
+    let idx = open(&mut h, &ansi);
+    assert_eq!(h.state().tabs[idx].text, "SELECT 'café'\n");
+    save(&mut h, idx);
+    assert_eq!(std::fs::read(&ansi).unwrap(), b"SELECT 'caf\xE9'\n");
+    h.state_mut().tabs[idx].text = "SELECT 'café ✓'\n".into();
+    save(&mut h, idx);
+    assert_eq!(std::fs::read_to_string(&ansi).unwrap(), "SELECT 'café ✓'\n");
+    h.run_steps(2);
+    h.get_by_label_contains("saved as UTF-8");
+}
+
 /// Only the text that was written is marked saved, and the unsaved-changes
 /// prompt acts on its own tab even when tabs before it close meanwhile (#156).
 #[test]
@@ -1389,6 +1466,14 @@ fn editor_runs_queries_end_to_end() {
     assert_eq!(
         h.state().tabs[0].text,
         "SELECT\n  id,\n  name\nFROM\n  people\nWHERE\n  score > 1"
+    );
+    // One Ctrl+Z takes back the format, and only the format (#145).
+    h.step();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.step();
+    assert_eq!(
+        h.state().tabs[0].text,
+        "select id,name from people where score>1"
     );
 
     // --- query plan ----------------------------------------------------------

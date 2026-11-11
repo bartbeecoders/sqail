@@ -5132,6 +5132,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sqail-client",
  "sqail-proto",
  "subtle",
  "tempfile",

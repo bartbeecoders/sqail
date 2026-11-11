@@ -23,7 +23,8 @@ pinning and a typed event stream.
   Status codes: 400 invalid request, 401
   missing or unknown token, 403 insufficient scope, 404 not found, 409
   conflict (for example a session that is already running a query), 413 body
-  too large, 429 rate limited, 502 database unreachable, 504 timeout.
+  larger than `limits.body_limit_bytes` (8 MiB by default; code
+  `payload_too_large`), 429 rate limited, 502 database unreachable, 504 timeout.
 
 ```bash
 URL=https://127.0.0.1:7443
@@ -153,6 +154,10 @@ api $URL/v1/connections/$ID/query -d '{"sql": "SELECT id, name FROM customers; U
   `datetime` 3, rounded as the server shows it, and `smalldatetime` none), so
   the text parses back to the same value. JSON columns are JSON text.
   `logical` says which applies.
+* Rows come in `rows` events of up to 500 rows or about 1 MiB of JSON,
+  whichever comes first, so a line stays small however wide the rows are.
+  A row may take at most 64 MiB: longer values are cut to fit and end in
+  `…`, and a `warning` message (once per result set) says so.
 * `type_name` is the engine's type name. PostgreSQL enums and extension
   types (hstore, PostGIS, ...) have their own name (`format_type`), or
   `oid:<n>` if the service could not look it up. SQL Server CLR types

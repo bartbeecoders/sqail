@@ -834,6 +834,74 @@ async fn max_rows_truncates() {
     )));
 }
 
+/// Bodies up to `limits.body_limit_bytes` (8 MiB) are accepted, not just
+/// axum's default 2 MiB, and a larger one is a 413 problem document whether
+/// it announces its length or not.
+#[tokio::test]
+async fn body_limit_is_the_configured_one() {
+    let h = harness().await;
+    let c = h.sqlite_temp(false).await;
+    let path = format!("/v1/connections/{c}/query");
+    let body = |len: usize| json!({ "sql": format!("SELECT 1 AS x -- {}", "y".repeat(len)) });
+    let ev = h.query_on(&path, body(5_000_000), None).await;
+    assert_eq!(rows(&ev, 0), vec![vec![json!(1)]]);
+
+    let check = |res: reqwest::Response| async move {
+        assert_eq!(res.status(), 413);
+        assert_eq!(
+            res.headers()["content-type"],
+            "application/problem+json",
+            "{:?}",
+            res.headers()
+        );
+        let p: Value = res.json().await.unwrap();
+        assert_eq!(p["code"], "payload_too_large", "{p}");
+        assert!(p["detail"].as_str().unwrap().contains("8388608"), "{p}");
+    };
+    check(h.post(&path, &body(9_000_000), &h.admin).await).await;
+    // Without content-length (chunked), the extractor notices instead.
+    let bytes = serde_json::to_vec(&body(9_000_000)).unwrap();
+    let chunks: Vec<Result<Vec<u8>, std::io::Error>> =
+        bytes.chunks(1 << 20).map(|c| Ok(c.to_vec())).collect();
+    let res = h
+        .http
+        .post(h.url(&path))
+        .bearer_auth(&h.admin)
+        .header("content-type", "application/json")
+        .body(reqwest::Body::wrap_stream(futures::stream::iter(chunks)))
+        .send()
+        .await
+        .unwrap();
+    check(res).await;
+}
+
+/// Wide rows come in batches bounded in bytes, not only in rows (500 rows
+/// of 600 kB were one 300 MB line).
+#[tokio::test]
+async fn wide_rows_are_batched_by_size() {
+    let h = harness().await;
+    let c = h.sqlite_temp(false).await;
+    let res = h
+        .post(
+            &format!("/v1/connections/{c}/query"),
+            &json!({"sql": "WITH RECURSIVE g(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM g LIMIT 500) \
+                            SELECT n, hex(zeroblob(300000)) AS x FROM g"}),
+            &h.admin,
+        )
+        .await;
+    assert_eq!(res.status(), 200);
+    let text = res.text().await.unwrap();
+    let longest = text.lines().map(str::len).max().unwrap();
+    assert!(longest < 2 * 1024 * 1024, "{longest}");
+    let ev: Vec<QueryEvent> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let r = rows(&ev, 0);
+    assert_eq!(r.len(), 500);
+    assert_eq!(r[499][1].as_str().unwrap().len(), 600_000);
+}
+
 #[tokio::test]
 async fn errors_are_events_and_scripts_stop() {
     let h = harness().await;

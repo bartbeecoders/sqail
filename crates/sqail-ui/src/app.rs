@@ -1748,8 +1748,10 @@ impl SqailApp {
         };
         match crate::sql::format::format(&tab.text[start..end], engine, &style) {
             Ok(formatted) => {
+                tab.undo_point();
                 tab.text.replace_range(start..end, &formatted);
                 tab.select_bytes(start, start + formatted.len());
+                tab.undo_point();
             }
             Err(why) => self.notify(format!("Format: {why}"), true),
         }

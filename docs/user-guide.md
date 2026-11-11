@@ -227,7 +227,10 @@ spans runs, and the status bar shows **in transaction** while one is open.
 Switch off **Auto-commit** in the toolbar and sqail sends `BEGIN` before the
 next run whenever no transaction is open. Finish with **Commit** or
 **Rollback** in the toolbar.
-Closing a tab with an open transaction asks whether to commit or roll back.
+Closing a tab or switching its connection with an open transaction asks
+first; going ahead closes the tab's session, which rolls the transaction
+back. Quitting closes every tab's session the same way (it asks first when a
+transaction is open), so nothing is left holding locks on the server.
 Idle sessions close after 30 minutes on the service, which rolls them back.
 If a tab's session is gone (it expired, the service restarted, or its database
 connection dropped), the next run opens a new session. When a transaction was
@@ -282,7 +285,8 @@ transaction that is **always rolled back**, so it is safe for `UPDATE` and
   (so temp tables and uncommitted rows are there), and only if that
   statement just reads: when it writes, or sqail can't tell which statement
   produced the result, it refuses and asks you to run the `SELECT` on its own
-  first.
+  first. A session runs one query at a time, so runs in that tab wait until
+  the export finishes.
 * **✎ Edit data** is available when a result comes from a single table with a
   primary key. Edit cells (double-click or F2), add rows and delete rows. The
   changes are shown as SQL before **Apply** runs them in one transaction.

@@ -66,6 +66,13 @@ impl Worker {
         self.rt.spawn(fut);
     }
 
+    /// Block the calling (non-async) thread on `fut` for at most `timeout`.
+    pub fn block_on(&self, timeout: std::time::Duration, fut: impl Future<Output = ()>) {
+        self.rt.block_on(async {
+            let _ = tokio::time::timeout(timeout, fut).await;
+        });
+    }
+
     /// Messages that arrived since the last frame.
     pub fn drain(&self) -> impl Iterator<Item = Msg> + '_ {
         self.rx.try_iter()

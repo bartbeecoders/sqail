@@ -233,18 +233,29 @@ already failed (or a SQL Server one that can no longer commit) gets 400.
 ## Schema
 
 All schema routes are `GET`s under `/v1/connections/{id}/schema/`:
-`databases`, `schemas`, `tables?schema=`, `routines?schema=`, and
+`databases`, `schemas`, `tables?schema=`, `routines?schema=`,
+`objects?schema=` (sequences, user-defined types, SQL Server synonyms and
+triggers, each with its `kind`, a trigger's `table` and a `detail` such as a
+type's kind or a synonym's target; services before this route answer 404),
+and
 `columns`, `indexes`, `foreign-keys` and `privileges`, each with
 `?schema=&name=` for a table (`schema` defaults to the connection's current
 schema). A routine's `table_valued` flag (omitted when false) marks a
 function that returns a table: a SQL Server inline or multi-statement
-table-valued function, a PostgreSQL set-returning function. An index's
+table-valued function, a PostgreSQL set-returning function. On PostgreSQL
+a routine's `arguments` are its identity arguments (`a integer, b text`),
+which tell overloads apart, and a table's `foreign`, `partitioned` and
+`partition_of` (the parent's name, when it is in the same schema) flags mark
+foreign tables, partitioned tables and partitions; all are omitted when
+false or empty. An index's
 `constraint` flag says it backs a `PRIMARY KEY` or
 `UNIQUE` constraint. `privileges` lists the table's grants (owner excluded),
 its owner (Postgres) and the roles and users that could be granted
 privileges; `supported` is `false` on SQLite. `GET
 /v1/connections/{id}/ddl?schema=&name=` returns a best-effort `CREATE`
-script for a table, view or routine. `read` tokens may browse every profile.
+script for a table, view or routine; on PostgreSQL `&arguments=` (as
+`routines` lists them) picks one overload, otherwise every overload is
+scripted. `read` tokens may browse every profile.
 
 `GET /v1/sessions/{id}/schema/columns?schema=&name=` reads a table's columns
 as a session sees it: its search path, current database and temp tables.

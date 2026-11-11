@@ -1042,6 +1042,9 @@ mod tests {
                 schema: Some(schema.into()),
                 name: n.into(),
                 kind: TableKind::Table,
+                foreign: false,
+                partitioned: false,
+                partition_of: None,
             };
             Some(match schema {
                 "sales" => vec![t("orders"), t("customers")],

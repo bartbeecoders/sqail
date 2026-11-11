@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use sqail_proto::{
     ColumnInfo, Connection, CreatedToken, Ddl, ForeignKeyInfo, NamedItem, QueryEvent, RoutineInfo,
-    SessionInfo, TableInfo, TestResult,
+    SchemaObject, SessionInfo, TableInfo, TestResult,
 };
 use sqail_service::{Config, Server};
 use uuid::Uuid;
@@ -1440,6 +1440,184 @@ async fn postgres_table_valued_functions() {
         "it176_tvf",
     )
     .await;
+}
+
+fn objects_summary(list: &[SchemaObject]) -> Vec<String> {
+    list.iter()
+        .map(|o| {
+            format!(
+                "{:?} {} {} {}",
+                o.kind,
+                o.name,
+                o.table.as_deref().unwrap_or("-"),
+                o.detail.as_deref().unwrap_or("-")
+            )
+        })
+        .collect()
+}
+
+/// Partitions, foreign tables and materialized views are marked; sequences,
+/// types and triggers are listed; overloads are listed and scripted apart.
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn postgres_schema_coverage() {
+    let h = harness().await;
+    let c = profile(&h, &postgres(), false).await;
+    let teardown = "DROP SCHEMA IF EXISTS it176_cov CASCADE;
+         DROP SERVER IF EXISTS it176_srv CASCADE;
+         DROP FOREIGN DATA WRAPPER IF EXISTS it176_fdw CASCADE;";
+    exec(&h, c, teardown).await;
+    exec(
+        &h,
+        c,
+        "CREATE SCHEMA it176_cov;
+         CREATE SEQUENCE it176_cov.seq;
+         CREATE TYPE it176_cov.mood AS ENUM ('a', 'b');
+         CREATE DOMAIN it176_cov.pos AS int CHECK (VALUE > 0);
+         CREATE TYPE it176_cov.pair AS (a int, b int);
+         CREATE TABLE it176_cov.t (id int);
+         CREATE FUNCTION it176_cov.trg() RETURNS trigger LANGUAGE plpgsql
+             AS $$BEGIN RETURN NEW; END$$;
+         CREATE TRIGGER t_ins BEFORE INSERT ON it176_cov.t
+             FOR EACH ROW EXECUTE FUNCTION it176_cov.trg();
+         CREATE MATERIALIZED VIEW it176_cov.mv AS SELECT 1 AS a;
+         CREATE TABLE it176_cov.events (id int, at date) PARTITION BY RANGE (at);
+         CREATE TABLE it176_cov.events_2025 PARTITION OF it176_cov.events
+             FOR VALUES FROM ('2025-01-01') TO ('2026-01-01');
+         CREATE TABLE it176_cov.events_2026 PARTITION OF it176_cov.events
+             FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
+         CREATE TRIGGER ev_ins BEFORE INSERT ON it176_cov.events
+             FOR EACH ROW EXECUTE FUNCTION it176_cov.trg();
+         CREATE FUNCTION it176_cov.f(a int) RETURNS int LANGUAGE sql AS 'SELECT a';
+         CREATE FUNCTION it176_cov.f(a text) RETURNS text LANGUAGE sql AS 'SELECT a';
+         CREATE FOREIGN DATA WRAPPER it176_fdw;
+         CREATE SERVER it176_srv FOREIGN DATA WRAPPER it176_fdw;
+         CREATE FOREIGN TABLE it176_cov.ft (a int) SERVER it176_srv;",
+    )
+    .await;
+    let tables: Vec<TableInfo> = h
+        .get_json(&format!(
+            "/v1/connections/{c}/schema/tables?schema=it176_cov"
+        ))
+        .await;
+    let routines: Vec<RoutineInfo> = h
+        .get_json(&format!(
+            "/v1/connections/{c}/schema/routines?schema=it176_cov"
+        ))
+        .await;
+    let objects: Vec<SchemaObject> = h
+        .get_json(&format!(
+            "/v1/connections/{c}/schema/objects?schema=it176_cov"
+        ))
+        .await;
+    let ddl_int = h
+        .get_json::<Ddl>(&format!(
+            "/v1/connections/{c}/ddl?schema=it176_cov&name=f&arguments=a%20integer"
+        ))
+        .await
+        .ddl;
+    let ddl_all = ddl_of(&h, c, "it176_cov", "f").await.unwrap();
+    exec(&h, c, teardown).await;
+
+    let summary: Vec<String> = tables
+        .iter()
+        .map(|t| {
+            format!(
+                "{} {:?} foreign={} partitioned={} of={}",
+                t.name,
+                t.kind,
+                t.foreign,
+                t.partitioned,
+                t.partition_of.as_deref().unwrap_or("-")
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            "events Table foreign=false partitioned=true of=-",
+            "events_2025 Table foreign=false partitioned=false of=events",
+            "events_2026 Table foreign=false partitioned=false of=events",
+            "ft Table foreign=true partitioned=false of=-",
+            "mv MaterializedView foreign=false partitioned=false of=-",
+            "t Table foreign=false partitioned=false of=-",
+        ]
+    );
+    let overloads: Vec<(String, Option<String>)> = routines
+        .iter()
+        .map(|r| (r.name.clone(), r.arguments.clone()))
+        .collect();
+    assert_eq!(
+        overloads,
+        [
+            ("f".to_string(), Some("a integer".to_string())),
+            ("f".to_string(), Some("a text".to_string())),
+            ("trg".to_string(), Some(String::new())),
+        ]
+    );
+    assert!(ddl_int.contains("f(a integer)"), "{ddl_int}");
+    assert!(!ddl_int.contains("a text"), "{ddl_int}");
+    assert!(
+        ddl_all.contains("a integer") && ddl_all.contains("a text"),
+        "{ddl_all}"
+    );
+    assert_eq!(
+        objects_summary(&objects),
+        [
+            "Sequence seq - bigint",
+            // Once, not again for each partition.
+            "Trigger ev_ins events -",
+            "Trigger t_ins t -",
+            "Type mood - enum",
+            "Type pair - composite",
+            "Type pos - domain",
+        ]
+    );
+}
+
+/// Sequences, user-defined types, synonyms and triggers on SQL Server.
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn mssql_schema_coverage() {
+    let h = harness().await;
+    let c = profile(&h, &mssql(), false).await;
+    let teardown = "DROP SYNONYM IF EXISTS it176_cov.syn;
+DROP TABLE IF EXISTS it176_cov.t;
+DROP SEQUENCE IF EXISTS it176_cov.seq;
+IF TYPE_ID('it176_cov.code') IS NOT NULL DROP TYPE it176_cov.code;
+IF TYPE_ID('it176_cov.rows_t') IS NOT NULL DROP TYPE it176_cov.rows_t;
+IF SCHEMA_ID('it176_cov') IS NOT NULL EXEC('DROP SCHEMA it176_cov')";
+    exec(&h, c, teardown).await;
+    exec(
+        &h,
+        c,
+        "EXEC('CREATE SCHEMA it176_cov')
+GO
+CREATE SEQUENCE it176_cov.seq AS int
+CREATE TYPE it176_cov.code FROM varchar(10)
+CREATE TYPE it176_cov.rows_t AS TABLE (id int)
+CREATE TABLE it176_cov.t (id int)
+CREATE SYNONYM it176_cov.syn FOR it176_cov.t
+GO
+CREATE TRIGGER it176_cov.t_ins ON it176_cov.t AFTER INSERT AS SET NOCOUNT ON",
+    )
+    .await;
+    let objects: Vec<SchemaObject> = h
+        .get_json(&format!(
+            "/v1/connections/{c}/schema/objects?schema=it176_cov"
+        ))
+        .await;
+    exec(&h, c, teardown).await;
+    assert_eq!(
+        objects_summary(&objects),
+        [
+            "Sequence seq - int",
+            "Synonym syn - [it176_cov].[t]",
+            "Trigger t_ins t -",
+            "Type code - varchar",
+            "Type rows_t - table type",
+        ]
+    );
 }
 
 #[tokio::test]

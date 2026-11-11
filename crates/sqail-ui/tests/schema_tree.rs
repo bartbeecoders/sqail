@@ -10,7 +10,7 @@ use egui_kittest::kittest::Queryable;
 use sqail_client::proto::QueryRequest;
 use sqail_client::proto::{
     ColumnInfo, Connection, ConnectionInput, ConnectionParams, NamedItem, RoutineInfo, RoutineKind,
-    SqliteParams, TableInfo, TableKind,
+    SchemaObject, SchemaObjectKind, SqliteParams, TableInfo, TableKind,
 };
 use sqail_client::{Client, On, Target, Trust};
 use sqail_ui::SqailApp;
@@ -152,6 +152,9 @@ fn catalog(h: &mut Harness<'_, SqailApp>, n: usize, few: usize) {
         schema: Some(s.into()),
         name,
         kind: TableKind::Table,
+        foreign: false,
+        partitioned: false,
+        partition_of: None,
     };
     put(
         h,
@@ -182,6 +185,7 @@ fn catalog(h: &mut Harness<'_, SqailApp>, n: usize, few: usize) {
                 name: format!("{s}_fn"),
                 kind: RoutineKind::Function,
                 table_valued: i == 3,
+                arguments: None,
             }]),
         );
     }
@@ -349,6 +353,9 @@ fn filter_loads_tables_in_one_request() {
         schema: Some(s.into()),
         name: n.into(),
         kind: TableKind::Table,
+        foreign: false,
+        partitioned: false,
+        partition_of: None,
     };
     put(
         &mut h,
@@ -465,4 +472,174 @@ fn refresh_a_schema_or_a_table() {
     h.get_by_label("Refresh").click();
     wait_label(&mut h, "⊞ pets");
     h.get_by_label("Tables (2)");
+}
+
+/// Partitions sit under their parent, foreign tables and materialized views
+/// are marked and can't be designed, overloads show their arguments, and
+/// sequences, types and triggers are listed.
+#[test]
+fn coverage_of_a_postgres_catalog() {
+    let _e = env();
+    let mut h = app();
+    h.state_mut().service.connections.push(big_connection());
+    put(
+        &mut h,
+        SchemaKey::Schemas,
+        SchemaData::Schemas(vec![NamedItem { name: "app".into() }]),
+    );
+    let table = |n: &str, kind: TableKind| TableInfo {
+        schema: Some("app".into()),
+        name: n.into(),
+        kind,
+        foreign: false,
+        partitioned: false,
+        partition_of: None,
+    };
+    put(
+        &mut h,
+        SchemaKey::Tables("app".into()),
+        SchemaData::Tables(vec![
+            TableInfo {
+                partitioned: true,
+                ..table("events", TableKind::Table)
+            },
+            TableInfo {
+                partition_of: Some("events".into()),
+                ..table("events_2025", TableKind::Table)
+            },
+            TableInfo {
+                foreign: true,
+                ..table("ft", TableKind::Table)
+            },
+            table("mv", TableKind::MaterializedView),
+            table("t", TableKind::Table),
+        ]),
+    );
+    let f = |args: &str| RoutineInfo {
+        schema: Some("app".into()),
+        name: "f".into(),
+        kind: RoutineKind::Function,
+        table_valued: false,
+        arguments: Some(args.into()),
+    };
+    put(
+        &mut h,
+        SchemaKey::Routines("app".into()),
+        SchemaData::Routines(vec![f("a integer"), f("a text")]),
+    );
+    let object =
+        |n: &str, kind: SchemaObjectKind, table: Option<&str>, detail: Option<&str>| SchemaObject {
+            schema: Some("app".into()),
+            name: n.into(),
+            kind,
+            table: table.map(String::from),
+            detail: detail.map(String::from),
+        };
+    put(
+        &mut h,
+        SchemaKey::Objects("app".into()),
+        SchemaData::Objects(vec![
+            object("seq", SchemaObjectKind::Sequence, None, Some("bigint")),
+            object("t_ins", SchemaObjectKind::Trigger, Some("t"), None),
+            object("mood", SchemaObjectKind::Type, None, Some("enum")),
+        ]),
+    );
+    h.run_steps(2);
+    h.get_by_label("big").click();
+    h.run_steps(4);
+
+    // The partition is not one of the tables.
+    h.get_by_label("Tables (3)");
+    assert!(h.query_by_label("⊞ events_2025").is_none());
+    h.get_by_label("⊞ events  partitioned").click();
+    h.run_steps(4);
+    h.get_by_label("Partitions (1)").click();
+    h.run_steps(4);
+    h.get_by_label("⊞ events_2025");
+    h.get_by_label("Views (1)").click();
+    h.run_steps(4);
+    h.get_by_label("👁 mv  materialized");
+
+    // Overloads, sequences, types.
+    h.get_by_label("Routines").click();
+    h.run_steps(4);
+    h.get_by_label("ƒ f(a integer)");
+    h.get_by_label("ƒ f(a text)");
+
+    // Dropping one overload names its arguments.
+    right_click(&mut h, "ƒ f(a text)");
+    h.get_by_label("Drop function…").click();
+    h.run_steps(3);
+    match &h.state().dialog {
+        sqail_ui::dialogs::Dialog::DropTable(d) => {
+            assert_eq!(d.sql(), "DROP FUNCTION app.f(a text)");
+        }
+        _ => panic!("no drop dialog"),
+    }
+    h.get_by_label("Drop function f?");
+    h.get_by_label("Cancel").click();
+    h.run_steps(3);
+    h.get_by_label("Sequences (1)").click();
+    h.run_steps(4);
+    h.get_by_label("Types (1)").click();
+    h.run_steps(4);
+    h.get_by_label("# seq");
+    h.get_by_label("τ mood");
+
+    // A trigger under its table.
+    h.get_by_label("⊞ t").click();
+    h.run_steps(4);
+    h.get_by_label("Triggers (1)").click();
+    h.run_steps(4);
+    h.get_by_label("⚡ t_ins");
+
+    // Menus: no designer for a foreign or partitioned table; Drop says what.
+    right_click(&mut h, "⊞ ft  foreign");
+    assert!(h.query_by_label("Design table…").is_none());
+    h.get_by_label("Drop foreign table…");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    right_click(&mut h, "⊞ events  partitioned");
+    assert!(h.query_by_label("Design table…").is_none());
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    right_click(&mut h, "⊞ t");
+    h.get_by_label("Design table…");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+}
+
+/// SQLite: a trigger is listed under its table; a view is dropped after the
+/// same confirmation a table gets.
+#[test]
+fn sqlite_triggers_and_dropping_a_view() {
+    let e = env();
+    e.exec(
+        "CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT);
+         CREATE TRIGGER people_ins AFTER INSERT ON people BEGIN SELECT 1; END;
+         CREATE VIEW names AS SELECT name FROM people;",
+    );
+    let mut h = app();
+    h.get_by_label("small db").click();
+    wait_label(&mut h, "⊞ people");
+    h.get_by_label("⊞ people").click();
+    wait_label(&mut h, "Triggers (1)");
+    h.run_steps(4);
+    h.get_by_label("Triggers (1)").click();
+    wait_label(&mut h, "⚡ people_ins");
+
+    h.get_by_label("Views (1)").click();
+    wait_label(&mut h, "👁 names");
+    right_click(&mut h, "👁 names");
+    h.get_by_label("Drop view…").click();
+    h.run_steps(3);
+    h.get_by_label("Drop view names?");
+    h.get_by_label("Drop").click();
+    let start = Instant::now();
+    while h.query_by_label("👁 names").is_some() {
+        assert!(start.elapsed() < Duration::from_secs(20), "view dropped");
+        h.step();
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    assert!(matches!(h.state().dialog, sqail_ui::dialogs::Dialog::None));
 }

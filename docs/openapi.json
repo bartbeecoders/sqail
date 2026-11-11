@@ -1612,6 +1612,13 @@
       },
       "RoutineInfo": {
         "properties": {
+          "arguments": {
+            "description": "PostgreSQL: the argument types that identify the routine among its\noverloads (`pg_get_function_identity_arguments`), e.g. `integer, text`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "kind": {
             "$ref": "#/components/schemas/RoutineKind"
           },
@@ -1639,6 +1646,53 @@
         "enum": [
           "function",
           "procedure"
+        ],
+        "type": "string"
+      },
+      "SchemaObject": {
+        "description": "A schema object that isn't a table, view or routine.",
+        "properties": {
+          "detail": {
+            "description": "More about it: a type's kind (`enum`, `domain`, `table type`, …), a\nsynonym's target, a sequence's data type.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "$ref": "#/components/schemas/SchemaObjectKind"
+          },
+          "name": {
+            "type": "string"
+          },
+          "schema": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "table": {
+            "description": "A trigger's table or view.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "SchemaObjectKind": {
+        "description": "What a [`SchemaObject`] is. Kinds this version doesn't know read as\n`other`.",
+        "enum": [
+          "sequence",
+          "type",
+          "synonym",
+          "trigger",
+          "other"
         ],
         "type": "string"
       },
@@ -1793,11 +1847,26 @@
       },
       "TableInfo": {
         "properties": {
+          "foreign": {
+            "description": "A PostgreSQL foreign table. Absent (false) from older services.",
+            "type": "boolean"
+          },
           "kind": {
             "$ref": "#/components/schemas/TableKind"
           },
           "name": {
             "type": "string"
+          },
+          "partition_of": {
+            "description": "A PostgreSQL partition: the name of its parent table, when that is\nin the same schema.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "partitioned": {
+            "description": "A PostgreSQL partitioned table (its rows live in its partitions).",
+            "type": "boolean"
           },
           "schema": {
             "type": [
@@ -2562,6 +2631,18 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "PostgreSQL: one overload's identity arguments (as `routines` lists\nthem); without it every overload is scripted.",
+            "in": "query",
+            "name": "arguments",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -2876,6 +2957,52 @@
             }
           }
         },
+        "tags": [
+          "schema"
+        ]
+      }
+    },
+    "/v1/connections/{id}/schema/objects": {
+      "get": {
+        "operationId": "objects",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Limit to one schema.",
+            "in": "query",
+            "name": "schema",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SchemaObject"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Sequences, user-defined types, synonyms and triggers.",
         "tags": [
           "schema"
         ]

@@ -350,7 +350,18 @@ remember their state.
   *Design table…*, *Import CSV…*, *Script CREATE*, *Drop table…* or *Copy
   name*. *Import CSV* reads binary columns as `0x` + hex, the way CSV
   export writes them, and stops (changing nothing) at a value that isn't
-  valid hex. Right-click a routine for *Script definition* or *Copy name*.
+  valid hex. Right-click a routine for *Script definition*, *Copy name* (schema-qualified,
+  quoted where needed) or *Drop function…* / *Drop procedure…*; views
+  have *Drop view…*. Each drop asks first, like *Drop table…*.
+  Materialized views, PostgreSQL foreign tables and partitioned tables are
+  marked as such; partitions are listed under their parent table
+  (*Partitions*), not with the tables. *Design table…* is offered only for
+  plain tables. PostgreSQL overloads are listed with their argument types,
+  and *Script definition* and *Drop* act on that one overload. Sequences,
+  user-defined types and SQL Server synonyms have groups of their own under
+  the schema, and triggers are listed under their table (*Triggers*).
+  Switching the database of a SQL Server connection from the tree is not
+  supported yet: make a connection per database.
   *Script CREATE* on a table writes columns with their identity, computed
   or generated definition, defaults, collations, keys, unique, check and
   foreign-key constraints (with their `ON DELETE`/`ON UPDATE` actions) and

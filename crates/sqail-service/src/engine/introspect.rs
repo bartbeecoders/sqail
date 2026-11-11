@@ -5,7 +5,7 @@
 use serde_json::Value;
 use sqail_proto::{
     ColumnInfo, Ddl, Engine, ForeignKeyInfo, IndexInfo, NamedItem, Param, RoutineInfo, RoutineKind,
-    TableGrant, TableInfo, TableKind, TablePrivileges,
+    SchemaObject, SchemaObjectKind, TableGrant, TableInfo, TableKind, TablePrivileges,
 };
 
 use super::{Conn, DbError, Result, fetch_rows};
@@ -99,7 +99,12 @@ pub async fn tables(conn: &mut dyn Conn, schema: Option<&str>) -> Result<Vec<Tab
     let (sql, params) = match conn.engine() {
         Engine::Unknown => return Err(DbError::unknown_engine()),
         Engine::Postgres => (
-            "SELECT n.nspname::text, c.relname::text, c.relkind::text
+            // A partition names its parent when that is in the same schema.
+            "SELECT n.nspname::text, c.relname::text, c.relkind::text,
+                    (SELECT pc.relname::text FROM pg_inherits i
+                     JOIN pg_class pc ON pc.oid = i.inhparent
+                     WHERE c.relispartition AND i.inhrelid = c.oid
+                       AND pc.relnamespace = c.relnamespace)
              FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
              WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
                AND ($1::text IS NULL OR n.nspname = $1)
@@ -110,7 +115,7 @@ pub async fn tables(conn: &mut dyn Conn, schema: Option<&str>) -> Result<Vec<Tab
             vec![param(schema)],
         ),
         Engine::Mssql => (
-            "SELECT s.name, o.name, RTRIM(o.type)
+            "SELECT s.name, o.name, RTRIM(o.type), NULL
              FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id
              WHERE o.type IN ('U', 'V') AND o.is_ms_shipped = 0 AND (@P1 IS NULL OR s.name = @P1)
              ORDER BY s.name, o.name"
@@ -121,7 +126,7 @@ pub async fn tables(conn: &mut dyn Conn, schema: Option<&str>) -> Result<Vec<Tab
             let db = sqlite_schema(conn, schema).await?;
             (
                 format!(
-                    "SELECT '{}', name, type FROM {}.sqlite_schema
+                    "SELECT '{}', name, type, NULL FROM {}.sqlite_schema
                      WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'
                      ORDER BY name",
                     db.name.replace('\'', "''"),
@@ -135,14 +140,18 @@ pub async fn tables(conn: &mut dyn Conn, schema: Option<&str>) -> Result<Vec<Tab
         .await?
         .iter()
         .filter_map(|r| {
+            let kind = get_str(&r[2]);
             Some(TableInfo {
                 schema: get_str(&r[0]),
                 name: get_str(&r[1])?,
-                kind: match get_str(&r[2]).as_deref() {
+                kind: match kind.as_deref() {
                     Some("v" | "V" | "view") => TableKind::View,
                     Some("m") => TableKind::MaterializedView,
                     _ => TableKind::Table,
                 },
+                foreign: kind.as_deref() == Some("f"),
+                partitioned: kind.as_deref() == Some("p"),
+                partition_of: get_str(&r[3]),
             })
         })
         .collect())
@@ -503,16 +512,17 @@ pub async fn routines(conn: &mut dyn Conn, schema: Option<&str>) -> Result<Vec<R
         Engine::Unknown => return Err(DbError::unknown_engine()),
         Engine::Postgres => (
             "SELECT n.nspname::text, p.proname::text,
-                    CASE WHEN p.prokind = 'f' AND p.proretset THEN 'tf' ELSE p.prokind::text END
+                    CASE WHEN p.prokind = 'f' AND p.proretset THEN 'tf' ELSE p.prokind::text END,
+                    pg_get_function_identity_arguments(p.oid)::text
              FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
              WHERE ($1::text IS NULL OR n.nspname = $1)
                AND n.nspname NOT IN ('pg_catalog', 'information_schema')
                AND p.prokind IN ('f', 'p')
-             ORDER BY 1, 2",
+             ORDER BY 1, 2, 4",
             vec![param(schema)],
         ),
         Engine::Mssql => (
-            "SELECT s.name, o.name, RTRIM(o.type)
+            "SELECT s.name, o.name, RTRIM(o.type), NULL
              FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id
              WHERE o.type IN ('P', 'FN', 'IF', 'TF') AND o.is_ms_shipped = 0
                AND (@P1 IS NULL OR s.name = @P1)
@@ -536,6 +546,99 @@ pub async fn routines(conn: &mut dyn Conn, schema: Option<&str>) -> Result<Vec<R
                 // SQL Server: inline (IF) and multi-statement (TF) table-valued
                 // functions; Postgres: set-returning functions ('tf' above).
                 table_valued: matches!(kind.as_deref(), Some("IF" | "TF" | "tf")),
+                arguments: get_str(&r[3]),
+            })
+        })
+        .collect())
+}
+
+// -------------------------------------------------------------- objects --
+
+/// Sequences, user-defined types, synonyms and triggers, ordered by kind,
+/// schema and name. Objects that belong to an extension are left out.
+pub async fn objects(conn: &mut dyn Conn, schema: Option<&str>) -> Result<Vec<SchemaObject>> {
+    let (sql, params) = match conn.engine() {
+        Engine::Unknown => return Err(DbError::unknown_engine()),
+        Engine::Postgres => (
+            "WITH ext AS (SELECT objid FROM pg_depend WHERE deptype = 'e')
+             SELECT n.nspname::text, c.relname::text, 'sequence', NULL::text,
+                    format_type(s.seqtypid, NULL)::text
+             FROM pg_sequence s JOIN pg_class c ON c.oid = s.seqrelid
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE ($1::text IS NULL OR n.nspname = $1) AND c.oid NOT IN (SELECT objid FROM ext)
+             UNION ALL
+             SELECT n.nspname::text, t.typname::text, 'type', NULL,
+                    CASE t.typtype WHEN 'e' THEN 'enum' WHEN 'd' THEN 'domain'
+                                   WHEN 'c' THEN 'composite' WHEN 'r' THEN 'range' END
+             FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+             WHERE t.typtype IN ('e', 'd', 'c', 'r')
+               AND (t.typtype <> 'c'
+                    OR (SELECT relkind FROM pg_class WHERE oid = t.typrelid) = 'c')
+               AND ($1::text IS NULL OR n.nspname = $1)
+               AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+               AND t.oid NOT IN (SELECT objid FROM ext)
+             UNION ALL
+             SELECT n.nspname::text, g.tgname::text, 'trigger', c.relname::text, NULL
+             FROM pg_trigger g JOIN pg_class c ON c.oid = g.tgrelid
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE NOT g.tgisinternal AND g.tgparentid = 0
+               AND ($1::text IS NULL OR n.nspname = $1)
+               AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+             ORDER BY 3, 1, 2"
+                .to_string(),
+            vec![param(schema)],
+        ),
+        Engine::Mssql => (
+            "SELECT SCHEMA_NAME(q.schema_id), q.name, 'sequence', NULL, TYPE_NAME(q.user_type_id)
+             FROM sys.sequences q WHERE @P1 IS NULL OR SCHEMA_NAME(q.schema_id) = @P1
+             UNION ALL
+             SELECT SCHEMA_NAME(t.schema_id), t.name, 'type', NULL,
+                    CASE WHEN t.is_table_type = 1 THEN 'table type'
+                         WHEN t.is_assembly_type = 1 THEN 'CLR type'
+                         ELSE TYPE_NAME(t.system_type_id) END
+             FROM sys.types t
+             WHERE t.is_user_defined = 1 AND (@P1 IS NULL OR SCHEMA_NAME(t.schema_id) = @P1)
+             UNION ALL
+             SELECT SCHEMA_NAME(y.schema_id), y.name, 'synonym', NULL, y.base_object_name
+             FROM sys.synonyms y WHERE @P1 IS NULL OR SCHEMA_NAME(y.schema_id) = @P1
+             UNION ALL
+             SELECT SCHEMA_NAME(o.schema_id), tr.name, 'trigger', o.name, NULL
+             FROM sys.triggers tr JOIN sys.objects o ON o.object_id = tr.parent_id
+             WHERE tr.parent_class = 1 AND tr.is_ms_shipped = 0
+               AND (@P1 IS NULL OR SCHEMA_NAME(o.schema_id) = @P1)
+             ORDER BY 3, 1, 2"
+                .to_string(),
+            vec![param(schema)],
+        ),
+        Engine::Sqlite => {
+            let db = sqlite_schema(conn, schema).await?;
+            (
+                format!(
+                    "SELECT '{}', name, 'trigger', tbl_name, NULL FROM {}.sqlite_schema
+                     WHERE type = 'trigger' ORDER BY name",
+                    db.name.replace('\'', "''"),
+                    db.quoted
+                ),
+                vec![],
+            )
+        }
+    };
+    Ok(rows(conn, &sql, params)
+        .await?
+        .iter()
+        .filter_map(|r| {
+            Some(SchemaObject {
+                schema: get_str(&r[0]),
+                name: get_str(&r[1])?,
+                kind: match get_str(&r[2]).as_deref() {
+                    Some("sequence") => SchemaObjectKind::Sequence,
+                    Some("type") => SchemaObjectKind::Type,
+                    Some("synonym") => SchemaObjectKind::Synonym,
+                    Some("trigger") => SchemaObjectKind::Trigger,
+                    _ => SchemaObjectKind::Other,
+                },
+                table: get_str(&r[3]),
+                detail: get_str(&r[4]),
             })
         })
         .collect())
@@ -614,7 +717,15 @@ pub async fn privileges(
 
 // ------------------------------------------------------------------ ddl --
 
-pub async fn ddl(conn: &mut dyn Conn, schema: Option<&str>, name: &str) -> Result<Ddl> {
+/// `arguments` (PostgreSQL) picks one overload of a routine by its identity
+/// arguments, as [`routines`] lists them; without it every overload is
+/// scripted.
+pub async fn ddl(
+    conn: &mut dyn Conn,
+    schema: Option<&str>,
+    name: &str,
+    arguments: Option<&str>,
+) -> Result<Ddl> {
     let not_found = || DbError::Invalid(format!("object '{name}' not found"));
     let ddl = match conn.engine() {
         Engine::Unknown => return Err(DbError::unknown_engine()),
@@ -677,8 +788,11 @@ pub async fn ddl(conn: &mut dyn Conn, schema: Option<&str>, name: &str) -> Resul
                         "SELECT pg_get_functiondef(p.oid)::text FROM pg_proc p
                          JOIN pg_namespace n ON n.oid = p.pronamespace
                          WHERE n.nspname = COALESCE($1, current_schema()) AND p.proname = $2
-                           AND p.prokind IN ('f', 'p')",
-                        vec![param(schema), param(Some(name))],
+                           AND p.prokind IN ('f', 'p')
+                           AND ($3::text IS NULL
+                                OR pg_get_function_identity_arguments(p.oid) = $3)
+                         ORDER BY pg_get_function_identity_arguments(p.oid)",
+                        vec![param(schema), param(Some(name)), param(arguments)],
                     )
                     .await?;
                     let defs: Vec<String> = defs.iter().filter_map(|r| get_str(&r[0])).collect();

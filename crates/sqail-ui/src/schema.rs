@@ -6,12 +6,13 @@ use std::rc::Rc;
 use egui::{CollapsingHeader, Color32, RichText};
 use sqail_client::Client;
 use sqail_client::proto::{
-    ColumnInfo, Connection, ForeignKeyInfo, IndexInfo, NamedItem, RoutineInfo, TableInfo, TableKind,
+    ColumnInfo, Connection, ForeignKeyInfo, IndexInfo, NamedItem, RoutineInfo, SchemaObject,
+    SchemaObjectKind, TableInfo, TableKind,
 };
 use uuid::Uuid;
 
 use crate::app::{Msg, ServiceStatus, SqailApp};
-use crate::dialogs::{ConnForm, Dialog, DiscoverForm};
+use crate::dialogs::{ConnForm, Dialog, DiscoverForm, DropKind};
 use crate::editor::SqlDrop;
 use crate::folders::{ConnDrag, Rename, RenameTarget};
 use crate::sql;
@@ -32,6 +33,7 @@ pub enum SchemaData {
     Columns(Vec<ColumnInfo>),
     Indexes(Vec<IndexInfo>),
     ForeignKeys(Vec<ForeignKeyInfo>),
+    Objects(Vec<SchemaObject>),
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -42,11 +44,15 @@ pub enum SchemaKey {
     Columns(String, String),
     Indexes(String, String),
     ForeignKeys(String, String),
+    /// Sequences, types, synonyms and triggers.
+    Objects(String),
     /// Every schema's tables in one request (for the filter); the result is
     /// stored per schema, and this key only marks the batch as done.
     AllTables,
     /// Every schema's routines in one request, like [`Self::AllTables`].
     AllRoutines,
+    /// Every schema's [`Self::Objects`] in one request.
+    AllObjects,
 }
 
 impl SchemaKey {
@@ -55,6 +61,7 @@ impl SchemaKey {
         match self {
             SchemaKey::Tables(_) => Some(SchemaKey::AllTables),
             SchemaKey::Routines(_) => Some(SchemaKey::AllRoutines),
+            SchemaKey::Objects(_) => Some(SchemaKey::AllObjects),
             _ => None,
         }
     }
@@ -105,10 +112,17 @@ struct SchemaView {
     /// Indices into the schema's table list per [`Group`]; `None` until the
     /// tables are loaded.
     groups: Option<[Rc<Vec<usize>>; 2]>,
-    /// Tables listed only because one of their (loaded) columns matches.
-    column_hits: Rc<HashSet<usize>>,
+    /// Tables listed only because something inside them matches: a loaded
+    /// column, or one of their partitions.
+    inner_hits: Rc<HashSet<usize>>,
+    /// PostgreSQL partitions, listed under their parent table (index into
+    /// the table list) instead of with the tables.
+    partitions: Rc<HashMap<usize, Vec<usize>>>,
     /// Indices into the schema's routine list; `None` until loaded.
     routines: Option<Rc<Vec<usize>>>,
+    /// Indices into the schema's sequences, types and synonyms (triggers are
+    /// shown under their table); `None` until loaded (or not served).
+    objects: Option<Rc<Vec<usize>>>,
     /// The engine has no routines (SQLite).
     no_routines: bool,
 }
@@ -140,21 +154,57 @@ impl SchemaView {
                 }
             }
         }
-        let mut column_hits = HashSet::new();
+        let mut inner_hits = HashSet::new();
+        let mut partitions: HashMap<usize, Vec<usize>> = HashMap::new();
         let groups = match ready(&SchemaKey::Tables(schema.to_string())) {
             Some(SchemaData::Tables(ts)) => {
+                let index: HashMap<&str, usize> = ts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| (t.name.as_str(), i))
+                    .collect();
+                let parent = |t: &TableInfo| t.partition_of.as_deref().and_then(|p| index.get(p));
+                for (i, t) in ts.iter().enumerate() {
+                    if let Some(&p) = parent(t) {
+                        partitions.entry(p).or_default().push(i);
+                    }
+                }
+                let hits = |t: &TableInfo| hit(&t.name) || by_column.contains(t.name.as_str());
                 let mut groups: [Vec<usize>; 2] = Default::default();
                 for (i, t) in ts.iter().enumerate() {
+                    if parent(t).is_some() {
+                        continue;
+                    }
+                    // A parent with a matching partition (at any depth).
+                    let mut inner = false;
+                    let mut stack: Vec<usize> = partitions.get(&i).cloned().unwrap_or_default();
+                    while let Some(c) = stack.pop() {
+                        if hits(&ts[c]) {
+                            inner = true;
+                            break;
+                        }
+                        stack.extend(partitions.get(&c).into_iter().flatten());
+                    }
                     let by_name = hit(&t.name);
-                    if by_name || by_column.contains(t.name.as_str()) {
+                    if by_name || by_column.contains(t.name.as_str()) || inner {
                         if !by_name {
-                            column_hits.insert(i);
+                            inner_hits.insert(i);
                         }
                         groups[Group::of(t.kind).index()].push(i);
                     }
                 }
                 Some(groups.map(Rc::new))
             }
+            _ => None,
+        };
+        let objects = match ready(&SchemaKey::Objects(schema.to_string())) {
+            Some(SchemaData::Objects(os)) => Some(Rc::new(
+                os.iter()
+                    .enumerate()
+                    .filter(|(_, o)| o.kind != SchemaObjectKind::Trigger && hit(&o.name))
+                    .map(|(i, _)| i)
+                    .collect(),
+            )),
             _ => None,
         };
         let routines = match ready(&SchemaKey::Routines(schema.to_string())) {
@@ -171,8 +221,10 @@ impl SchemaView {
             filter: filter.to_string(),
             revision,
             groups,
-            column_hits: Rc::new(column_hits),
+            inner_hits: Rc::new(inner_hits),
+            partitions: Rc::new(partitions),
             routines,
+            objects,
             no_routines,
         }
     }
@@ -192,7 +244,10 @@ impl SchemaView {
         } else {
             self.routines.as_ref().map(|r| !r.is_empty())
         };
+        // Objects only add matches: an older service doesn't list them.
+        let objects = self.objects.as_ref().is_some_and(|o| !o.is_empty());
         match (tables, routines) {
+            _ if objects => Some(true),
             (Some(true), _) | (_, Some(true)) => Some(true),
             (Some(false), Some(false)) => Some(false),
             _ => None,
@@ -232,7 +287,10 @@ impl SchemaTree {
         let entry = self.data.entry(m.connection).or_default();
         match (m.key, m.result) {
             // A batch: store each schema's part as if it was fetched alone.
-            (key @ (SchemaKey::AllTables | SchemaKey::AllRoutines), Ok(d)) => {
+            (
+                key @ (SchemaKey::AllTables | SchemaKey::AllRoutines | SchemaKey::AllObjects),
+                Ok(d),
+            ) => {
                 let schemas: Vec<String> = match entry.get(&SchemaKey::Schemas) {
                     Some(Load::Ready(SchemaData::Schemas(s))) => {
                         s.iter().map(|n| n.name.clone()).collect()
@@ -269,6 +327,22 @@ impl SchemaTree {
                         }
                         entry.insert(key, Load::Ready(SchemaData::Routines(Vec::new())));
                     }
+                    SchemaData::Objects(os) => {
+                        let mut per: HashMap<String, Vec<SchemaObject>> =
+                            schemas.into_iter().map(|s| (s, Vec::new())).collect();
+                        for o in os {
+                            per.entry(o.schema.clone().unwrap_or_default())
+                                .or_default()
+                                .push(o);
+                        }
+                        for (s, os) in per {
+                            entry.insert(
+                                SchemaKey::Objects(s),
+                                Load::Ready(SchemaData::Objects(os)),
+                            );
+                        }
+                        entry.insert(key, Load::Ready(SchemaData::Objects(Vec::new())));
+                    }
                     other => {
                         entry.insert(key, Load::Ready(other));
                     }
@@ -298,7 +372,9 @@ impl SchemaTree {
         self.revision += 1;
         if let Some(m) = self.data.get_mut(&conn) {
             m.retain(|k, _| match k {
-                SchemaKey::Tables(s) | SchemaKey::Routines(s) => s != schema,
+                SchemaKey::Tables(s) | SchemaKey::Routines(s) | SchemaKey::Objects(s) => {
+                    s != schema
+                }
                 SchemaKey::Columns(s, _)
                 | SchemaKey::Indexes(s, _)
                 | SchemaKey::ForeignKeys(s, _) => s != schema,
@@ -480,6 +556,13 @@ impl SchemaTree {
                     SchemaKey::AllRoutines => {
                         client.routines(conn, None).await.map(SchemaData::Routines)
                     }
+                    SchemaKey::Objects(sc) => client
+                        .objects(conn, Some(sc))
+                        .await
+                        .map(SchemaData::Objects),
+                    SchemaKey::AllObjects => {
+                        client.objects(conn, None).await.map(SchemaData::Objects)
+                    }
                 };
                 Msg::Schema(SchemaMsg {
                     connection: conn,
@@ -535,6 +618,8 @@ enum Action {
         conn: Uuid,
         schema: String,
         name: String,
+        /// PostgreSQL: script just this overload.
+        arguments: Option<String>,
     },
     Copy(String),
     Design {
@@ -551,6 +636,7 @@ enum Action {
         engine: sqail_client::proto::Engine,
         schema: String,
         table: String,
+        kind: DropKind,
     },
 }
 
@@ -902,6 +988,7 @@ fn connection_node(
                 t.schema.ensure(client, t.worker, id, SchemaKey::AllTables);
                 t.schema
                     .ensure(client, t.worker, id, SchemaKey::AllRoutines);
+                t.schema.ensure(client, t.worker, id, SchemaKey::AllObjects);
             }
             for schema in schemas {
                 if single {
@@ -1055,11 +1142,15 @@ fn schema_children(
             return;
         }
     }
+    // Sequences, types, synonyms and triggers (an older service has none).
+    t.schema
+        .ensure(client, t.worker, conn, SchemaKey::Objects(schema.into()));
     let sqlite = engine == sqail_client::proto::Engine::Sqlite;
     let view = t.schema.view(conn, schema, filter, sqlite);
     let groups = view.groups.clone().unwrap_or_default();
     let routines_view = view.routines.clone();
-    let column_hits = view.column_hits.clone();
+    let objects_view = view.objects.clone();
+    let inner_hits = view.inner_hits.clone();
     for group in Group::ALL {
         let items = &groups[group.index()];
         // Views only when there are some; while filtering, only groups
@@ -1086,7 +1177,7 @@ fn schema_children(
                     let Some(table) = ts.get(idx) else {
                         return false;
                     };
-                    let column_hit = !filter.is_empty() && column_hits.contains(&idx);
+                    let column_hit = !filter.is_empty() && inner_hits.contains(&idx);
                     if !draw {
                         // Drawn even when off screen: open (taller than a
                         // row), or about to be opened by the filter.
@@ -1100,7 +1191,13 @@ fn schema_children(
                     let table = table.clone();
                     let id = header_id(ui, ("table", conn, schema, &table.name));
                     let open = t.schema.reveal(id, column_hit);
-                    if table_node(ui, t, client, conn, engine, schema, &table, open, actions) {
+                    let node = Node {
+                        conn,
+                        engine,
+                        schema,
+                        index: idx,
+                    };
+                    if table_node(ui, t, client, &node, &table, open, actions) {
                         open_tables.insert(table.name);
                     } else {
                         open_tables.remove(&table.name);
@@ -1123,9 +1220,108 @@ fn schema_children(
             refresh_schema_item(ui, conn, schema, actions);
         });
     }
-    if sqlite {
-        return;
+    if !sqlite {
+        routines_group(
+            ui,
+            t,
+            client,
+            conn,
+            engine,
+            schema,
+            filter,
+            routines_view,
+            actions,
+        );
     }
+    if let Some(items) = objects_view {
+        objects_groups(ui, t, conn, engine, schema, &items, actions);
+    }
+}
+
+/// Sequences, types and synonyms, one group per kind that has any.
+fn objects_groups(
+    ui: &mut egui::Ui,
+    t: &mut TreeCtx<'_>,
+    conn: Uuid,
+    engine: sqail_client::proto::Engine,
+    schema: &str,
+    items: &[usize],
+    actions: &mut Vec<Action>,
+) {
+    let Some(SchemaData::Objects(os)) = t.schema.ready(conn, &SchemaKey::Objects(schema.into()))
+    else {
+        return;
+    };
+    let os: Vec<SchemaObject> = items.iter().filter_map(|&i| os.get(i).cloned()).collect();
+    for (kind, label, icon) in [
+        (SchemaObjectKind::Sequence, "Sequences", "#"),
+        (SchemaObjectKind::Type, "Types", "τ"),
+        (SchemaObjectKind::Synonym, "Synonyms", "→"),
+    ] {
+        let list: Vec<&SchemaObject> = os.iter().filter(|o| o.kind == kind).collect();
+        if list.is_empty() {
+            continue;
+        }
+        let salt = (label, conn, schema);
+        let open = t.schema.reveal(header_id(ui, salt), true);
+        CollapsingHeader::new(format!("{label} ({})", list.len()))
+            .id_salt(salt)
+            .open(open)
+            .show(ui, |ui| {
+                for o in list {
+                    object_row(ui, engine, schema, o, icon, actions);
+                }
+            });
+    }
+}
+
+/// A sequence, type, synonym or trigger: its name, what it is, and *Copy
+/// name*.
+fn object_row(
+    ui: &mut egui::Ui,
+    engine: sqail_client::proto::Engine,
+    schema: &str,
+    o: &SchemaObject,
+    icon: &str,
+    actions: &mut Vec<Action>,
+) {
+    let resp = ui
+        .horizontal(|ui| {
+            let resp = ui.selectable_label(false, format!("{icon} {}", o.name));
+            if let Some(d) = &o.detail {
+                ui.label(RichText::new(d).weak().small());
+            }
+            resp
+        })
+        .inner;
+    resp.context_menu(|ui| {
+        if ui.button("Copy name").clicked() {
+            // A trigger's name is not schema-qualified on PostgreSQL.
+            let name = if o.kind == SchemaObjectKind::Trigger
+                && engine != sqail_client::proto::Engine::Mssql
+            {
+                sql::quote_ident(engine, &o.name)
+            } else {
+                sql::qualified_name(engine, Some(schema), &o.name)
+            };
+            actions.push(Action::Copy(name));
+            ui.close();
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn routines_group(
+    ui: &mut egui::Ui,
+    t: &mut TreeCtx<'_>,
+    client: &Option<Client>,
+    conn: Uuid,
+    engine: sqail_client::proto::Engine,
+    schema: &str,
+    filter: &str,
+    routines_view: Option<Rc<Vec<usize>>>,
+    actions: &mut Vec<Action>,
+) {
     // While filtering, only with a match (once that is known).
     let hit = routines_view.as_ref().is_some_and(|r| !r.is_empty());
     if !filter.is_empty() && routines_view.is_some() && !hit {
@@ -1212,9 +1408,18 @@ fn routine_node(
     } else {
         ObjectKind::Function
     };
+    // PostgreSQL: the argument types tell overloads apart.
+    let arguments = r
+        .arguments
+        .clone()
+        .filter(|_| engine == sqail_client::proto::Engine::Postgres);
+    let label = match &arguments {
+        Some(a) => format!("{icon} {}({a})", r.name),
+        None => format!("{icon} {}", r.name),
+    };
     let resp = ui
         .horizontal(|ui| {
-            let resp = ui.selectable_label(false, format!("{icon} {}", r.name));
+            let resp = ui.selectable_label(false, label);
             if kind == ObjectKind::TableFunction {
                 ui.label(RichText::new("table").weak().small());
             }
@@ -1240,11 +1445,47 @@ fn routine_node(
                 conn,
                 schema: schema.into(),
                 name: name.clone(),
+                arguments: arguments.clone(),
             });
             ui.close();
         }
         if ui.button("Copy name").clicked() {
-            actions.push(Action::Copy(name.clone()));
+            actions.push(Action::Copy(sql::qualified_name(
+                engine,
+                Some(schema),
+                &name,
+            )));
+            ui.close();
+        }
+        ui.separator();
+        let (noun, kind) = if kind == ObjectKind::Procedure {
+            (
+                "procedure",
+                DropKind::Procedure {
+                    arguments: arguments.clone(),
+                },
+            )
+        } else {
+            (
+                "function",
+                DropKind::Function {
+                    arguments: arguments.clone(),
+                },
+            )
+        };
+        if ui
+            .button(
+                RichText::new(format!("Drop {noun}…")).color(Color32::from_rgb(0xd6, 0x45, 0x45)),
+            )
+            .clicked()
+        {
+            actions.push(Action::DropTable {
+                conn,
+                engine,
+                schema: schema.into(),
+                table: name.clone(),
+                kind,
+            });
             ui.close();
         }
     });
@@ -1317,28 +1558,95 @@ fn lazy_rows(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Where a table node is: its connection, schema and index in the schema's
+/// table list.
+struct Node<'a> {
+    conn: Uuid,
+    engine: sqail_client::proto::Engine,
+    schema: &'a str,
+    index: usize,
+}
+
+/// What the tree says about a table besides its name.
+fn table_tag(table: &TableInfo) -> Option<&'static str> {
+    if table.kind == TableKind::MaterializedView {
+        Some("materialized")
+    } else if table.foreign {
+        Some("foreign")
+    } else if table.partitioned {
+        Some("partitioned")
+    } else {
+        None
+    }
+}
+
 fn table_node(
     ui: &mut egui::Ui,
     t: &mut TreeCtx<'_>,
     client: &Option<Client>,
-    conn: Uuid,
-    engine: sqail_client::proto::Engine,
-    schema: &str,
+    node: &Node<'_>,
     table: &TableInfo,
     open: Option<bool>,
     actions: &mut Vec<Action>,
 ) -> bool {
+    let (conn, engine, schema) = (node.conn, node.engine, node.schema);
     let icon = if table.kind == TableKind::Table {
         "⊞"
     } else {
         "👁"
     };
-    let resp = CollapsingHeader::new(format!("{icon} {}", table.name))
+    let mut title = egui::text::LayoutJob::default();
+    let style = ui.style().clone();
+    RichText::new(format!("{icon} {}", table.name)).append_to(
+        &mut title,
+        &style,
+        egui::FontSelection::Default,
+        egui::Align::Center,
+    );
+    if let Some(tag) = table_tag(table) {
+        RichText::new(format!("  {tag}")).weak().small().append_to(
+            &mut title,
+            &style,
+            egui::FontSelection::Default,
+            egui::Align::Center,
+        );
+    }
+    let plain = table.kind == TableKind::Table && !table.foreign;
+    let resp = CollapsingHeader::new(title)
         .id_salt(("table", conn, schema, &table.name))
         .open(open)
         .show(ui, |ui| {
             let (sc, name) = (schema.to_string(), table.name.clone());
+            // Partitions are listed under their parent, not with the tables.
+            let partitions: Vec<(usize, TableInfo)> = {
+                let children = t
+                    .schema
+                    .views
+                    .get(&conn)
+                    .and_then(|v| v.get(schema))
+                    .and_then(|v| v.partitions.get(&node.index).cloned())
+                    .unwrap_or_default();
+                match t.schema.ready(conn, &SchemaKey::Tables(sc.clone())) {
+                    Some(SchemaData::Tables(ts)) => children
+                        .into_iter()
+                        .filter_map(|i| ts.get(i).map(|x| (i, x.clone())))
+                        .collect(),
+                    _ => Vec::new(),
+                }
+            };
+            if !partitions.is_empty() {
+                CollapsingHeader::new(format!("Partitions ({})", partitions.len()))
+                    .id_salt(("parts", conn, &sc, &name))
+                    .show(ui, |ui| {
+                        for (index, p) in &partitions {
+                            let child = Node {
+                                index: *index,
+                                ..*node
+                            };
+                            table_node(ui, t, client, &child, p, None, actions);
+                        }
+                    });
+            }
             match t.schema.get(
                 client,
                 t.worker,
@@ -1373,7 +1681,30 @@ fn table_node(
                     ui.spinner();
                 }
             }
-            if table.kind == TableKind::Table {
+            // Triggers, from the schema's objects (none from an older
+            // service).
+            let triggers: Vec<SchemaObject> =
+                match t.schema.ready(conn, &SchemaKey::Objects(sc.clone())) {
+                    Some(SchemaData::Objects(os)) => os
+                        .iter()
+                        .filter(|o| {
+                            o.kind == SchemaObjectKind::Trigger
+                                && o.table.as_deref() == Some(name.as_str())
+                        })
+                        .cloned()
+                        .collect(),
+                    _ => Vec::new(),
+                };
+            if !triggers.is_empty() {
+                CollapsingHeader::new(format!("Triggers ({})", triggers.len()))
+                    .id_salt(("triggers", conn, &sc, &name))
+                    .show(ui, |ui| {
+                        for o in &triggers {
+                            object_row(ui, engine, &sc, o, "⚡", actions);
+                        }
+                    });
+            }
+            if plain {
                 CollapsingHeader::new("Indexes")
                     .id_salt(("idx", conn, &sc, &name))
                     .show(ui, |ui| {
@@ -1449,6 +1780,15 @@ fn table_node(
     } else {
         ObjectKind::View
     };
+    // The designer edits plain tables: not foreign or partitioned ones, nor
+    // partitions.
+    let designable = plain && !table.partitioned && table.partition_of.is_none();
+    let drop_kind = match (table.kind, table.foreign) {
+        (TableKind::Table, false) => DropKind::Table,
+        (TableKind::Table, true) => DropKind::ForeignTable,
+        (TableKind::View, _) => DropKind::View,
+        (TableKind::MaterializedView, _) => DropKind::MaterializedView,
+    };
     let item = DropItem {
         engine,
         schema: schema.into(),
@@ -1473,7 +1813,7 @@ fn table_node(
             });
             ui.close();
         }
-        if table.kind == TableKind::Table && ui.button("Design table…").clicked() {
+        if designable && ui.button("Design table…").clicked() {
             actions.push(Action::Design {
                 conn,
                 schema: schema.into(),
@@ -1481,7 +1821,7 @@ fn table_node(
             });
             ui.close();
         }
-        if table.kind == TableKind::Table && ui.button("Import CSV…").clicked() {
+        if plain && ui.button("Import CSV…").clicked() {
             actions.push(Action::Import {
                 conn,
                 schema: schema.into(),
@@ -1494,25 +1834,28 @@ fn table_node(
                 conn,
                 schema: schema.into(),
                 name: name.clone(),
+                arguments: None,
             });
             ui.close();
         }
-        if table.kind == TableKind::Table {
-            ui.separator();
-            if ui
-                .button(RichText::new("Drop table…").color(Color32::from_rgb(0xd6, 0x45, 0x45)))
-                .clicked()
-            {
-                actions.push(Action::DropTable {
-                    conn,
-                    engine,
-                    schema: schema.into(),
-                    table: name.clone(),
-                });
-                ui.close();
-            }
-            ui.separator();
+        ui.separator();
+        if ui
+            .button(
+                RichText::new(format!("Drop {}…", drop_kind.noun()))
+                    .color(Color32::from_rgb(0xd6, 0x45, 0x45)),
+            )
+            .clicked()
+        {
+            actions.push(Action::DropTable {
+                conn,
+                engine,
+                schema: schema.into(),
+                table: name.clone(),
+                kind: drop_kind.clone(),
+            });
+            ui.close();
         }
+        ui.separator();
         if ui.button("Copy name").clicked() {
             let qualified = format!(
                 "{}.{}",
@@ -1662,12 +2005,21 @@ fn apply(app: &mut SqailApp, a: Action, ctx: &egui::Context) {
             let idx = app.open_text_tab(conn, table, text.clone());
             app.run_sql(idx, text);
         }
-        Action::Ddl { conn, schema, name } => {
+        Action::Ddl {
+            conn,
+            schema,
+            name,
+            arguments,
+        } => {
             let Some(client) = app.service.client.clone() else {
                 return;
             };
             app.worker.run(async move {
-                match client.ddl(conn, Some(&schema), &name).await {
+                let ddl = match &arguments {
+                    Some(a) => client.routine_ddl(conn, Some(&schema), &name, a).await,
+                    None => client.ddl(conn, Some(&schema), &name).await,
+                };
+                match ddl {
                     Ok(d) => Msg::OpenInTab {
                         connection: conn,
                         title: format!("{name}.sql"),
@@ -1702,9 +2054,10 @@ fn apply(app: &mut SqailApp, a: Action, ctx: &egui::Context) {
             engine,
             schema,
             table,
+            kind,
         } => {
-            app.dialog = Dialog::DropTable(Box::new(crate::dialogs::DropTable::new(
-                conn, engine, schema, table,
+            app.dialog = Dialog::DropTable(Box::new(crate::dialogs::DropTable::object(
+                conn, engine, schema, table, kind,
             )));
         }
         Action::Import {

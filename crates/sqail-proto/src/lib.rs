@@ -733,6 +733,16 @@ pub struct TableInfo {
     pub schema: Option<String>,
     pub name: String,
     pub kind: TableKind,
+    /// A PostgreSQL foreign table. Absent (false) from older services.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub foreign: bool,
+    /// A PostgreSQL partitioned table (its rows live in its partitions).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub partitioned: bool,
+    /// A PostgreSQL partition: the name of its parent table, when that is
+    /// in the same schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_of: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -804,6 +814,44 @@ pub struct RoutineInfo {
     /// function. Absent (false) from older services.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub table_valued: bool,
+    /// PostgreSQL: the argument types that identify the routine among its
+    /// overloads (`pg_get_function_identity_arguments`), e.g. `integer, text`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
+}
+
+/// What a [`SchemaObject`] is. Kinds this version doesn't know read as
+/// `other`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SchemaObjectKind {
+    Sequence,
+    /// A user-defined type: enum, domain, composite, range (PostgreSQL),
+    /// alias or table type (SQL Server).
+    Type,
+    /// A SQL Server synonym.
+    Synonym,
+    /// A trigger on a table or view (see `table`).
+    Trigger,
+    #[serde(other)]
+    Other,
+}
+
+/// A schema object that isn't a table, view or routine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct SchemaObject {
+    pub schema: Option<String>,
+    pub name: String,
+    pub kind: SchemaObjectKind,
+    /// A trigger's table or view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<String>,
+    /// More about it: a type's kind (`enum`, `domain`, `table type`, …), a
+    /// synonym's target, a sequence's data type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// One privilege on a table held by a role or user.

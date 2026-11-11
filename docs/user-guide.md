@@ -239,6 +239,9 @@ connection dropped), the next run opens a new session. When a transaction was
 open, sqail doesn't run the statement: it reports that the session was lost
 and the transaction rolled back, and clears **Transaction open**. Run the
 statement again to start over in a new transaction.
+**Esc** stops only the running statement: the session keeps its open
+transaction, temp tables and `SET` options, as in SSMS. (On SQL Server with
+`SET XACT_ABORT ON`, the server rolls the transaction back.)
 
 **Plans:** *Explain* (Ctrl+E) shows the estimated plan as a tree, with cost
 and row estimates and the most expensive nodes highlighted. *Explain analyze*
@@ -286,6 +289,12 @@ or XML plan.
   Rows are measured as they come into view, so the scrollbar can adjust
   slightly while you scroll through a large result.
 * Double-click a cell to see its full value (long text, JSON, binary as hex).
+* Values show as the database has them. Floats print like psql: very large
+  or small ones with an exponent (`1.1805916207174113e+21`, `1e-05`), and
+  `NaN`, `Infinity`, `-Infinity`. SQL Server `money` shows its four decimals
+  (`1.1000`), `datetime` its three (`13:45:12.997`), and `time`, `datetime2`
+  and `datetimeoffset` the column's own number of fraction digits, so
+  exported values and grid edits go back to the server unchanged.
 * **Export** saves the rows in the grid, or re-runs the query and streams
   every row straight to a file, as CSV, JSON, Excel (.xlsx) or SQL `INSERT`s.
   The re-run ignores your row limit and is only bounded by the

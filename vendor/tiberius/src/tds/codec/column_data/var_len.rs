@@ -110,7 +110,7 @@ mod tests {
 
         let ctx = VarLenContext::new(VarLenType::Money, 8, None);
         let data = decode(&mut buf.into_sql_read_bytes(), &ctx).await.unwrap();
-        assert_eq!(data, ColumnData::F64(None));
+        assert_eq!(data, ColumnData::Numeric(None));
     }
 
     #[tokio::test]

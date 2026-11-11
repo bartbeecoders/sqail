@@ -1908,6 +1908,344 @@ async fn mssql_showplan_xml_does_not_break_the_probes() {
     assert_eq!(done(&ev).1, Some(false), "{ev:?}");
 }
 
+/// Run `body` on `path` and cancel it with DELETE /v1/queries after `after`.
+/// The events and how long the query took.
+async fn cancelled_after(
+    h: &Harness,
+    path: &str,
+    body: Value,
+    after: Duration,
+) -> (Vec<QueryEvent>, Duration) {
+    let qid = Uuid::new_v4();
+    let (http, url, token) = (
+        h.http.clone(),
+        h.url(&format!("/v1/queries/{qid}")),
+        h.admin.clone(),
+    );
+    let cancel = tokio::spawn(async move {
+        tokio::time::sleep(after).await;
+        http.delete(url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+            .status()
+    });
+    let t = Instant::now();
+    let ev = h.query_on(path, body, Some(qid)).await;
+    let took = t.elapsed();
+    assert_eq!(cancel.await.unwrap(), 202);
+    (ev, took)
+}
+
+fn connection_lost(ev: &[QueryEvent]) -> bool {
+    ev.iter().any(
+        |e| matches!(e, QueryEvent::Message { text, .. } if text.contains("connection was lost")),
+    )
+}
+
+/// Cancelling on SQL Server sends an Attention, which aborts the batch only:
+/// the session keeps its connection, transaction and #temp tables, whether
+/// or not the login may KILL (#148).
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn mssql_cancel_keeps_the_session() {
+    let h = harness().await;
+    for user in ["sqail", "sa"] {
+        let c = mssql_as(&h, user).await;
+        let s: SessionInfo = h
+            .post("/v1/sessions", &json!({"connection_id": c}), &h.admin)
+            .await
+            .json()
+            .await
+            .unwrap();
+        let sp = format!("/v1/sessions/{}/query", s.id);
+        let run = |sql: &str| h.query_on(&sp, json!({ "sql": sql }), None);
+        let ev = run("CREATE TABLE #it_cancel_148 (i int); BEGIN TRANSACTION; \
+                      INSERT INTO #it_cancel_148 VALUES (2)")
+        .await;
+        assert_eq!(done(&ev).1, Some(true), "{user}: {ev:?}");
+        let spid = rows(&run("SELECT @@SPID AS spid").await, 0);
+        let still_there = async |what: &str| {
+            let now = rows(&run("SELECT @@SPID AS spid").await, 0);
+            assert_eq!(now, spid, "{user} {what}: same session");
+            let ev = run("SELECT count(*) FROM #it_cancel_148").await;
+            assert_eq!(rows(&ev, 0), vec![vec![json!(1)]], "{user} {what}: {ev:?}");
+            assert_eq!(done(&ev).1, Some(true), "{user} {what}: transaction open");
+        };
+
+        // a batch that waits
+        let (ev, took) = cancelled_after(
+            &h,
+            &sp,
+            json!({"sql": "WAITFOR DELAY '00:00:30'; SELECT 1 AS one"}),
+            Duration::from_millis(800),
+        )
+        .await;
+        assert!(done(&ev).0, "{user}: {ev:?}");
+        assert_eq!(error(&ev).unwrap().0, "cancelled", "{user}: {ev:?}");
+        assert_eq!(done(&ev).1, Some(true), "{user}: {ev:?}");
+        assert!(!connection_lost(&ev), "{user}: {ev:?}");
+        // well before the KILL fallback (3 s)
+        assert!(took < Duration::from_millis(2500), "{user}: took {took:?}");
+        still_there("after waitfor").await;
+
+        // a large result mid-stream: two statements, so that max_rows does
+        // not stop it first
+        let (ev, took) = cancelled_after(
+            &h,
+            &sp,
+            json!({"sql": "SELECT 1 AS one; SELECT a.object_id, b.name, c.name AS c \
+                           FROM sys.all_objects a CROSS JOIN sys.all_objects b \
+                           CROSS JOIN sys.all_objects c",
+                   "max_rows": 5_000_000}),
+            Duration::from_millis(1500),
+        )
+        .await;
+        assert!(done(&ev).0, "{user}: {:?}", ev.last());
+        assert!(!rows(&ev, 1).is_empty(), "{user}: cancelled mid-stream");
+        assert!(!connection_lost(&ev), "{user}");
+        assert!(took < Duration::from_secs(4), "{user}: took {took:?}");
+        still_there("after a large result").await;
+
+        // the timeout cancels the same way
+        let ev = h
+            .query_on(
+                &sp,
+                json!({"sql": "WAITFOR DELAY '00:00:30'", "timeout_ms": 500}),
+                None,
+            )
+            .await;
+        assert_eq!(error(&ev).unwrap().0, "timeout", "{user}: {ev:?}");
+        assert!(!connection_lost(&ev), "{user}: {ev:?}");
+        still_there("after a timeout").await;
+
+        // later GO batches do not run after a cancel
+        let (ev, _) = cancelled_after(
+            &h,
+            &sp,
+            json!({"sql": "WAITFOR DELAY '00:00:30'\nGO\nINSERT INTO #it_cancel_148 VALUES (3)"}),
+            Duration::from_millis(500),
+        )
+        .await;
+        assert!(done(&ev).0, "{user}: {ev:?}");
+        still_there("after a cancelled script").await;
+
+        let ev = run("ROLLBACK").await;
+        assert_eq!(done(&ev).1, Some(false), "{user}: {ev:?}");
+    }
+}
+
+/// `(name, type)` of the columns of result set `index`.
+fn column_types(events: &[QueryEvent], index: u32) -> Vec<(String, String)> {
+    events
+        .iter()
+        .find_map(|e| match e {
+            QueryEvent::ResultStart { index: i, columns } if *i == index => Some(
+                columns
+                    .iter()
+                    .map(|c| (c.name.clone(), c.type_name.clone()))
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no result {index}: {events:?}"))
+}
+
+/// Values reach clients exactly and in a form SQL Server parses back (#151).
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn mssql_values_are_exact() {
+    let h = harness().await;
+    let c = profile(&h, &mssql(), false).await;
+    let select = "select cast(922337203685477.5807 as money) g, cast(1.10 as money) q, \
+         cast(-214748.3648 as smallmoney) sm, \
+         cast('2024-02-29 13:45:12.997' as datetime) d, \
+         cast('2024-02-29 13:45:29' as smalldatetime) sd, \
+         cast('23:59:59.1234567' as time(7)) t7, cast('23:59:59' as time(0)) t0, \
+         cast('9999-12-31 23:59:59.9999999' as datetime2(7)) d7, \
+         cast('2024-01-02 03:04:05.12' as datetime2(2)) d2, \
+         cast('2024-01-02 03:04:05.1234567 +02:00' as datetimeoffset(7)) o7, \
+         cast('2024-01-02 03:04:05 -05:30' as datetimeoffset(0)) o0, \
+         cast(0 as decimal(38,0)) n0, cast(99999999999999999999999999999999999999 as decimal(38,0)) n38, \
+         cast(-1.50 as decimal(5,2)) n2, cast(0.1 as real) r, cast(1e300 as float) f, \
+         hierarchyid::Parse('/1/2/') h, 1 + 1";
+    let ev = h.query(c, select).await;
+    assert!(error(&ev).is_none(), "{ev:?}");
+    let row = rows(&ev, 0).remove(0);
+    assert_eq!(
+        row,
+        vec![
+            json!("922337203685477.5807"),
+            json!("1.1000"),
+            json!("-214748.3648"),
+            json!("2024-02-29T13:45:12.997"),
+            json!("2024-02-29T13:45:00"),
+            json!("23:59:59.1234567"),
+            json!("23:59:59"),
+            json!("9999-12-31T23:59:59.9999999"),
+            json!("2024-01-02T03:04:05.12"),
+            json!("2024-01-02T03:04:05.1234567+02:00"),
+            json!("2024-01-02T03:04:05-05:30"),
+            json!("0"),
+            json!("99999999999999999999999999999999999999"),
+            json!("-1.50"),
+            json!(0.1),
+            json!(1e300),
+            json!("5b40"),
+            json!(2),
+        ],
+        "{ev:?}"
+    );
+    let types: Vec<String> = column_types(&ev, 0).into_iter().map(|(_, t)| t).collect();
+    assert_eq!(
+        types,
+        [
+            "money",
+            "money",
+            "smallmoney",
+            "datetime",
+            "smalldatetime",
+            "time",
+            "time",
+            "datetime2",
+            "datetime2",
+            "datetimeoffset",
+            "datetimeoffset",
+            "decimal",
+            "decimal",
+            "decimal",
+            "real",
+            "float",
+            "udt",
+            "int"
+        ]
+    );
+    assert_eq!(column_types(&ev, 0)[17].0, "(No column name)");
+
+    // The text goes back into SQL Server as the same value.
+    let texts: Vec<String> = row[..14]
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    let back = format!(
+        "select case when cast('{}' as money) = cast(922337203685477.5807 as money) \
+           and cast('{}' as datetime) = cast('2024-02-29 13:45:12.997' as datetime) \
+           and cast('{}' as datetime2(7)) = cast('9999-12-31 23:59:59.9999999' as datetime2(7)) \
+           and cast('{}' as datetimeoffset(7)) = cast('2024-01-02 03:04:05.1234567 +02:00' as datetimeoffset(7)) \
+           and cast('{}' as time(7)) = cast('23:59:59.1234567' as time(7)) \
+           then 1 else 0 end ok",
+        texts[0], texts[3], texts[7], texts[9], texts[5]
+    );
+    let ev = h.query(c, &back).await;
+    assert_eq!(rows(&ev, 0), vec![vec![json!(1)]], "{ev:?}");
+
+    // nullable columns of a table take the same paths
+    let t = format!("#it_values_{}", Uuid::new_v4().simple());
+    let ev = h
+        .query(
+            c,
+            &format!(
+                "create table {t} (m money null, sm smallmoney null, d datetime null, sd smalldatetime null); \
+                 insert into {t} values (1.10, 2.5, '2024-02-29 13:45:12.997', '2024-02-29 13:45'), (null, null, null, null); \
+                 select * from {t}"
+            ),
+        )
+        .await;
+    assert!(error(&ev).is_none(), "{ev:?}");
+    assert_eq!(
+        rows(&ev, 0),
+        vec![
+            vec![
+                json!("1.1000"),
+                json!("2.5000"),
+                json!("2024-02-29T13:45:12.997"),
+                json!("2024-02-29T13:45:00")
+            ],
+            vec![Value::Null, Value::Null, Value::Null, Value::Null],
+        ]
+    );
+    let types: Vec<String> = column_types(&ev, 0).into_iter().map(|(_, t)| t).collect();
+    assert_eq!(types, ["money", "smallmoney", "datetime", "smalldatetime"]);
+}
+
+/// PostgreSQL: non-finite floats as the server spells them, and the names of
+/// the database's own types (#151).
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn postgres_float_and_type_names() {
+    let h = harness().await;
+    let c = profile(&h, &postgres(), false).await;
+    let ev = h
+        .query(
+            c,
+            "select '-Infinity'::float8 a, 'Infinity'::float4 b, 'NaN'::float8 n, 2^70 p, 1e-320::float8 s",
+        )
+        .await;
+    assert_eq!(
+        rows(&ev, 0),
+        vec![vec![
+            json!("-Infinity"),
+            json!("Infinity"),
+            json!("NaN"),
+            json!(1.1805916207174113e21),
+            json!(1e-320)
+        ]],
+        "{ev:?}"
+    );
+    // float4 through the binary path keeps its own digits
+    let ev = h
+        .query_on(
+            &format!("/v1/connections/{c}/query"),
+            json!({"sql": "select 0.1::float4 r, $1::int i", "params": [0]}),
+            None,
+        )
+        .await;
+    assert_eq!(rows(&ev, 0), vec![vec![json!(0.1), json!(0)]], "{ev:?}");
+
+    // A type created in a session: named from the next script on.
+    let s: SessionInfo = h
+        .post("/v1/sessions", &json!({"connection_id": c}), &h.admin)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let sp = format!("/v1/sessions/{}/query", s.id);
+    let ty = format!("it_mood_{}", Uuid::new_v4().simple());
+    let ev = h
+        .query_on(
+            &sp,
+            json!({"sql": format!("create type pg_temp.{ty} as enum ('ok')")}),
+            None,
+        )
+        .await;
+    assert!(error(&ev).is_none(), "{ev:?}");
+    for _ in 0..2 {
+        let ev = h
+            .query_on(
+                &sp,
+                json!({"sql": format!("select 'ok'::pg_temp.{ty} m, array['ok']::pg_temp.{ty}[] a")}),
+                None,
+            )
+            .await;
+        assert_eq!(rows(&ev, 0), vec![vec![json!("ok"), json!("{ok}")]]);
+        let types: Vec<String> = column_types(&ev, 0).into_iter().map(|(_, t)| t).collect();
+        assert!(
+            types[0].ends_with(&ty) && types[1].ends_with(&format!("{ty}[]")),
+            "{types:?}"
+        );
+    }
+    // the parameterised path names it too
+    let ev = h
+        .query_on(
+            &sp,
+            json!({"sql": format!("select 'ok'::pg_temp.{ty} m, $1::int i"), "params": [1]}),
+            None,
+        )
+        .await;
+    assert_eq!(column_types(&ev, 0)[0].1, ty, "{ev:?}");
+}
+
 #[tokio::test]
 #[ignore = "needs podman test databases (scripts/db.sh up)"]
 async fn postgres_types_and_notices() {

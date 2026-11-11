@@ -351,18 +351,27 @@ where
     async fn get_done_value(&mut self) -> crate::Result<ReceivedToken> {
         let done = TokenDone::decode(self.conn).await?;
         event!(Level::TRACE, "{}", done);
+        if done.is_attention() {
+            self.conn.note_attention_ack();
+        }
         Ok(ReceivedToken::Done(done))
     }
 
     async fn get_done_proc_value(&mut self) -> crate::Result<ReceivedToken> {
         let done = TokenDone::decode(self.conn).await?;
         event!(Level::TRACE, "{}", done);
+        if done.is_attention() {
+            self.conn.note_attention_ack();
+        }
         Ok(ReceivedToken::DoneProc(done))
     }
 
     async fn get_done_in_proc_value(&mut self) -> crate::Result<ReceivedToken> {
         let done = TokenDone::decode(self.conn).await?;
         event!(Level::TRACE, "{}", done);
+        if done.is_attention() {
+            self.conn.note_attention_ack();
+        }
         Ok(ReceivedToken::DoneInProc(done))
     }
 
@@ -529,6 +538,7 @@ mod tests {
     use futures_util::io::{AsyncRead, AsyncWrite};
     use std::io;
     use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
     use std::task::{Context as TaskContext, Poll};
 
     // A mock stream that hands out a fixed byte script to `poll_read` (the raw
@@ -677,6 +687,94 @@ mod tests {
 
     fn conn_over(payload: &[u8]) -> Connection<MockStream> {
         Connection::test_over(MockStream::new(packet_bytes(payload)), false)
+    }
+
+    // --- sqail patch: Attention through an AttentionHandle ------------------
+
+    // Like `MockStream`, but keeps what the client writes.
+    struct RecordingStream {
+        inner: MockStream,
+        written: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl AsyncRead for RecordingStream {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut TaskContext<'_>,
+            buf: &mut [u8],
+        ) -> Poll<io::Result<usize>> {
+            Pin::new(&mut self.inner).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for RecordingStream {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut TaskContext<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.written.lock().unwrap().extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn recording_conn(payload: &[u8]) -> (Connection<RecordingStream>, Arc<Mutex<Vec<u8>>>) {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = RecordingStream {
+            inner: MockStream::new(packet_bytes(payload)),
+            written: Arc::clone(&written),
+        };
+        (Connection::test_over(io, false), written)
+    }
+
+    const DONE_ATTN: u16 = 0x20;
+
+    #[tokio::test]
+    async fn requested_attention_goes_out_on_the_next_read() {
+        let (mut conn, written) = recording_conn(&done_token(DONE_ATTN, 0, 0));
+        let handle = conn.attention_handle();
+        handle.request();
+        let done = TokenStream::new(&mut conn)
+            .flush_done_attention()
+            .await
+            .unwrap();
+        assert!(done.is_some_and(|d| d.is_attention()));
+        let sent = written.lock().unwrap().clone();
+        assert_eq!(sent.len(), 8, "one header-only packet: {sent:?}");
+        assert_eq!(sent[0], 0x06, "an Attention packet");
+        // The acknowledgement was read with the response: nothing more to
+        // send or read.
+        assert!(conn.finish_attention().await.unwrap());
+        assert!(!handle.is_requested());
+        assert_eq!(written.lock().unwrap().len(), 8);
+        // Cleared: the next request runs normally.
+        assert!(!conn.finish_attention().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn no_attention_without_a_request() {
+        let (mut conn, written) = recording_conn(&done_token(0, 0, 0));
+        TokenStream::new(&mut conn).flush_done().await.unwrap();
+        assert!(written.lock().unwrap().is_empty());
+        assert!(!conn.finish_attention().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn attention_requested_after_the_response_is_not_sent() {
+        let (mut conn, written) = recording_conn(&done_token(0, 0, 0));
+        TokenStream::new(&mut conn).flush_done().await.unwrap();
+        conn.attention_handle().request();
+        // Nothing in flight: reported as requested, nothing sent.
+        assert!(conn.finish_attention().await.unwrap());
+        assert!(written.lock().unwrap().is_empty());
     }
 
     // --- (a) flush_done precedence -----------------------------------------

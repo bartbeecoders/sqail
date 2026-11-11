@@ -140,8 +140,17 @@ impl From<&TypeInfo> for ColumnType {
                     8 => Self::Float8,
                     _ => Self::Floatn,
                 },
-                VarLenType::Money => Self::Money,
-                VarLenType::Datetimen => Self::Datetimen,
+                // SQAIL-PATCH: the nullable forms of smallmoney and smalldatetime
+                // are told apart from money and datetime by their length.
+                VarLenType::Money => match cx.len() {
+                    4 => Self::Money4,
+                    _ => Self::Money,
+                },
+                VarLenType::Datetimen => match cx.len() {
+                    4 => Self::Datetime4,
+                    8 => Self::Datetime,
+                    _ => Self::Datetimen,
+                },
                 #[cfg(feature = "tds73")]
                 VarLenType::Daten => Self::Daten,
                 #[cfg(feature = "tds73")]
@@ -1291,7 +1300,9 @@ mod tests {
             (VarLenType::Floatn, 8, ColumnType::Float8),
             (VarLenType::Floatn, 2, ColumnType::Floatn),
             (VarLenType::Money, 8, ColumnType::Money),
-            (VarLenType::Datetimen, 8, ColumnType::Datetimen),
+            (VarLenType::Money, 4, ColumnType::Money4),
+            (VarLenType::Datetimen, 8, ColumnType::Datetime),
+            (VarLenType::Datetimen, 4, ColumnType::Datetime4),
             (VarLenType::BigVarBin, 8000, ColumnType::BigVarBin),
             (VarLenType::BigVarChar, 8000, ColumnType::BigVarChar),
             (VarLenType::BigBinary, 8000, ColumnType::BigBinary),

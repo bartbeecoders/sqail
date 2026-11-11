@@ -183,14 +183,16 @@ an admin token.
 | F5 / Ctrl+Shift+Enter | Run the whole script |
 | Esc | Cancel the running query |
 | Ctrl+E | Show the plan of the statement under the cursor |
-| Ctrl+Space | Completion (also opens by itself while you type; a space, comma or other punctuation closes it, so Enter and Tab go to the text) |
-| Ctrl+Shift+F | Format the selection or the whole tab |
+| Ctrl+Space | Completion (also opens by itself while you type a name it can finish, but not when the word is already a whole name or keyword, nor in comments and strings; a space, comma or other punctuation closes it, so Enter and Tab go to the text) |
+| Ctrl+Shift+F | Format the selection or the whole tab. It only changes layout and keyword case: when the formatter would change more (some string literals, `0x…` numbers, Postgres `E'…'` or dollar-quoted strings), the text is left alone with a notice |
+| Tab / Shift+Tab | Indent / outdent the selected lines (without a selection, Tab types a tab and Shift+Tab outdents the line) |
+| Ctrl+/ | Comment or uncomment the selected lines with `--` |
 | Ctrl+Shift+P | Command palette: every action, searchable |
 | Ctrl+P | Quick open: jump to a table or snippet |
 | Ctrl+T / Ctrl+W | New / close tab |
 | Ctrl+PageDown / Ctrl+PageUp | Next / previous tab |
 | Ctrl+O / Ctrl+S / Ctrl+Shift+S | Open / save / save as (`.sql` files) |
-| Ctrl+F | Find and replace |
+| Ctrl+F / Ctrl+H | Find and replace |
 | F3 / Shift+F3 | Find next / previous (Enter / Shift+Enter in the find field; Esc there closes it) |
 | Ctrl+= / Ctrl+- | Larger / smaller editor font |
 | Ctrl+mouse wheel, or the wheel with the middle button held | Zoom the editor text |
@@ -227,14 +229,39 @@ spans runs, and the status bar shows **in transaction** while one is open.
 Switch off **Auto-commit** in the toolbar and sqail sends `BEGIN` before the
 next run whenever no transaction is open. Finish with **Commit** or
 **Rollback** in the toolbar.
-Closing a tab with an open transaction asks whether to commit or roll back.
+Closing a tab or switching its connection with an open transaction asks
+first; going ahead closes the tab's session, which rolls the transaction
+back. Quitting closes every tab's session the same way (it asks first when a
+transaction is open), so nothing is left holding locks on the server.
 Idle sessions close after 30 minutes on the service, which rolls them back.
+If a tab's session is gone (it expired, the service restarted, or its database
+connection dropped), the next run opens a new session. When a transaction was
+open, sqail doesn't run the statement: it reports that the session was lost
+and the transaction rolled back, and clears **Transaction open**. Run the
+statement again to start over in a new transaction.
+**Esc** stops only the running statement: the session keeps its open
+transaction, temp tables and `SET` options, as in SSMS. (On SQL Server with
+`SET XACT_ABORT ON`, the server rolls the transaction back.)
+
+A script stops at the first statement that fails. The statements before it
+keep their effect, as in psql and SSMS: each statement commits on its own
+unless the script (or Auto-commit off) opened a transaction, which the error
+then leaves open in the tab (or, outside a session, rolls back). On
+PostgreSQL the service splits the script like psql does; only when that
+depends on how the server reads backslashes in strings (`'a\'`) does the
+script run as one transaction, and the error then says that the statements
+before it were rolled back too.
 
 **Plans:** *Explain* (Ctrl+E) shows the estimated plan as a tree, with cost
 and row estimates and the most expensive nodes highlighted. *Explain analyze*
-actually runs the statement to get real timings and row counts, inside a
-transaction that is **always rolled back**, so it is safe for `UPDATE` and
-`DELETE` as well. The *Raw* toggle shows the engine's own JSON or XML plan.
+actually runs the statement to get real timings and row counts, and its
+effects are **always rolled back**, so it is safe for `UPDATE` and `DELETE` as
+well. When the tab has a transaction open, only the explained statement is
+undone (to a savepoint): the transaction and your earlier changes in it stay
+open for **Commit** or **Rollback**. A PostgreSQL transaction that already
+failed must be rolled back first. On SQLite, *Explain analyze* shows the
+estimated plan and runs nothing. The *Raw* toggle shows the engine's own JSON
+or XML plan.
 
 ## Results
 
@@ -254,7 +281,9 @@ transaction that is **always rolled back**, so it is safe for `UPDATE` and
   export the result for the rest.
 * Click the **▲▼** on a column header to sort (ascending, then descending,
   then back to the original order). Sorting waits until the result has
-  finished loading.
+  finished loading. NULLs sort first. In a text column, values that are
+  numbers (`9`, `10`, `2.5`) sort numerically and come before the other
+  text (`5a`, `abc`), which sorts alphabetically.
 * Column widths start from the column name and the first 1 000 rows, up to
   about 80 characters. Drag a column's right border to resize it, or
   double-click the border to fit the column to its values (the first
@@ -269,6 +298,12 @@ transaction that is **always rolled back**, so it is safe for `UPDATE` and
   Rows are measured as they come into view, so the scrollbar can adjust
   slightly while you scroll through a large result.
 * Double-click a cell to see its full value (long text, JSON, binary as hex).
+* Values show as the database has them. Floats print like psql: very large
+  or small ones with an exponent (`1.1805916207174113e+21`, `1e-05`), and
+  `NaN`, `Infinity`, `-Infinity`. SQL Server `money` shows its four decimals
+  (`1.1000`), `datetime` its three (`13:45:12.997`), and `time`, `datetime2`
+  and `datetimeoffset` the column's own number of fraction digits, so
+  exported values and grid edits go back to the server unchanged.
 * **Export** saves the rows in the grid, or re-runs the query and streams
   every row straight to a file, as CSV, JSON, Excel (.xlsx) or SQL `INSERT`s.
   The re-run ignores your row limit and is only bounded by the
@@ -277,13 +312,23 @@ transaction that is **always rolled back**, so it is safe for `UPDATE` and
   (so temp tables and uncommitted rows are there), and only if that
   statement just reads: when it writes, or sqail can't tell which statement
   produced the result, it refuses and asks you to run the `SELECT` on its own
-  first.
+  first. A session runs one query at a time, so runs in that tab wait until
+  the export finishes.
 * **✎ Edit data** is available when a result comes from a single table with a
   primary key. Edit cells (double-click or F2), add rows and delete rows. The
-  changes are shown as SQL before **Apply** runs them in one transaction.
-  Only `*` and plain column names are editable: aliased columns
+  changes are shown as SQL before **Apply** runs them, all or none, in the
+  tab's session: the same table the result came from, even after
+  `SET search_path`, `USE` or with a temp table of the same name, and with
+  the tab's uncommitted rows visible. With Auto-commit and no transaction
+  open, they are committed at once. Otherwise (Auto-commit off, or a
+  transaction open) they become part of the tab's transaction and are not
+  committed until you click **Commit**. Only `*` and plain column names are
+  editable: aliased columns
   (`a AS b`), literals and expressions stay read-only, and the primary key
-  must be selected once, without an alias.
+  must be selected once, without an alias. Binary columns (`bytea`,
+  `varbinary`, `BLOB`) are edited as `0x` followed by hex digits, as they are
+  shown (`0x` alone is an empty value); sqail writes the bytes themselves,
+  and refuses a value that isn't valid hex before anything is sent.
 * Messages (`RAISERROR`, `RAISE NOTICE`, `PRINT`) and row counts appear in the
   *Messages* tab, in the order the server sent them, between the results.
   On SQL Server every statement reports its row count (unless
@@ -303,7 +348,16 @@ remember their state.
 * **Connections:** a tree of schemas, tables, views, columns, indexes, foreign
   keys and routines, loaded lazily. Right-click a table for *SELECT top 100*,
   *Design table…*, *Import CSV…*, *Script CREATE*, *Drop table…* or *Copy
-  name*; right-click a routine for *Script definition* or *Copy name*. When
+  name*. *Import CSV* reads binary columns as `0x` + hex, the way CSV
+  export writes them, and stops (changing nothing) at a value that isn't
+  valid hex. Right-click a routine for *Script definition* or *Copy name*.
+  *Script CREATE* on a table writes columns with their identity, computed
+  or generated definition, defaults, collations, keys, unique, check and
+  foreign-key constraints (with their `ON DELETE`/`ON UPDATE` actions) and
+  indexes with sort order, `INCLUDE` columns and filters; on PostgreSQL also
+  partitioning and comments, with serial columns written as `serial`. SQL
+  Server constraints whose names it generated are scripted without a name,
+  so a copy gets fresh ones. When
   the object can't be scripted, the new tab says why instead; on SQL Server
   that is usually a missing `VIEW DEFINITION` grant for the service's login,
   and the tab shows the `GRANT` to run (see `docs/windows-setup.md`).
@@ -313,7 +367,10 @@ remember their state.
   blank line (or below the text) a table or view becomes a formatted
   `SELECT` of all its columns. A procedure becomes `EXEC name` on SQL
   Server or `CALL name()` on Postgres, and a function becomes
-  `SELECT name();`.
+  `SELECT name();`. Names that need it are quoted, here and wherever sqail
+  writes SQL for you (completion, the table designer): mixed case, special
+  characters, and every word the engine reserves, such as `"user"` or
+  `"position"` on PostgreSQL.
 * **History:** every query you ran, with its connection, duration and row
   count. Filter it, open an entry in a new tab, or clear it. The last 5 000
   entries are kept.
@@ -337,7 +394,9 @@ be open at once. Pages:
   only for a new table.
 * **Indexes:** name, *Unique*, and the key columns in order (click the
   column list to add, remove or reorder). An index that backs a `UNIQUE`
-  constraint is marked *constraint* and stays one.
+  constraint is marked *constraint* and stays one. Descending keys show
+  `DESC`; `INCLUDE` columns, a `WHERE` filter and *clustered* are shown next
+  to the index but can't be edited here.
 * **Primary key:** the key columns in order and, on PostgreSQL and SQL
   Server, the constraint name. Key columns are always NOT NULL.
 * **Security:** who holds which privilege on the table (`SELECT`, `INSERT`,
@@ -357,11 +416,16 @@ changed.
 Good to know:
 
 * Renames are real renames (`RENAME COLUMN`, `sp_rename`), so data stays.
-* Changing an index drops and re-creates it as a plain index: PostgreSQL
-  index methods, `INCLUDE` columns and `WHERE` clauses are not kept.
+* Changing an index drops and re-creates it. Its sort order (`DESC`),
+  `INCLUDE` columns, `WHERE` filter and, on SQL Server, `CLUSTERED` or
+  `NONCLUSTERED` are kept (the Indexes page shows them); a PostgreSQL index
+  method other than B-tree is not.
+* Dropping a column takes it out of the indexes that include it (they are
+  re-created without it); an index whose filter uses the column is dropped.
 * SQL Server: changing a column's type or NULL-ness re-creates the indexes
-  and key on it, and a default is dropped and re-added by its generated
-  name.
+  that use it (as a key, included or in the filter) and the key on it, and a
+  default is dropped and re-added by its generated name. *Open in editor*
+  gives a script that runs as one batch.
 * SQLite can change only a few things in place (renames, adding and dropping
   columns, indexes). Anything else (a type, NULL-ness, a default, the
   primary key) rebuilds the table: the rows are copied into a new table
@@ -404,7 +468,9 @@ result.
 `SELECT` / `WITH` / `VALUES` statement: writes, DDL, `EXEC`, `SELECT … INTO`,
 `FOR UPDATE`, transaction control (`COMMIT`, `ROLLBACK`, …), session and
 admin commands, multiple statements, unfinished strings or comments and
-functions with side effects are refused. The service also refuses anything
+functions with side effects (also when the name is quoted, like
+`"pg_sleep"(1)`, or written with `U&"…"` escapes) are refused. A quoted
+column or table that happens to share such a function's name is still fine. The service also refuses anything
 but a single statement for the assistant. Every assistant query also runs in
 its own transaction that is always rolled back (read-only on PostgreSQL), so
 even something that slipped through would be undone. For the strongest
@@ -469,6 +535,24 @@ start sqail moves its `sqail2` settings folder and saved tokens over. The files:
 | `keybindings.toml` | Your shortcut overrides |
 | `history.jsonl`, `snippets.json`, `workspace.json` | History, snippets, open tabs |
 | `tokens.toml` | Only when the OS credential store is unavailable (mode 0600) |
+
+sqail writes these files atomically (a temporary file, flushed to disk, then
+renamed over the old one), so a crash or power cut never leaves half a file.
+If `settings.toml`, `workspace.json` or `snippets.json` can't be read
+anyway (a hand-edit typo, say), sqail renames it to `<name>.bad`
+(`<name>.1.bad` and so on if that exists), starts without it and says so in
+the status bar; a bad `settings.toml` also shows the error in the welcome
+dialog. (A bad `tokens.toml` is set aside the same way and logged.) Fix the
+`.bad` file and rename it back while sqail is closed to get your services,
+tabs or snippets back. Out-of-range values in `settings.toml` are brought
+into the range the Settings window offers: interface size 75–200 %, font
+size 9–28, indent 2–4, assistant rows 1–10,000, row limit at least 1 (its
+upper bound is the service's).
+
+Only one sqail runs per settings folder: starting a second one shows
+"sqail is already running" and closes, because two windows would overwrite
+each other's tabs and settings. To run two side by side, give the second
+its own folder with `SQAIL_CONFIG_DIR`.
 
 Example `keybindings.toml`. A list binds several shortcuts to one command,
 and an empty list `[]` removes a default shortcut. Problems (an unknown command

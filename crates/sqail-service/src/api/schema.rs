@@ -10,9 +10,10 @@ use utoipa::IntoParams;
 use uuid::Uuid;
 
 use super::pool_for;
+use super::query::owned_session;
 use crate::auth::Principal;
 use crate::engine::{DbError, Pooled, introspect, with_deadline};
-use crate::error::ApiResult;
+use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize, IntoParams)]
@@ -107,6 +108,48 @@ pub async fn columns(
     catalog!(s, p, id, |c| {
         introspect::columns(c, q.schema.as_deref(), &q.name)
     })
+}
+
+/// Columns of a table as a session sees it: its search path, current
+/// database and temporary tables. Without `schema`, the table is resolved
+/// the way an unqualified name in a statement on the session would be.
+#[utoipa::path(get, path = "/v1/sessions/{id}/schema/columns", tag = "sessions",
+    params(("id" = Uuid, Path), ObjectRef),
+    responses((status = 200, body = Vec<ColumnInfo>), (status = 409, body = sqail_proto::Problem)))]
+pub async fn session_columns(
+    State(s): State<AppState>,
+    p: Principal,
+    Path(id): Path<Uuid>,
+    Query(q): Query<ObjectRef>,
+) -> ApiResult<Json<Vec<ColumnInfo>>> {
+    let session = owned_session(&s, &p, id)?;
+    let mut guard = session
+        .conn
+        .clone()
+        .try_lock_owned()
+        .map_err(|_| ApiError::conflict("the session is running another query"))?;
+    let conn = guard.as_deref_mut().ok_or_else(|| {
+        ApiError::conflict("the session's connection was lost; open a new session")
+    })?;
+    let (limit, grace) = s.config.limits.call_deadline();
+    let canceller = conn.canceller();
+    let (res, broken) = with_deadline(canceller, limit, grace, async {
+        let schema = match q.schema {
+            Some(schema) => schema,
+            None => match introspect::resolve_schema(conn, &q.name).await? {
+                Some(schema) => schema,
+                None => return Ok(Vec::new()),
+            },
+        };
+        introspect::columns(conn, Some(&schema), &q.name).await
+    })
+    .await;
+    if broken {
+        // It may still be running: the session cannot use it any more.
+        *guard = None;
+    }
+    session.touch();
+    Ok(Json(res?))
 }
 
 #[utoipa::path(get, path = "/v1/connections/{id}/schema/indexes", tag = "schema",

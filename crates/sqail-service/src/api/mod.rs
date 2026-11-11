@@ -94,6 +94,7 @@ pub fn router(state: AppState) -> Router {
         .routes(routes!(schema::schemas))
         .routes(routes!(schema::tables))
         .routes(routes!(schema::columns))
+        .routes(routes!(schema::session_columns))
         .routes(routes!(schema::indexes))
         .routes(routes!(schema::foreign_keys))
         .routes(routes!(schema::privileges))

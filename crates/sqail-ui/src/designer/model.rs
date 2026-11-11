@@ -36,6 +36,16 @@ pub struct Index {
     pub unique: bool,
     /// Backs a `UNIQUE` constraint (dropped and re-added as a constraint).
     pub constraint: bool,
+    /// Parts sorted descending.
+    pub descending: Vec<IndexPart>,
+    /// Column ids stored in the index besides the key (`INCLUDE`).
+    pub include: Vec<u64>,
+    /// Partial-index predicate as the catalog gave it, in terms of the
+    /// loaded column names; empty for none.
+    pub filter: String,
+    /// SQL Server: `CLUSTERED` (true) or `NONCLUSTERED` (false); None leaves
+    /// it to the database.
+    pub clustered: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -44,6 +54,11 @@ pub struct PrimaryKey {
     pub name: String,
     /// Column ids in key order; empty for no primary key.
     pub columns: Vec<u64>,
+    /// Key columns sorted descending.
+    pub descending: Vec<u64>,
+    /// SQL Server: `CLUSTERED` (true) or `NONCLUSTERED` (false); None leaves
+    /// it to the database.
+    pub clustered: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -297,6 +312,15 @@ impl Design {
                 .find(|c| c.name == key || quote_ident(engine, &c.name) == key)
                 .map(|c| c.id)
         };
+        // Keys sorted descending, as found in the key list.
+        fn desc(i: &IndexInfo) -> Vec<&String> {
+            i.columns
+                .iter()
+                .zip(&i.descending)
+                .filter(|(_, d)| **d)
+                .map(|(k, _)| k)
+                .collect()
+        }
         let primary_key = match indexes.iter().find(|i| i.primary) {
             Some(pk) => PrimaryKey {
                 // SQLite primary keys have no name of their own.
@@ -306,6 +330,8 @@ impl Design {
                     pk.name.clone()
                 },
                 columns: pk.columns.iter().filter_map(|c| find(c)).collect(),
+                descending: desc(pk).into_iter().filter_map(|c| find(c)).collect(),
+                clustered: pk.clustered,
             },
             // SQLite `INTEGER PRIMARY KEY` has no index.
             None => PrimaryKey {
@@ -316,7 +342,12 @@ impl Design {
                     .filter(|(ci, _)| ci.primary_key)
                     .map(|(_, c)| c.id)
                     .collect(),
+                ..Default::default()
             },
+        };
+        let part = |k: &String| match find(k) {
+            Some(c) => IndexPart::Column(c),
+            None => IndexPart::Expr(k.clone()),
         };
         let indexes = indexes
             .iter()
@@ -324,16 +355,13 @@ impl Design {
             .map(|i| Index {
                 id: id(),
                 name: i.name.clone(),
-                parts: i
-                    .columns
-                    .iter()
-                    .map(|k| match find(k) {
-                        Some(c) => IndexPart::Column(c),
-                        None => IndexPart::Expr(k.clone()),
-                    })
-                    .collect(),
+                parts: i.columns.iter().map(part).collect(),
                 unique: i.unique,
                 constraint: i.constraint,
+                descending: desc(i).into_iter().map(part).collect(),
+                include: i.include.iter().filter_map(|c| find(c)).collect(),
+                filter: i.filter.clone().unwrap_or_default(),
+                clustered: i.clustered,
             })
             .collect();
         let table = Table {
@@ -415,14 +443,75 @@ impl Design {
         id
     }
 
-    /// Remove a column, and with it its place in the key and in indexes.
+    /// Remove a column, and with it its place in the key and in indexes. An
+    /// index whose filter uses the column goes too.
     pub fn remove_column(&mut self, id: u64) {
+        let filtered: Vec<u64> = self
+            .table
+            .indexes
+            .iter()
+            .filter(|i| self.filter_columns(i).contains(&id))
+            .map(|i| i.id)
+            .collect();
         self.table.columns.retain(|c| c.id != id);
         self.table.primary_key.columns.retain(|c| *c != id);
+        self.table.primary_key.descending.retain(|c| *c != id);
         for i in &mut self.table.indexes {
             i.parts.retain(|p| *p != IndexPart::Column(id));
+            i.descending.retain(|p| *p != IndexPart::Column(id));
+            i.include.retain(|c| *c != id);
         }
-        self.table.indexes.retain(|i| !i.parts.is_empty());
+        self.table
+            .indexes
+            .retain(|i| !i.parts.is_empty() && !filtered.contains(&i.id));
+    }
+
+    /// The loaded columns an index filter names (by their loaded names).
+    fn filter_columns(&self, i: &Index) -> Vec<u64> {
+        let Some(o) = &self.original else {
+            return Vec::new();
+        };
+        filter_names(self.engine, &i.filter)
+            .iter()
+            .filter_map(|(_, n)| o.columns.iter().find(|c| c.name.eq_ignore_ascii_case(n)))
+            .map(|c| c.id)
+            .collect()
+    }
+
+    /// Every column an index depends on: key, included and filter columns.
+    fn index_columns(&self, i: &Index) -> Vec<u64> {
+        let mut ids: Vec<u64> = i
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                IndexPart::Column(c) => Some(*c),
+                IndexPart::Expr(_) => None,
+            })
+            .collect();
+        ids.extend(&i.include);
+        ids.extend(self.filter_columns(i));
+        ids
+    }
+
+    /// The filter with loaded column names changed to the current ones.
+    fn filter_sql(&self, i: &Index) -> String {
+        let mut out = i.filter.clone();
+        let Some(o) = &self.original else {
+            return out;
+        };
+        // Back to front, so earlier ranges stay valid.
+        for (range, name) in filter_names(self.engine, &i.filter).into_iter().rev() {
+            let renamed = o
+                .columns
+                .iter()
+                .find(|c| c.name.eq_ignore_ascii_case(&name))
+                .and_then(|oc| self.column(oc.id))
+                .filter(|c| c.name != name);
+            if let Some(c) = renamed {
+                out.replace_range(range, &self.q(&c.name));
+            }
+        }
+        out
     }
 
     /// Columns of the loaded table that the design removed.
@@ -521,6 +610,10 @@ impl Design {
             parts: Vec::new(),
             unique: false,
             constraint: false,
+            descending: Vec::new(),
+            include: Vec::new(),
+            filter: String::new(),
+            clustered: None,
         });
         id
     }
@@ -639,6 +732,33 @@ impl Design {
             .join(", ")
     }
 
+    /// Index keys with their sort order.
+    fn keys_sql(&self, i: &Index) -> String {
+        i.parts
+            .iter()
+            .map(|p| {
+                let k = match p {
+                    IndexPart::Column(id) => self.q(&self.column_name(*id)),
+                    IndexPart::Expr(e) => e.clone(),
+                };
+                if i.descending.contains(p) {
+                    format!("{k} DESC")
+                } else {
+                    k
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn clustering(&self, clustered: Option<bool>) -> &'static str {
+        match (self.engine, clustered) {
+            (Engine::Mssql, Some(true)) => "CLUSTERED ",
+            (Engine::Mssql, Some(false)) => "NONCLUSTERED ",
+            _ => "",
+        }
+    }
+
     fn pk_clause(&self) -> Option<String> {
         let pk = &self.table.primary_key;
         if pk.columns.is_empty() {
@@ -650,9 +770,22 @@ impl Design {
         } else {
             format!("CONSTRAINT {} ", self.q(name))
         };
+        let keys: Vec<String> = pk
+            .columns
+            .iter()
+            .map(|id| {
+                let k = self.q(&self.column_name(*id));
+                if pk.descending.contains(id) {
+                    format!("{k} DESC")
+                } else {
+                    k
+                }
+            })
+            .collect();
         Some(format!(
-            "{named}PRIMARY KEY ({})",
-            self.column_list(&pk.columns)
+            "{named}PRIMARY KEY {}({})",
+            self.clustering(pk.clustered),
+            keys.join(", ")
         ))
     }
 
@@ -664,9 +797,10 @@ impl Design {
     fn create_index(&self, i: &Index, table: &str) -> String {
         if self.unique_constraint(i) && self.engine != Engine::Sqlite {
             format!(
-                "ALTER TABLE {table} ADD CONSTRAINT {} UNIQUE ({})",
+                "ALTER TABLE {table} ADD CONSTRAINT {} UNIQUE {}({})",
                 self.q(&i.name),
-                self.parts_sql(&i.parts)
+                self.clustering(i.clustered),
+                self.keys_sql(i)
             )
         } else {
             // SQLite puts the schema on the index name, not the table.
@@ -677,11 +811,27 @@ impl Design {
                 ),
                 _ => (self.q(&i.name), table.to_string()),
             };
-            format!(
-                "CREATE {}INDEX {name} ON {on} ({})",
+            let mut sql = format!(
+                "CREATE {}{}INDEX {name} ON {on} ({})",
                 if i.unique { "UNIQUE " } else { "" },
-                self.parts_sql(&i.parts)
-            )
+                self.clustering(i.clustered),
+                self.keys_sql(i)
+            );
+            if !i.include.is_empty() {
+                sql.push_str(&format!(" INCLUDE ({})", self.column_list(&i.include)));
+            }
+            let filter = self.filter_sql(i);
+            let filter = filter.trim();
+            if !filter.is_empty() {
+                // SQL Server prints its filters in parentheses already and
+                // takes no extra ones.
+                if self.engine == Engine::Mssql {
+                    sql.push_str(&format!(" WHERE {filter}"));
+                } else {
+                    sql.push_str(&format!(" WHERE ({filter})"));
+                }
+            }
+            sql
         }
     }
 
@@ -832,11 +982,8 @@ impl Design {
         } else {
             BTreeSet::new()
         };
-        let touches_retyped = |parts: &[IndexPart]| {
-            parts
-                .iter()
-                .any(|p| matches!(p, IndexPart::Column(c) if retyped.contains(c)))
-        };
+        // Key, included and filter columns all hold an index on its column.
+        let touches_retyped = |i: &Index| self.index_columns(i).iter().any(|c| retyped.contains(c));
 
         // Indexes that go away or change are dropped before columns change.
         let mut recreate: Vec<&Index> = Vec::new();
@@ -844,7 +991,13 @@ impl Design {
         for oi in &o.indexes {
             let ni = t.indexes.iter().find(|i| i.id == oi.id);
             let same_shape = ni.is_some_and(|ni| {
-                ni.parts == oi.parts && ni.unique == oi.unique && !touches_retyped(&ni.parts)
+                ni.parts == oi.parts
+                    && ni.unique == oi.unique
+                    && ni.descending == oi.descending
+                    && ni.include == oi.include
+                    && ni.filter == oi.filter
+                    && ni.clustered == oi.clustered
+                    && !touches_retyped(ni)
             });
             if let (Some(ni), true) = (ni, same_shape) {
                 if ni.name != oi.name {
@@ -879,7 +1032,10 @@ impl Design {
 
         // The primary key.
         let (opk, npk) = (&o.primary_key, &t.primary_key);
-        let pk_rebuilt = opk.columns != npk.columns || touches_retyped_ids(&retyped, &npk.columns);
+        let pk_rebuilt = opk.columns != npk.columns
+            || opk.descending != npk.descending
+            || opk.clustered != npk.clustered
+            || touches_retyped_ids(&retyped, &npk.columns);
         if pk_rebuilt && !opk.columns.is_empty() {
             body.push(format!(
                 "ALTER TABLE {table} DROP CONSTRAINT {}",
@@ -890,6 +1046,8 @@ impl Design {
         // SQL Server: a default constraint blocks dropping or retyping its
         // column; drop it by its (generated) name and add it back later.
         let mut readd_default: Vec<&Column> = Vec::new();
+        // Numbered, so the script still runs as one batch with several.
+        let mut n = 0;
         if e == Engine::Mssql {
             for oc in &o.columns {
                 if oc.default.trim().is_empty() {
@@ -901,12 +1059,13 @@ impl Design {
                     Some(nc) => nc.default.trim() != oc.default.trim() || retyped.contains(&oc.id),
                 };
                 if drop {
+                    n += 1;
                     body.push(format!(
-                        "DECLARE @df sysname = (SELECT d.name FROM sys.default_constraints d \
+                        "DECLARE @df{n} sysname = (SELECT d.name FROM sys.default_constraints d \
                          JOIN sys.columns c ON c.object_id = d.parent_object_id AND c.column_id = d.parent_column_id \
                          WHERE d.parent_object_id = OBJECT_ID({}) AND c.name = {});\n\
-                         DECLARE @drop nvarchar(max) = {} + QUOTENAME(@df);\n\
-                         IF @df IS NOT NULL EXEC sp_executesql @drop",
+                         DECLARE @drop{n} nvarchar(max) = {} + QUOTENAME(@df{n});\n\
+                         IF @df{n} IS NOT NULL EXEC sp_executesql @drop{n}",
                         lit(e, &table),
                         lit(e, &oc.name),
                         lit(e, &format!("ALTER TABLE {table} DROP CONSTRAINT "))
@@ -1214,6 +1373,32 @@ fn touches_retyped_ids(retyped: &BTreeSet<u64>, ids: &[u64]) -> bool {
     ids.iter().any(|c| retyped.contains(c))
 }
 
+/// The names in an index filter that may be columns, with where they are:
+/// bare words that aren't keywords, and quoted names (unquoted).
+fn filter_names(engine: Engine, filter: &str) -> Vec<(std::ops::Range<usize>, String)> {
+    use crate::sql::lex::{Kind, is_keyword, tokenize};
+    tokenize(filter, Some(engine))
+        .into_iter()
+        .filter_map(|t| {
+            let s = &filter[t.range.clone()];
+            let name = match t.kind {
+                Kind::Word if !is_keyword(s) => s.to_string(),
+                Kind::QuotedIdent if s.len() >= 2 => {
+                    let inner = &s[1..s.len() - 1];
+                    match s.as_bytes()[0] {
+                        b'[' => inner.replace("]]", "]"),
+                        b'"' => inner.replace("\"\"", "\""),
+                        b'`' => inner.replace("``", "`"),
+                        _ => return None,
+                    }
+                }
+                _ => return None,
+            };
+            Some((t.range, name))
+        })
+        .collect()
+}
+
 /// `DROP TABLE`, optionally with `CASCADE` (Postgres).
 pub fn drop_table(engine: Engine, schema: &str, table: &str, cascade: bool) -> String {
     let name = qualified_name(engine, Some(schema), table);
@@ -1246,6 +1431,7 @@ mod tests {
             unique,
             primary,
             constraint,
+            ..Default::default()
         }
     }
 
@@ -1417,7 +1603,7 @@ mod tests {
         d.index_mut(4).unwrap().name = "ix_orders_customer".into(); // renamed, but column retyped
         let b = body(&d);
         assert_eq!(b[0], "DROP INDEX [ix_customer] ON [dbo].[orders]");
-        assert!(b[1].starts_with("DECLARE @df sysname"), "{}", b[1]);
+        assert!(b[1].starts_with("DECLARE @df1 sysname"), "{}", b[1]);
         assert!(b[1].contains("OBJECT_ID(N'[dbo].[orders]') AND c.name = N'total'"));
         assert_eq!(
             &b[2..],
@@ -1440,6 +1626,122 @@ mod tests {
                 "EXEC sp_rename N'[dbo].[o2].[ix_customer]', N'ix_who', N'INDEX'",
             ]
         );
+    }
+
+    /// The table from the issue: a nonclustered key, and an index with a
+    /// descending key, an included column and a filter.
+    fn mssql_parent() -> Design {
+        Design::from_catalog(
+            Engine::Mssql,
+            "s",
+            "parent",
+            &[
+                col("id", "int", false, None, true),
+                col("code", "nvarchar(20)", false, Some("(N'')"), false),
+                col("a", "int", true, Some("((0))"), false),
+                col("b", "int", true, Some("((1))"), false),
+                col("inc", "nvarchar(50)", true, None, false),
+            ],
+            &[
+                IndexInfo {
+                    clustered: Some(false),
+                    ..idx("pk_parent", &["id"], true, true, true)
+                },
+                IndexInfo {
+                    descending: vec![true],
+                    include: vec!["inc".into()],
+                    filter: Some("([a]>(0))".into()),
+                    clustered: Some(false),
+                    ..idx("ix_code", &["code"], false, false, false)
+                },
+            ],
+            Vec::new(),
+            &[],
+        )
+    }
+
+    #[test]
+    fn mssql_index_details_survive_changes() {
+        let full = "CREATE NONCLUSTERED INDEX [ix_code] ON [s].[parent] ([code] DESC) \
+                    INCLUDE ([inc]) WHERE ([a]>(0))";
+
+        // Dropping an included column drops the index first and re-creates
+        // it without that column.
+        let mut d = mssql_parent();
+        assert!(d.plan().unwrap().is_empty());
+        let inc = column(&d, "inc");
+        d.remove_column(inc);
+        assert_eq!(
+            body(&d),
+            [
+                "DROP INDEX [ix_code] ON [s].[parent]",
+                "ALTER TABLE [s].[parent] DROP COLUMN [inc]",
+                "CREATE NONCLUSTERED INDEX [ix_code] ON [s].[parent] ([code] DESC) WHERE ([a]>(0))",
+            ]
+        );
+
+        // Retyping a key, included or filter column re-creates the index
+        // whole, and a rebuilt key stays nonclustered.
+        for name in ["code", "inc", "a"] {
+            let mut d = mssql_parent();
+            let c = column(&d, name);
+            d.column_mut(c).unwrap().data_type = "nvarchar(40)".into();
+            let b = body(&d);
+            assert_eq!(b[0], "DROP INDEX [ix_code] ON [s].[parent]", "{name}");
+            assert_eq!(b.last().unwrap(), full, "{name}");
+        }
+        let mut d = mssql_parent();
+        let id = column(&d, "id");
+        d.column_mut(id).unwrap().data_type = "bigint".into();
+        assert!(
+            body(&d).contains(
+                &"ALTER TABLE [s].[parent] ADD CONSTRAINT [pk_parent] PRIMARY KEY NONCLUSTERED ([id])"
+                    .to_string()
+            )
+        );
+
+        // Dropping a column the filter uses drops the index.
+        let mut d = mssql_parent();
+        let a = column(&d, "a");
+        d.remove_column(a);
+        assert!(d.table.indexes.is_empty());
+
+        // A renamed filter column is renamed in the re-created filter.
+        let mut d = mssql_parent();
+        let a = column(&d, "a");
+        d.column_mut(a).unwrap().name = "qty".into();
+        let ix = d.table.indexes[0].id;
+        d.index_mut(ix).unwrap().unique = true;
+        assert!(
+            body(&d).last().unwrap().ends_with("WHERE ([qty]>(0))"),
+            "{:?}",
+            body(&d)
+        );
+    }
+
+    #[test]
+    fn mssql_script_runs_as_one_batch_with_several_defaults() {
+        let mut d = mssql_parent();
+        let (a, b) = (column(&d, "a"), column(&d, "b"));
+        d.column_mut(a).unwrap().default = "5".into();
+        d.column_mut(b).unwrap().default = "6".into();
+        let script = d.plan().unwrap().script(Engine::Mssql);
+        for v in [
+            "@df1 sysname",
+            "@drop1 nvarchar",
+            "@df2 sysname",
+            "@drop2 nvarchar",
+        ] {
+            assert_eq!(
+                script.matches(&format!("DECLARE {v}")).count(),
+                1,
+                "{script}"
+            );
+        }
+    }
+
+    fn column(d: &Design, name: &str) -> u64 {
+        d.table.columns.iter().find(|c| c.name == name).unwrap().id
     }
 
     #[test]

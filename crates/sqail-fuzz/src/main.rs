@@ -1,6 +1,7 @@
 //! Randomized fuzzing for everything that parses untrusted text: the SQL
 //! lexer, statement splitter, completer, formatter, bracket matcher, edit
-//! detection, the service's `GO` splitter, and the client's NDJSON decoder.
+//! detection, the assistant's read-only guard, the service's `GO` splitter,
+//! and the client's NDJSON decoder.
 //!
 //!     cargo run --release -p sqail-fuzz -- [seconds] [seed]
 //!
@@ -71,6 +72,8 @@ const PIECES: &[&str] = &[
     "N'",
     "E'",
     "X'",
+    "U&\"",
+    "\"pg_sleep\"(",
     "--",
     "/*",
     "*/",
@@ -241,6 +244,7 @@ fn run_targets(rng: &mut Rng, s: &str) {
                 );
             }
             let _ = sqail_ui::editing::source_table(s, e);
+            let _ = sqail_ui::assistant::guard::check_read_only(s, e);
         }
         let style = format::Style {
             uppercase: true,

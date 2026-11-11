@@ -1384,6 +1384,113 @@ async fn engine_sqlite() {
     check_engine(sqlite_dev()).await;
 }
 
+/// Explain analyze on a session with an open transaction undoes only the
+/// explained statement: the transaction and its earlier work survive, also
+/// when the explained statement fails.
+async fn explain_analyze_keeps_the_open_transaction(
+    engine: &str,
+    begin: &str,
+    h: &Harness,
+    c: Uuid,
+) {
+    let t = format!("it_explain_tx_{}", Uuid::new_v4().simple());
+    let ev = h
+        .query(
+            c,
+            &format!("CREATE TABLE {t} (id int PRIMARY KEY, v int); INSERT INTO {t} VALUES (1, 0)"),
+        )
+        .await;
+    assert!(error(&ev).is_none(), "{} {ev:?}", engine);
+    let s: SessionInfo = h
+        .post("/v1/sessions", &json!({"connection_id": c}), &h.admin)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let qp = format!("/v1/sessions/{}/query", s.id);
+    let ep = format!("/v1/sessions/{}/explain", s.id);
+    let run = |sql: String| h.query_on(&qp, json!({ "sql": sql }), None);
+    let ep = &ep;
+    let explain = |sql: String| async move {
+        let res = h
+            .post(ep, &json!({"sql": sql, "analyze": true}), &h.admin)
+            .await;
+        (res.status(), res.text().await.unwrap())
+    };
+    let ev = run(begin.to_string()).await;
+    assert_eq!(done(&ev).1, Some(true), "{} {ev:?}", engine);
+    let ev = run(format!("UPDATE {t} SET v = 1 WHERE id = 1")).await;
+    assert!(error(&ev).is_none(), "{} {ev:?}", engine);
+
+    let (status, body) = explain(format!("UPDATE {t} SET v = 2 WHERE id = 1")).await;
+    assert_eq!(status, 200, "{}: {body}", engine);
+    // Statements that fail to parse or to run leave the transaction usable.
+    for bad in ["SELEC 1", "SELECT * FROM it_explain_no_such_table"] {
+        let (status, body) = explain(bad.to_string()).await;
+        assert!(!status.is_success(), "{} {bad}: {body}", engine);
+    }
+    let ev = run(format!("SELECT v FROM {t} WHERE id = 1")).await;
+    assert!(error(&ev).is_none(), "{} {ev:?}", engine);
+    assert_eq!(rows(&ev, 0), vec![vec![json!(1)]], "{}", engine);
+    assert_eq!(done(&ev).1, Some(true), "{}: transaction lost", engine);
+
+    let ev = run("COMMIT".to_string()).await;
+    assert!(error(&ev).is_none(), "{} {ev:?}", engine);
+    assert_eq!(done(&ev).1, Some(false), "{} {ev:?}", engine);
+    let ev = h.query(c, &format!("SELECT v FROM {t} WHERE id = 1")).await;
+    assert_eq!(
+        rows(&ev, 0),
+        vec![vec![json!(1)]],
+        "{}: commit lost the update",
+        engine
+    );
+
+    // Without a transaction, analyzing still keeps nothing and opens none.
+    let (status, body) = explain(format!("UPDATE {t} SET v = 3 WHERE id = 1")).await;
+    assert_eq!(status, 200, "{}: {body}", engine);
+    let ev = run(format!("SELECT v FROM {t} WHERE id = 1")).await;
+    assert_eq!(rows(&ev, 0), vec![vec![json!(1)]], "{}", engine);
+    assert_eq!(done(&ev).1, Some(false), "{}", engine);
+
+    if engine == "postgres" {
+        // An aborted transaction is refused with a clear error.
+        run(begin.to_string()).await;
+        let ev = run("SELECT 1 / 0".to_string()).await;
+        assert!(error(&ev).is_some());
+        let (status, body) = explain(format!("SELECT v FROM {t}")).await;
+        assert_eq!(status, 400, "{body}");
+        assert!(body.contains("aborted"), "{body}");
+        run("ROLLBACK".to_string()).await;
+    }
+    h.query(c, &format!("DROP TABLE {t}")).await;
+}
+
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn postgres_explain_analyze_keeps_the_open_transaction() {
+    let h = harness().await;
+    let d = postgres();
+    let c = profile(&h, &d, false).await;
+    explain_analyze_keeps_the_open_transaction(d.engine, d.begin, &h, c).await;
+}
+
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn mssql_explain_analyze_keeps_the_open_transaction() {
+    let h = harness().await;
+    let d = mssql();
+    let c = profile(&h, &d, false).await;
+    explain_analyze_keeps_the_open_transaction(d.engine, d.begin, &h, c).await;
+}
+
+#[tokio::test]
+async fn sqlite_explain_analyze_keeps_the_open_transaction() {
+    // SQLite has no actual plans: analyze never executes the statement.
+    let h = harness().await;
+    let c = h.sqlite_temp(false).await;
+    explain_analyze_keeps_the_open_transaction("sqlite", "BEGIN", &h, c).await;
+}
+
 #[tokio::test]
 #[ignore = "needs podman test databases (scripts/db.sh up)"]
 async fn mssql_scripts_split_on_go_and_return_multiple_results() {
@@ -1860,6 +1967,576 @@ async fn mssql_stops_reading_at_max_rows() {
     assert_eq!(done(&ev).1, Some(false));
 }
 
+/// The first column of result set `index` holds a showplan.
+fn is_showplan(events: &[QueryEvent], index: u32) -> bool {
+    rows(events, index)
+        .first()
+        .and_then(|r| r.first())
+        .and_then(Value::as_str)
+        .is_some_and(|s| s.starts_with("<ShowPlanXML"))
+}
+
+/// With SHOWPLAN_XML on, the server answers the service's own probes
+/// (@@TRANCOUNT, @@OPTIONS) with a plan; that must not panic (#147).
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn mssql_showplan_xml_does_not_break_the_probes() {
+    let h = harness().await;
+    let c = profile(&h, &mssql(), false).await;
+    let path = format!("/v1/connections/{c}/query");
+    // pooled; a lone query also runs the Attention probe
+    for sql in [
+        "SET SHOWPLAN_XML ON\nGO\nselect 1 a",
+        "SET SHOWPLAN_XML ON\nGO\nselect 1 a; select 2 b",
+    ] {
+        let (ev, _) = timed(&h, &path, sql, json!([]), 100).await;
+        assert!(error(&ev).is_none(), "{ev:?}");
+        assert!(is_showplan(&ev, 0), "{ev:?}");
+        assert_eq!(done(&ev), (false, None), "{ev:?}");
+    }
+    assert!(h.get("/v1/health").await.status().is_success());
+
+    // a session keeps its connection and its transaction state
+    let s: SessionInfo = h
+        .post("/v1/sessions", &json!({"connection_id": c}), &h.admin)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let sp = format!("/v1/sessions/{}/query", s.id);
+    let (ev, _) = timed(&h, &sp, "BEGIN TRANSACTION", json!([]), 100).await;
+    assert_eq!(done(&ev).1, Some(true), "{ev:?}");
+    let (ev, _) = timed(&h, &sp, "SET SHOWPLAN_XML ON", json!([]), 100).await;
+    assert_eq!(done(&ev).1, Some(true), "{ev:?}");
+    for sql in ["select 1 a", "SELECT @@TRANCOUNT"] {
+        let (ev, _) = timed(&h, &sp, sql, json!([]), 100).await;
+        assert!(error(&ev).is_none(), "{ev:?}");
+        assert!(is_showplan(&ev, 0), "{ev:?}");
+        assert!(
+            !ev.iter()
+                .any(|e| matches!(e, QueryEvent::Message { severity, .. } if severity == "error")),
+            "{ev:?}"
+        );
+        assert_eq!(done(&ev).1, Some(true), "{ev:?}");
+    }
+    let (ev, _) = timed(&h, &sp, "SET SHOWPLAN_XML OFF", json!([]), 100).await;
+    assert_eq!(done(&ev).1, Some(true), "{ev:?}");
+    let (ev, _) = timed(&h, &sp, "SELECT @@TRANCOUNT", json!([]), 100).await;
+    assert_eq!(rows(&ev, 0), vec![vec![json!(1)]], "{ev:?}");
+    let (ev, _) = timed(&h, &sp, "ROLLBACK", json!([]), 100).await;
+    assert_eq!(done(&ev).1, Some(false), "{ev:?}");
+}
+
+/// Run `body` on `path` and cancel it with DELETE /v1/queries after `after`.
+/// The events and how long the query took.
+async fn cancelled_after(
+    h: &Harness,
+    path: &str,
+    body: Value,
+    after: Duration,
+) -> (Vec<QueryEvent>, Duration) {
+    let qid = Uuid::new_v4();
+    let (http, url, token) = (
+        h.http.clone(),
+        h.url(&format!("/v1/queries/{qid}")),
+        h.admin.clone(),
+    );
+    let cancel = tokio::spawn(async move {
+        tokio::time::sleep(after).await;
+        http.delete(url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+            .status()
+    });
+    let t = Instant::now();
+    let ev = h.query_on(path, body, Some(qid)).await;
+    let took = t.elapsed();
+    assert_eq!(cancel.await.unwrap(), 202);
+    (ev, took)
+}
+
+fn connection_lost(ev: &[QueryEvent]) -> bool {
+    ev.iter().any(
+        |e| matches!(e, QueryEvent::Message { text, .. } if text.contains("connection was lost")),
+    )
+}
+
+/// Cancelling on SQL Server sends an Attention, which aborts the batch only:
+/// the session keeps its connection, transaction and #temp tables, whether
+/// or not the login may KILL (#148).
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn mssql_cancel_keeps_the_session() {
+    let h = harness().await;
+    for user in ["sqail", "sa"] {
+        let c = mssql_as(&h, user).await;
+        let s: SessionInfo = h
+            .post("/v1/sessions", &json!({"connection_id": c}), &h.admin)
+            .await
+            .json()
+            .await
+            .unwrap();
+        let sp = format!("/v1/sessions/{}/query", s.id);
+        let run = |sql: &str| h.query_on(&sp, json!({ "sql": sql }), None);
+        let ev = run("CREATE TABLE #it_cancel_148 (i int); BEGIN TRANSACTION; \
+                      INSERT INTO #it_cancel_148 VALUES (2)")
+        .await;
+        assert_eq!(done(&ev).1, Some(true), "{user}: {ev:?}");
+        let spid = rows(&run("SELECT @@SPID AS spid").await, 0);
+        let still_there = async |what: &str| {
+            let now = rows(&run("SELECT @@SPID AS spid").await, 0);
+            assert_eq!(now, spid, "{user} {what}: same session");
+            let ev = run("SELECT count(*) FROM #it_cancel_148").await;
+            assert_eq!(rows(&ev, 0), vec![vec![json!(1)]], "{user} {what}: {ev:?}");
+            assert_eq!(done(&ev).1, Some(true), "{user} {what}: transaction open");
+        };
+
+        // a batch that waits
+        let (ev, took) = cancelled_after(
+            &h,
+            &sp,
+            json!({"sql": "WAITFOR DELAY '00:00:30'; SELECT 1 AS one"}),
+            Duration::from_millis(800),
+        )
+        .await;
+        assert!(done(&ev).0, "{user}: {ev:?}");
+        assert_eq!(error(&ev).unwrap().0, "cancelled", "{user}: {ev:?}");
+        assert_eq!(done(&ev).1, Some(true), "{user}: {ev:?}");
+        assert!(!connection_lost(&ev), "{user}: {ev:?}");
+        // well before the KILL fallback (3 s)
+        assert!(took < Duration::from_millis(2500), "{user}: took {took:?}");
+        still_there("after waitfor").await;
+
+        // a large result mid-stream: two statements, so that max_rows does
+        // not stop it first
+        let (ev, took) = cancelled_after(
+            &h,
+            &sp,
+            json!({"sql": "SELECT 1 AS one; SELECT a.object_id, b.name, c.name AS c \
+                           FROM sys.all_objects a CROSS JOIN sys.all_objects b \
+                           CROSS JOIN sys.all_objects c",
+                   "max_rows": 5_000_000}),
+            Duration::from_millis(1500),
+        )
+        .await;
+        assert!(done(&ev).0, "{user}: {:?}", ev.last());
+        assert!(!rows(&ev, 1).is_empty(), "{user}: cancelled mid-stream");
+        assert!(!connection_lost(&ev), "{user}");
+        assert!(took < Duration::from_secs(4), "{user}: took {took:?}");
+        still_there("after a large result").await;
+
+        // the timeout cancels the same way
+        let ev = h
+            .query_on(
+                &sp,
+                json!({"sql": "WAITFOR DELAY '00:00:30'", "timeout_ms": 500}),
+                None,
+            )
+            .await;
+        assert_eq!(error(&ev).unwrap().0, "timeout", "{user}: {ev:?}");
+        assert!(!connection_lost(&ev), "{user}: {ev:?}");
+        still_there("after a timeout").await;
+
+        // later GO batches do not run after a cancel
+        let (ev, _) = cancelled_after(
+            &h,
+            &sp,
+            json!({"sql": "WAITFOR DELAY '00:00:30'\nGO\nINSERT INTO #it_cancel_148 VALUES (3)"}),
+            Duration::from_millis(500),
+        )
+        .await;
+        assert!(done(&ev).0, "{user}: {ev:?}");
+        still_there("after a cancelled script").await;
+
+        let ev = run("ROLLBACK").await;
+        assert_eq!(done(&ev).1, Some(false), "{user}: {ev:?}");
+    }
+}
+
+/// `(name, type)` of the columns of result set `index`.
+fn column_types(events: &[QueryEvent], index: u32) -> Vec<(String, String)> {
+    events
+        .iter()
+        .find_map(|e| match e {
+            QueryEvent::ResultStart { index: i, columns } if *i == index => Some(
+                columns
+                    .iter()
+                    .map(|c| (c.name.clone(), c.type_name.clone()))
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no result {index}: {events:?}"))
+}
+
+/// Values reach clients exactly and in a form SQL Server parses back (#151).
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn mssql_values_are_exact() {
+    let h = harness().await;
+    let c = profile(&h, &mssql(), false).await;
+    let select = "select cast(922337203685477.5807 as money) g, cast(1.10 as money) q, \
+         cast(-214748.3648 as smallmoney) sm, \
+         cast('2024-02-29 13:45:12.997' as datetime) d, \
+         cast('2024-02-29 13:45:29' as smalldatetime) sd, \
+         cast('23:59:59.1234567' as time(7)) t7, cast('23:59:59' as time(0)) t0, \
+         cast('9999-12-31 23:59:59.9999999' as datetime2(7)) d7, \
+         cast('2024-01-02 03:04:05.12' as datetime2(2)) d2, \
+         cast('2024-01-02 03:04:05.1234567 +02:00' as datetimeoffset(7)) o7, \
+         cast('2024-01-02 03:04:05 -05:30' as datetimeoffset(0)) o0, \
+         cast(0 as decimal(38,0)) n0, cast(99999999999999999999999999999999999999 as decimal(38,0)) n38, \
+         cast(-1.50 as decimal(5,2)) n2, cast(0.1 as real) r, cast(1e300 as float) f, \
+         hierarchyid::Parse('/1/2/') h, 1 + 1";
+    let ev = h.query(c, select).await;
+    assert!(error(&ev).is_none(), "{ev:?}");
+    let row = rows(&ev, 0).remove(0);
+    assert_eq!(
+        row,
+        vec![
+            json!("922337203685477.5807"),
+            json!("1.1000"),
+            json!("-214748.3648"),
+            json!("2024-02-29T13:45:12.997"),
+            json!("2024-02-29T13:45:00"),
+            json!("23:59:59.1234567"),
+            json!("23:59:59"),
+            json!("9999-12-31T23:59:59.9999999"),
+            json!("2024-01-02T03:04:05.12"),
+            json!("2024-01-02T03:04:05.1234567+02:00"),
+            json!("2024-01-02T03:04:05-05:30"),
+            json!("0"),
+            json!("99999999999999999999999999999999999999"),
+            json!("-1.50"),
+            json!(0.1),
+            json!(1e300),
+            json!("5b40"),
+            json!(2),
+        ],
+        "{ev:?}"
+    );
+    let types: Vec<String> = column_types(&ev, 0).into_iter().map(|(_, t)| t).collect();
+    assert_eq!(
+        types,
+        [
+            "money",
+            "money",
+            "smallmoney",
+            "datetime",
+            "smalldatetime",
+            "time",
+            "time",
+            "datetime2",
+            "datetime2",
+            "datetimeoffset",
+            "datetimeoffset",
+            "decimal",
+            "decimal",
+            "decimal",
+            "real",
+            "float",
+            "udt",
+            "int"
+        ]
+    );
+    assert_eq!(column_types(&ev, 0)[17].0, "(No column name)");
+
+    // The text goes back into SQL Server as the same value.
+    let texts: Vec<String> = row[..14]
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    let back = format!(
+        "select case when cast('{}' as money) = cast(922337203685477.5807 as money) \
+           and cast('{}' as datetime) = cast('2024-02-29 13:45:12.997' as datetime) \
+           and cast('{}' as datetime2(7)) = cast('9999-12-31 23:59:59.9999999' as datetime2(7)) \
+           and cast('{}' as datetimeoffset(7)) = cast('2024-01-02 03:04:05.1234567 +02:00' as datetimeoffset(7)) \
+           and cast('{}' as time(7)) = cast('23:59:59.1234567' as time(7)) \
+           then 1 else 0 end ok",
+        texts[0], texts[3], texts[7], texts[9], texts[5]
+    );
+    let ev = h.query(c, &back).await;
+    assert_eq!(rows(&ev, 0), vec![vec![json!(1)]], "{ev:?}");
+
+    // nullable columns of a table take the same paths
+    let t = format!("#it_values_{}", Uuid::new_v4().simple());
+    let ev = h
+        .query(
+            c,
+            &format!(
+                "create table {t} (m money null, sm smallmoney null, d datetime null, sd smalldatetime null); \
+                 insert into {t} values (1.10, 2.5, '2024-02-29 13:45:12.997', '2024-02-29 13:45'), (null, null, null, null); \
+                 select * from {t}"
+            ),
+        )
+        .await;
+    assert!(error(&ev).is_none(), "{ev:?}");
+    assert_eq!(
+        rows(&ev, 0),
+        vec![
+            vec![
+                json!("1.1000"),
+                json!("2.5000"),
+                json!("2024-02-29T13:45:12.997"),
+                json!("2024-02-29T13:45:00")
+            ],
+            vec![Value::Null, Value::Null, Value::Null, Value::Null],
+        ]
+    );
+    let types: Vec<String> = column_types(&ev, 0).into_iter().map(|(_, t)| t).collect();
+    assert_eq!(types, ["money", "smallmoney", "datetime", "smalldatetime"]);
+}
+
+/// PostgreSQL: non-finite floats as the server spells them, and the names of
+/// the database's own types (#151).
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn postgres_float_and_type_names() {
+    let h = harness().await;
+    let c = profile(&h, &postgres(), false).await;
+    let ev = h
+        .query(
+            c,
+            "select '-Infinity'::float8 a, 'Infinity'::float4 b, 'NaN'::float8 n, 2^70 p, 1e-320::float8 s",
+        )
+        .await;
+    assert_eq!(
+        rows(&ev, 0),
+        vec![vec![
+            json!("-Infinity"),
+            json!("Infinity"),
+            json!("NaN"),
+            json!(1.1805916207174113e21),
+            json!(1e-320)
+        ]],
+        "{ev:?}"
+    );
+    // float4 through the binary path keeps its own digits
+    let ev = h
+        .query_on(
+            &format!("/v1/connections/{c}/query"),
+            json!({"sql": "select 0.1::float4 r, $1::int i", "params": [0]}),
+            None,
+        )
+        .await;
+    assert_eq!(rows(&ev, 0), vec![vec![json!(0.1), json!(0)]], "{ev:?}");
+
+    // A type created in a session: named from the next script on.
+    let s: SessionInfo = h
+        .post("/v1/sessions", &json!({"connection_id": c}), &h.admin)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let sp = format!("/v1/sessions/{}/query", s.id);
+    let ty = format!("it_mood_{}", Uuid::new_v4().simple());
+    let ev = h
+        .query_on(
+            &sp,
+            json!({"sql": format!("create type pg_temp.{ty} as enum ('ok')")}),
+            None,
+        )
+        .await;
+    assert!(error(&ev).is_none(), "{ev:?}");
+    for _ in 0..2 {
+        let ev = h
+            .query_on(
+                &sp,
+                json!({"sql": format!("select 'ok'::pg_temp.{ty} m, array['ok']::pg_temp.{ty}[] a")}),
+                None,
+            )
+            .await;
+        assert_eq!(rows(&ev, 0), vec![vec![json!("ok"), json!("{ok}")]]);
+        let types: Vec<String> = column_types(&ev, 0).into_iter().map(|(_, t)| t).collect();
+        assert!(
+            types[0].ends_with(&ty) && types[1].ends_with(&format!("{ty}[]")),
+            "{types:?}"
+        );
+    }
+    // the parameterised path names it too
+    let ev = h
+        .query_on(
+            &sp,
+            json!({"sql": format!("select 'ok'::pg_temp.{ty} m, $1::int i"), "params": [1]}),
+            None,
+        )
+        .await;
+    assert_eq!(column_types(&ev, 0)[0].1, ty, "{ev:?}");
+
+    // A script runs statement by statement, so a type it creates is named
+    // in its later statements already (#149).
+    let ty = format!("it_mood_{}", Uuid::new_v4().simple());
+    let ev = h
+        .query_on(
+            &sp,
+            json!({"sql": format!(
+                "create type pg_temp.{ty} as enum ('ok'); create temp table it_mood_t (i int); \
+                 select 'ok'::pg_temp.{ty} m"
+            )}),
+            None,
+        )
+        .await;
+    assert!(error(&ev).is_none(), "{ev:?}");
+    assert!(column_types(&ev, 0)[0].1.ends_with(&ty), "{ev:?}");
+}
+
+/// A PostgreSQL script runs statement by statement like in psql: a failing
+/// statement does not roll back the ones before it, unless the script
+/// opened a transaction (#149).
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn postgres_scripts_commit_each_statement() {
+    let h = harness().await;
+    let c = profile(&h, &postgres(), false).await;
+    let t = format!("sales.it_autocommit_{}", Uuid::new_v4().simple());
+    let count = |ev: &[QueryEvent]| rows(ev, 0)[0][0].clone();
+    let ev = h.query(c, &format!("create table {t} (i int)")).await;
+    assert!(error(&ev).is_none(), "{ev:?}");
+
+    let ev = h
+        .query(
+            c,
+            &format!("insert into {t} values (1); insert into {t} values (2); select 1/0"),
+        )
+        .await;
+    assert_eq!(affected(&ev), [1, 1], "{ev:?}");
+    assert_eq!(
+        error(&ev).map(|e| e.1),
+        Some("ERROR: division by zero".to_string())
+    );
+    let ev = h.query(c, &format!("select count(*) from {t}")).await;
+    assert_eq!(count(&ev), json!(2), "earlier statements stay: {ev:?}");
+
+    // A transaction the script opens is rolled back as a whole.
+    let ev = h
+        .query(
+            c,
+            &format!("begin; insert into {t} values (3); select 1/0; commit"),
+        )
+        .await;
+    assert!(error(&ev).is_some(), "{ev:?}");
+    let ev = h.query(c, &format!("select count(*) from {t}")).await;
+    assert_eq!(count(&ev), json!(2), "{ev:?}");
+    // ...and what it committed stays.
+    let ev = h
+        .query(
+            c,
+            &format!("begin; insert into {t} values (4); commit; select 1/0"),
+        )
+        .await;
+    assert!(error(&ev).is_some(), "{ev:?}");
+    let ev = h.query(c, &format!("select count(*) from {t}")).await;
+    assert_eq!(count(&ev), json!(3), "{ev:?}");
+
+    // Statements that refuse transaction blocks run inside a script.
+    let ev = h.query(c, &format!("select 1; vacuum {t}; select 2")).await;
+    assert!(error(&ev).is_none(), "{ev:?}");
+    assert_eq!(rows(&ev, 1), vec![vec![json!(2)]], "{ev:?}");
+
+    // Results, notices and row counts keep their order.
+    let ev = h
+        .query(
+            c,
+            &format!(
+                "select 1 a; do $$begin raise notice 'between'; end$$; \
+                 update {t} set i = i; select 2 b"
+            ),
+        )
+        .await;
+    let kinds: Vec<String> = ev
+        .iter()
+        .filter_map(|e| match e {
+            QueryEvent::ResultStart { index, .. } => Some(format!("result {index}")),
+            QueryEvent::Message { text, .. } => Some(text.clone()),
+            QueryEvent::RowsAffected { count } => Some(format!("affected {count}")),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "result 0",
+            "between",
+            "affected 0",
+            "affected 3",
+            "result 1"
+        ],
+        "{ev:?}"
+    );
+
+    // A function body with semicolons is one statement.
+    let ev = h
+        .query(
+            c,
+            "create function pg_temp.it_atomic() returns int language sql \
+             begin atomic select 1; select case when true then 2 end; end; \
+             select pg_temp.it_atomic()",
+        )
+        .await;
+    assert!(error(&ev).is_none(), "{ev:?}");
+    assert_eq!(rows(&ev, 0), vec![vec![json!(2)]], "{ev:?}");
+
+    // Error positions count from the start of the script.
+    let ev = h.query(c, "select 1; select it_no_such_column").await;
+    let msg = error(&ev).unwrap().1;
+    assert!(msg.ends_with("POSITION: 18"), "{msg}");
+
+    // Where the statements depend on standard_conforming_strings, the script
+    // runs as one message, and the error says what that means.
+    let ev = h
+        .query(
+            c,
+            &format!(r"insert into {t} values (6); select 'a\'; select 1/0; -- '"),
+        )
+        .await;
+    let msg = error(&ev).unwrap().1;
+    assert!(
+        msg.starts_with("ERROR: division by zero") && msg.contains("ran as one transaction"),
+        "{msg}"
+    );
+    let ev = h.query(c, &format!("select count(*) from {t}")).await;
+    assert_eq!(count(&ev), json!(3), "{ev:?}");
+
+    // max_rows still caps each result set.
+    let (ev, _) = timed(
+        &h,
+        &format!("/v1/connections/{c}/query"),
+        "select generate_series(1, 10); select 2",
+        json!([]),
+        5,
+    )
+    .await;
+    assert!(truncated_at(&ev, 0, 5), "{ev:?}");
+    assert_eq!(rows(&ev, 1), vec![vec![json!(2)]], "{ev:?}");
+
+    // A session keeps a transaction the script left open.
+    let s: SessionInfo = h
+        .post("/v1/sessions", &json!({"connection_id": c}), &h.admin)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let sp = format!("/v1/sessions/{}/query", s.id);
+    let ev = h
+        .query_on(
+            &sp,
+            json!({"sql": format!("begin; insert into {t} values (5); select 1")}),
+            None,
+        )
+        .await;
+    assert_eq!(done(&ev).1, Some(true), "{ev:?}");
+    let ev = h
+        .query_on(&sp, json!({"sql": "rollback; select 1"}), None)
+        .await;
+    assert_eq!(done(&ev).1, Some(false), "{ev:?}");
+
+    let ev = h
+        .query(c, &format!("select count(*) from {t}; drop table {t}"))
+        .await;
+    assert_eq!(count(&ev), json!(3), "{ev:?}");
+}
+
 #[tokio::test]
 #[ignore = "needs podman test databases (scripts/db.sh up)"]
 async fn postgres_types_and_notices() {
@@ -2169,4 +2846,245 @@ async fn no_bootstrap_token_when_disabled() {
     .await
     .unwrap();
     assert!(server.bootstrap_token.is_none());
+}
+
+// ======================================================= script CREATE ==
+
+/// Run `sql`, failing on any error.
+async fn exec(h: &Harness, c: Uuid, sql: &str) -> Vec<QueryEvent> {
+    let ev = h.query(c, sql).await;
+    if let Some((_, msg)) = error(&ev) {
+        panic!("{msg}\n--- in ---\n{sql}");
+    }
+    ev
+}
+
+/// Script each table of schema `from` with *Script CREATE*, run the scripts
+/// with the schema renamed to `to`, and compare what `describe` (one text
+/// row per catalog fact, for a `schema`, `table` pair) says about both.
+async fn script_round_trip(
+    h: &Harness,
+    c: Uuid,
+    from: &str,
+    to: &str,
+    tables: &[&str],
+    describe: fn(&str, &str) -> String,
+) {
+    for t in tables {
+        let ddl = ddl_of(h, c, from, t).await.unwrap();
+        exec(h, c, &ddl.replace(from, to)).await;
+    }
+    for t in tables {
+        let a = rows(&exec(h, c, &describe(from, t)).await, 0);
+        let b = rows(&exec(h, c, &describe(to, t)).await, 0);
+        let text = |rows: Vec<Vec<Value>>, schema: &str| -> Vec<String> {
+            rows.iter()
+                .map(|r| {
+                    r[0].as_str()
+                        .unwrap_or_default()
+                        .replace(schema, "<schema>")
+                })
+                .collect()
+        };
+        let (a, b) = (text(a, from), text(b, to));
+        assert!(!a.is_empty(), "nothing describes {from}.{t}");
+        assert_eq!(
+            a,
+            b,
+            "{t}: the scripted copy differs\n{}",
+            ddl_of(h, c, from, t).await.unwrap()
+        );
+    }
+}
+
+fn pg_describe(schema: &str, table: &str) -> String {
+    let q = format!("{schema}.{table}");
+    format!(
+        "SELECT 'col ' || a.attname || ' ' || format_type(a.atttypid, a.atttypmod) || ' '
+                || a.attnotnull || ' ' || a.attidentity::text || ' ' || a.attgenerated::text || ' '
+                || coalesce(pg_get_expr(d.adbin, d.adrelid), '-') || ' '
+                || coalesce(co.collname, '-') || ' '
+                || coalesce(col_description(a.attrelid, a.attnum), '-') || ' '
+                || coalesce((SELECT sq.seqstart || '/' || sq.seqincrement FROM pg_sequence sq
+                             WHERE sq.seqrelid = pg_get_serial_sequence('{q}', a.attname)::regclass), '-')
+         FROM pg_attribute a
+         LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+         LEFT JOIN pg_collation co ON co.oid = a.attcollation
+         WHERE a.attrelid = '{q}'::regclass AND a.attnum > 0 AND NOT a.attisdropped
+         UNION ALL
+         SELECT 'con ' || conname || ' ' || contype::text || ' ' || pg_get_constraintdef(oid)
+         FROM pg_constraint WHERE conrelid = '{q}'::regclass AND contype <> 'n'
+         UNION ALL
+         SELECT 'ix ' || indisvalid || ' ' || pg_get_indexdef(indexrelid)
+         FROM pg_index WHERE indrelid = '{q}'::regclass
+         UNION ALL
+         SELECT 'rel ' || relkind::text || ' ' || relpersistence::text || ' ' || relispartition || ' '
+                || coalesce(pg_get_partkeydef(oid), '-') || ' '
+                || coalesce(pg_get_expr(relpartbound, oid), '-') || ' '
+                || coalesce(obj_description(oid, 'pg_class'), '-')
+         FROM pg_class WHERE oid = '{q}'::regclass
+         ORDER BY 1"
+    )
+}
+
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn postgres_script_create_recreates_the_table() {
+    let h = harness().await;
+    let c = profile(&h, &postgres(), false).await;
+    let tag = &Uuid::new_v4().simple().to_string()[..8];
+    let (a, b) = (format!("it171_{tag}_a"), format!("it171_{tag}_b"));
+    exec(
+        &h,
+        c,
+        &format!(
+            r#"CREATE SCHEMA {a}; CREATE SCHEMA {b};
+            CREATE TABLE {a}.parent (
+                id integer GENERATED ALWAYS AS IDENTITY (START WITH 10 INCREMENT BY 5) PRIMARY KEY,
+                price numeric(10,2), qty int CHECK (qty >= 0),
+                total numeric GENERATED ALWAYS AS (price * qty) STORED,
+                s serial, big bigserial,
+                "user" text COLLATE "C" UNIQUE, "array" int DEFAULT 1,
+                b bigint GENERATED BY DEFAULT AS IDENTITY);
+            COMMENT ON TABLE {a}.parent IS 'it''s the parent';
+            COMMENT ON COLUMN {a}.parent."user" IS 'who';
+            CREATE INDEX ix_parent ON {a}.parent (qty DESC, price) INCLUDE ("array") WHERE qty > 0;
+            CREATE TABLE {a}.child (
+                id int PRIMARY KEY,
+                pid int REFERENCES {a}.parent (id) ON DELETE CASCADE ON UPDATE SET NULL);
+            CREATE UNLOGGED TABLE {a}.events (id int, at date NOT NULL) PARTITION BY RANGE (at);
+            CREATE INDEX ix_events ON {a}.events (at);
+            CREATE TABLE {a}.events_2026 PARTITION OF {a}.events
+                FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');"#
+        ),
+    )
+    .await;
+    script_round_trip(
+        &h,
+        c,
+        &a,
+        &b,
+        &["parent", "child", "events", "events_2026"],
+        pg_describe,
+    )
+    .await;
+    // The copy works: identity and serials fill themselves in.
+    exec(
+        &h,
+        c,
+        &format!(r#"INSERT INTO {b}.parent (price, qty, "user") VALUES (2, 3, 'x')"#),
+    )
+    .await;
+    let r = rows(
+        &exec(
+            &h,
+            c,
+            &format!(r#"SELECT id, total::text, s, big, "array" FROM {b}.parent"#),
+        )
+        .await,
+        0,
+    );
+    assert_eq!(
+        r,
+        [vec![json!(10), json!("6.00"), json!(1), json!(1), json!(1)]]
+    );
+    exec(
+        &h,
+        c,
+        &format!("DROP SCHEMA {a} CASCADE; DROP SCHEMA {b} CASCADE"),
+    )
+    .await;
+}
+
+fn ms_describe(schema: &str, table: &str) -> String {
+    let q = format!("{schema}.{table}");
+    format!(
+        "SELECT CONCAT('col ', c.name, ' ', t.name, ' ', c.max_length, ' ', c.precision, ' ', c.scale,
+                       ' ', c.is_nullable, ' ', c.is_identity, ' ', CAST(ic.seed_value AS nvarchar(20)),
+                       ' ', CAST(ic.increment_value AS nvarchar(20)), ' ', c.collation_name,
+                       ' ', cc.definition, ' ', cc.is_persisted, ' ', dc.definition,
+                       ' ', IIF(dc.is_system_named = 1, '*', dc.name)) COLLATE DATABASE_DEFAULT
+         FROM sys.columns c
+         JOIN sys.types t ON t.user_type_id = c.user_type_id
+         LEFT JOIN sys.identity_columns ic ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+         LEFT JOIN sys.computed_columns cc ON cc.object_id = c.object_id AND cc.column_id = c.column_id
+         LEFT JOIN sys.default_constraints dc ON dc.object_id = c.default_object_id
+         WHERE c.object_id = OBJECT_ID('{q}')
+         UNION ALL
+         SELECT CONCAT('ix ', IIF(k.is_system_named = 1, '*', i.name), ' ', i.type_desc, ' ', i.is_unique,
+                       ' ', i.is_primary_key, ' ', i.is_unique_constraint, ' ', i.filter_definition,
+                       ' ', col.name, ' ', x.key_ordinal, ' ', x.is_descending_key,
+                       ' ', x.is_included_column, ' ', x.index_column_id) COLLATE DATABASE_DEFAULT
+         FROM sys.indexes i
+         JOIN sys.index_columns x ON x.object_id = i.object_id AND x.index_id = i.index_id
+         JOIN sys.columns col ON col.object_id = x.object_id AND col.column_id = x.column_id
+         LEFT JOIN sys.key_constraints k ON k.parent_object_id = i.object_id AND k.unique_index_id = i.index_id
+         WHERE i.object_id = OBJECT_ID('{q}')
+         UNION ALL
+         SELECT CONCAT('ck ', IIF(is_system_named = 1, '*', name), ' ', definition) COLLATE DATABASE_DEFAULT
+         FROM sys.check_constraints WHERE parent_object_id = OBJECT_ID('{q}')
+         UNION ALL
+         SELECT CONCAT('fk ', IIF(fk.is_system_named = 1, '*', fk.name), ' ',
+                       OBJECT_NAME(fk.referenced_object_id), ' ', fk.delete_referential_action_desc,
+                       ' ', fk.update_referential_action_desc,
+                       ' ', COL_NAME(x.parent_object_id, x.parent_column_id),
+                       ' ', COL_NAME(x.referenced_object_id, x.referenced_column_id)) COLLATE DATABASE_DEFAULT
+         FROM sys.foreign_keys fk
+         JOIN sys.foreign_key_columns x ON x.constraint_object_id = fk.object_id
+         WHERE fk.parent_object_id = OBJECT_ID('{q}')
+         ORDER BY 1"
+    )
+}
+
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn mssql_script_create_recreates_the_table() {
+    let h = harness().await;
+    let c = profile(&h, &mssql(), false).await;
+    let tag = &Uuid::new_v4().simple().to_string()[..8];
+    let (a, b) = (format!("it171_{tag}_a"), format!("it171_{tag}_b"));
+    exec(&h, c, &format!("CREATE SCHEMA {a}")).await;
+    exec(&h, c, &format!("CREATE SCHEMA {b}")).await;
+    exec(
+        &h,
+        c,
+        &format!(
+            "CREATE TABLE {a}.parent (
+                id int IDENTITY(10, 5) CONSTRAINT pk_parent PRIMARY KEY NONCLUSTERED,
+                code nvarchar(20) COLLATE Latin1_General_BIN NOT NULL CONSTRAINT df_code DEFAULT N'',
+                a int CONSTRAINT df_a DEFAULT 0, b int DEFAULT 1, inc nvarchar(50),
+                tot AS (a * b), tp AS (a + 1) PERSISTED NOT NULL,
+                CONSTRAINT ck_a CHECK (a >= 0), CONSTRAINT uq_code UNIQUE (code, a), CHECK (b <> 7));
+            CREATE CLUSTERED INDEX cx_parent ON {a}.parent (a);
+            CREATE INDEX ix_code ON {a}.parent (code DESC) INCLUDE (inc) WHERE a > 0;
+            CREATE UNIQUE INDEX ux_inc ON {a}.parent (inc, b DESC) WHERE inc IS NOT NULL;
+            CREATE TABLE {a}.child (
+                id int NOT NULL PRIMARY KEY, pid int,
+                CONSTRAINT fk_child FOREIGN KEY (pid) REFERENCES {a}.parent (id)
+                    ON DELETE CASCADE ON UPDATE SET NULL,
+                FOREIGN KEY (pid) REFERENCES {a}.parent (id));"
+        ),
+    )
+    .await;
+    script_round_trip(&h, c, &a, &b, &["parent", "child"], ms_describe).await;
+    exec(
+        &h,
+        c,
+        &format!("INSERT INTO {b}.parent (code, a, b) VALUES (N'x', 2, 3)"),
+    )
+    .await;
+    let r = rows(
+        &exec(&h, c, &format!("SELECT id, tot, tp FROM {b}.parent")).await,
+        0,
+    );
+    assert_eq!(r, [vec![json!(10), json!(6), json!(3)]]);
+    exec(
+        &h,
+        c,
+        &format!(
+            "DROP TABLE {b}.child; DROP TABLE {b}.parent; DROP TABLE {a}.child; DROP TABLE {a}.parent;
+             DROP SCHEMA {a}; DROP SCHEMA {b};"
+        ),
+    )
+    .await;
 }

@@ -222,6 +222,50 @@ fn workspace_history_and_snippets_survive_a_restart() {
     drop(e.dir);
 }
 
+/// A `workspace.json` that does not parse (torn write, hand edit) is kept as
+/// `workspace.json.bad` and reported, not replaced by the next autosave.
+#[test]
+fn a_damaged_workspace_is_kept_and_reported() {
+    let e = env();
+    let damaged = r#"{"tabs":[{"title":"x""#;
+    std::fs::write(e.ui_dir.join("workspace.json"), damaged).unwrap();
+
+    let mut h = app([1280.0, 800.0]);
+    assert_eq!(h.state().tabs.len(), 1, "starts with one empty tab");
+    h.state_mut().tabs[0].text = "SELECT 'new work'".into();
+    // Autosave runs about once a second.
+    std::thread::sleep(Duration::from_millis(1100));
+    h.run_steps(3);
+    assert!(
+        h.query_by_label_contains("workspace.json could not be read")
+            .is_some(),
+        "the user is told"
+    );
+    shot(&mut h, "damaged-workspace");
+
+    assert_eq!(
+        std::fs::read_to_string(e.ui_dir.join("workspace.json.bad")).unwrap(),
+        damaged,
+        "the damaged file is kept"
+    );
+    let saved = std::fs::read_to_string(e.ui_dir.join("workspace.json")).unwrap();
+    assert!(saved.contains("new work"), "{saved}");
+    drop(h);
+
+    // The next start is clean and keeps the earlier .bad file.
+    let h = app([1280.0, 800.0]);
+    assert_eq!(h.state().tabs[0].text, "SELECT 'new work'");
+    assert!(
+        h.query_by_label_contains("could not be read").is_none(),
+        "no notice for a good file"
+    );
+    assert!(!e.ui_dir.join("workspace.json.1.bad").exists());
+    drop(h);
+    e.server.shutdown();
+    drop(e.rt);
+    drop(e.dir);
+}
+
 /// The Azure discovery dialog with a canned result (no Azure needed): add
 /// the new databases, and see the existing one marked as added.
 #[test]
@@ -1416,6 +1460,210 @@ fn editor_runs_queries_end_to_end() {
     server.shutdown();
 }
 
+/// A client of the test service, for looking at the database from outside.
+fn outside(server: &sqail_service::Server) -> Client {
+    Client::new(&Target {
+        url: format!("https://{}", server.addr),
+        token: server.bootstrap_token.clone().unwrap(),
+        trust: Trust::Pinned(server.fingerprint.clone()),
+        identity: None,
+    })
+    .unwrap()
+}
+
+/// `people.score` by id, read on a fresh connection (committed data only).
+fn scores(e: &Env, client: &Client, conn: uuid::Uuid) -> Vec<serde_json::Value> {
+    let events =
+        e.rt.block_on(client.query_all(
+            On::Connection(conn),
+            &QueryRequest::new("SELECT score FROM people ORDER BY id"),
+        ))
+        .unwrap();
+    events
+        .into_iter()
+        .filter_map(|ev| match ev {
+            sqail_client::proto::QueryEvent::Rows { rows, .. } => Some(rows),
+            _ => None,
+        })
+        .flatten()
+        .map(|mut r| r.remove(0))
+        .collect()
+}
+
+/// #152: when the session of a manual-commit tab goes away mid-transaction,
+/// the next statement must not silently run (and auto-commit) on a new one.
+#[test]
+fn lost_session_does_not_auto_commit() {
+    let e = env();
+    let client = outside(&e.server);
+    let mut h = app([1280.0, 800.0]);
+    let conn = h.state().tabs[0].connection.unwrap();
+    h.state_mut().tabs[0].autocommit = false;
+    h.state_mut().tabs[0].text = "UPDATE people SET score = 1 WHERE id = 1".into();
+    h.step();
+    run_with(&mut h, "update in a transaction", |h| h.key_press(Key::F5));
+    assert!(h.state().tabs[0].in_transaction);
+    let (_, sid) = h.state().tabs[0].session.unwrap();
+
+    // The service drops the session (idle reaper, restart, lost connection).
+    e.rt.block_on(client.close_session(sid)).unwrap();
+    h.state_mut().tabs[0].text = "UPDATE people SET score = 2 WHERE id = 2".into();
+    h.step();
+    run_with(&mut h, "update after the session is gone", |h| {
+        h.key_press(Key::F5)
+    });
+    {
+        let tab = &h.state().tabs[0];
+        let run = tab.run.as_ref().unwrap();
+        assert!(run.failed);
+        assert!(
+            run.messages
+                .iter()
+                .any(|m| m.text.contains("open transaction was rolled back")),
+            "{:?}",
+            run.messages.iter().map(|m| &m.text).collect::<Vec<_>>()
+        );
+        assert!(!tab.in_transaction, "the transaction state is cleared");
+    }
+    h.get_by_label_contains("open transaction was rolled back");
+    assert!(h.query_by_label("Transaction open").is_none());
+    assert_eq!(
+        scores(&e, &client, conn)[..2],
+        [serde_json::json!(9.5), serde_json::json!(8.25)],
+        "the first update was rolled back, the second was not run"
+    );
+
+    // Running it again starts a new transaction on a new session.
+    run_with(&mut h, "deliberate re-run", |h| h.key_press(Key::F5));
+    assert!(!h.state().tabs[0].run.as_ref().unwrap().failed);
+    assert!(h.state().tabs[0].in_transaction, "BEGIN on the new session");
+    assert_eq!(
+        scores(&e, &client, conn)[1],
+        serde_json::json!(8.25),
+        "not committed"
+    );
+
+    // Outside a transaction the lost session is replaced silently, and a
+    // manual-commit tab still gets its BEGIN on the new one.
+    run_with(&mut h, "rollback", |h| h.get_by_label("Rollback").click());
+    assert!(!h.state().tabs[0].in_transaction);
+    let (_, sid) = h.state().tabs[0].session.unwrap();
+    e.rt.block_on(client.close_session(sid)).unwrap();
+    h.state_mut().tabs[0].text = "UPDATE people SET score = 3 WHERE id = 3".into();
+    h.step();
+    run_with(&mut h, "update on a replaced session", |h| {
+        h.key_press(Key::F5)
+    });
+    assert!(!h.state().tabs[0].run.as_ref().unwrap().failed);
+    assert!(h.state().tabs[0].in_transaction, "BEGIN was re-sent");
+    assert_ne!(h.state().tabs[0].session.unwrap().1, sid);
+    assert_eq!(
+        scores(&e, &client, conn)[2],
+        serde_json::Value::Null,
+        "not committed"
+    );
+
+    drop(h);
+    e.server.shutdown();
+}
+
+/// ✎ Edit data applies on the tab's own session (#162): a temp table there
+/// shadows `people`, and that is the table edited. With Auto-commit off the
+/// edits join the tab's transaction and stay uncommitted.
+#[test]
+fn grid_edits_apply_on_the_tabs_session() {
+    use sqail_ui::dialogs::Dialog;
+    use sqail_ui::editing::EditTx;
+    use sqail_ui::results::Cell;
+
+    let e = env();
+    let mut h = app([1280.0, 800.0]);
+    let conn = h.state().tabs[0].connection.expect("people db");
+    let client = Client::new(&Target {
+        url: format!("https://{}", e.server.addr),
+        token: e.server.bootstrap_token.clone().unwrap(),
+        trust: Trust::Pinned(e.server.fingerprint.clone()),
+        identity: None,
+    })
+    .unwrap();
+    let main_name = |id: i64| {
+        let ev =
+            e.rt.block_on(client.query_all(
+                On::Connection(conn),
+                &QueryRequest::new(format!("SELECT name FROM main.people WHERE id = {id}")),
+            ))
+            .unwrap();
+        format!("{ev:?}")
+    };
+    let edit_first_name = |h: &mut Harness<'_, SqailApp>, value: &str| {
+        h.get_by_label("✎ Edit data").click();
+        wait(h, "edit mode", |a| {
+            a.tabs[0].run.as_ref().is_some_and(|r| r.edit.is_some())
+        });
+        let run = h.state_mut().tabs[0].run.as_mut().unwrap();
+        let (ri, ed) = run.edit.as_mut().unwrap();
+        ed.set(0, 1, Some(value.into()), &run.results[*ri]);
+        h.step();
+        h.get_by_label("Review & apply (1)").click();
+        h.run_steps(4);
+    };
+    let apply = |h: &mut Harness<'_, SqailApp>| {
+        let before = run_id(h);
+        h.get_by_label("Apply").click();
+        wait(h, "re-run after apply", |a| {
+            a.tabs[0]
+                .run
+                .as_ref()
+                .is_some_and(|r| r.id != before && !r.running)
+        });
+    };
+    let first_name = |h: &Harness<'_, SqailApp>| {
+        h.state().tabs[0].run.as_ref().unwrap().results[0].row(0)[1].clone()
+    };
+
+    h.state_mut().tabs[0].text =
+        "CREATE TEMP TABLE people (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+         INSERT INTO people VALUES (2, 'Shadow')"
+            .into();
+    h.step();
+    run_with(&mut h, "temp table", |h| h.key_press(Key::F5));
+    h.state_mut().tabs[0].text = "SELECT id, name FROM people".into();
+    h.step();
+    run_with(&mut h, "select the temp table", |h| h.key_press(Key::F5));
+    assert_eq!(first_name(&h), Cell::Text("Shadow".into()));
+
+    // Auto-commit: the temp table is edited and committed.
+    edit_first_name(&mut h, "Edited");
+    assert!(matches!(&h.state().dialog, Dialog::ApplyEdits(d) if d.tx == EditTx::Commit));
+    apply(&mut h);
+    assert_eq!(first_name(&h), Cell::Text("Edited".into()));
+    assert!(!h.state().tabs[0].in_transaction);
+    assert!(
+        main_name(2).contains("Linus"),
+        "main.people untouched: {}",
+        main_name(2)
+    );
+
+    // Manual commit: the edits join the tab's transaction.
+    h.get_by_label("Auto-commit").click();
+    h.step();
+    run_with(&mut h, "select in a transaction", |h| h.key_press(Key::F5));
+    assert!(h.state().tabs[0].in_transaction);
+    edit_first_name(&mut h, "Uncommitted");
+    assert!(matches!(&h.state().dialog, Dialog::ApplyEdits(d) if d.tx == EditTx::Join));
+    h.get_by_label_contains("not committed until you click Commit");
+    apply(&mut h);
+    assert_eq!(first_name(&h), Cell::Text("Uncommitted".into()));
+    assert!(h.state().tabs[0].in_transaction, "still open");
+    h.get_by_label("Transaction open");
+    h.get_by_label_contains("not committed yet");
+    run_with(&mut h, "rollback", |h| h.get_by_label("Rollback").click());
+    assert!(!h.state().tabs[0].in_transaction);
+    h.state_mut().tabs[0].autocommit = true;
+    run_with(&mut h, "select after rollback", |h| h.key_press(Key::F5));
+    assert_eq!(first_name(&h), Cell::Text("Edited".into()));
+}
+
 // ============================================================ big + engines ==
 
 /// Frame time while scrolling a ~1M row result, a 5,000-line script in the
@@ -1658,4 +1906,268 @@ fn large_results_and_all_engines() {
     }
     drop(h);
     server.shutdown();
+}
+
+// ======================================================== session lifecycle ==
+
+/// Wait until session `sid` is gone on the service (closes are detached).
+fn wait_closed(e: &Env, client: &Client, sid: uuid::Uuid) {
+    let start = Instant::now();
+    while e.rt.block_on(client.session(sid)).is_ok() {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "session {sid} still open"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A manual-commit tab with `UPDATE people SET score = 5 WHERE id = 1` open.
+fn open_transaction(h: &mut Harness<'_, SqailApp>) -> uuid::Uuid {
+    h.state_mut().tabs[0].autocommit = false;
+    h.state_mut().tabs[0].text = "UPDATE people SET score = 5 WHERE id = 1".into();
+    h.step();
+    run_with(h, "update in a transaction", |h| h.key_press(Key::F5));
+    assert!(h.state().tabs[0].in_transaction);
+    h.state().tabs[0].session.unwrap().1
+}
+
+/// #154: changing the connection of a tab with an open transaction asks,
+/// rolls it back by closing the old session, and starts clean on the new one.
+#[test]
+fn switching_connection_closes_the_old_session() {
+    let e = env();
+    let client = outside(&e.server);
+    let mut h = app([1280.0, 800.0]);
+    let other = e.rt.block_on(async {
+        let conn = client
+            .create_connection(&ConnectionInput {
+                name: "other db".into(),
+                params: ConnectionParams::Sqlite(SqliteParams {
+                    path: e.dir.path().join("other.db").to_string_lossy().into(),
+                    create: true,
+                }),
+                password: None,
+                ssl_client_key: None,
+                read_only: false,
+                color: None,
+                environment: None,
+                folder: None,
+            })
+            .await
+            .unwrap();
+        client
+            .query_all(
+                On::Connection(conn.id),
+                &QueryRequest::new(
+                    "CREATE TABLE people (id INTEGER PRIMARY KEY, score REAL);
+                     INSERT INTO people (score) VALUES (1);",
+                ),
+            )
+            .await
+            .unwrap();
+        conn.id
+    });
+    h.state_mut().refresh_connections();
+    wait(&mut h, "both connections", |a| {
+        a.service.connections.len() == 2
+    });
+    let first = h.state().tabs[0].connection.unwrap();
+    let sid = open_transaction(&mut h);
+
+    // Asks first; Cancel keeps everything as it was.
+    h.state_mut().set_connection(0, Some(other));
+    h.run_steps(3);
+    assert!(matches!(
+        h.state().dialog,
+        sqail_ui::dialogs::Dialog::ConfirmSwitchTransaction(0, Some(c)) if c == other
+    ));
+    shot(&mut h, "12-switch-transaction");
+    h.get_by_label("Cancel").click();
+    h.run_steps(3);
+    assert_eq!(h.state().tabs[0].connection, Some(first));
+    assert!(h.state().tabs[0].in_transaction);
+    assert_eq!(h.state().tabs[0].session.map(|s| s.1), Some(sid));
+
+    // Roll back and switch: the old session is closed, its work rolled back.
+    h.state_mut().set_connection(0, Some(other));
+    h.run_steps(3);
+    h.get_by_label("Roll back and switch").click();
+    h.run_steps(3);
+    assert_eq!(h.state().tabs[0].connection, Some(other));
+    assert!(!h.state().tabs[0].in_transaction);
+    assert!(h.state().tabs[0].session.is_none());
+    assert!(h.query_by_label("Transaction open").is_none());
+    wait_closed(&e, &client, sid);
+    assert_eq!(scores(&e, &client, first)[0], serde_json::json!(9.5));
+
+    // The next run on the new connection starts its own transaction.
+    h.state_mut().tabs[0].text = "UPDATE people SET score = 9 WHERE id = 1".into();
+    h.step();
+    run_with(&mut h, "update on the other connection", |h| {
+        h.key_press(Key::F5)
+    });
+    assert!(!h.state().tabs[0].run.as_ref().unwrap().failed);
+    assert!(h.state().tabs[0].in_transaction, "BEGIN was sent");
+    assert_eq!(
+        scores(&e, &client, other),
+        [serde_json::json!(1.0)],
+        "not committed"
+    );
+
+    // Without a transaction the switch is immediate and still closes it.
+    run_with(&mut h, "rollback", |h| h.get_by_label("Rollback").click());
+    let sid = h.state().tabs[0].session.unwrap().1;
+    // (through the toolbar's connection picker this time)
+    h.get_by_role(egui::accesskit::Role::ComboBox).click();
+    h.run_steps(3);
+    h.get_by_label_contains("people db  ·").click();
+    h.run_steps(3);
+    assert!(matches!(h.state().dialog, sqail_ui::dialogs::Dialog::None));
+    assert_eq!(h.state().tabs[0].connection, Some(first));
+    wait_closed(&e, &client, sid);
+
+    // A deleted profile takes its sessions (and transaction) with it; the
+    // tab starts clean on the next connection instead of reporting a lost
+    // transaction.
+    h.state_mut().set_connection(0, Some(other));
+    h.state_mut().tabs[0].text = "UPDATE people SET score = 2 WHERE id = 1".into();
+    h.step();
+    run_with(&mut h, "update before the delete", |h| h.key_press(Key::F5));
+    assert!(h.state().tabs[0].in_transaction);
+    e.rt.block_on(client.delete_connection(other)).unwrap();
+    h.state_mut().refresh_connections();
+    wait(&mut h, "deleted profile", |a| {
+        a.service.connections.len() == 1
+    });
+    // The only tab falls back to the remaining connection.
+    assert_eq!(h.state().tabs[0].connection, Some(first));
+    assert!(!h.state().tabs[0].in_transaction);
+    assert!(h.state().tabs[0].session.is_none());
+    h.state_mut().tabs[0].text = "SELECT score FROM people WHERE id = 1".into();
+    h.step();
+    run_with(&mut h, "run after the delete", |h| h.key_press(Key::F5));
+    assert!(!h.state().tabs[0].run.as_ref().unwrap().failed);
+    assert!(h.state().tabs[0].in_transaction, "a new transaction began");
+
+    drop(h);
+    e.server.shutdown();
+}
+
+/// #154: a 409 "session busy" fails the run but keeps the session (and its
+/// transaction); runs wait while an export holds the session.
+#[test]
+fn busy_session_is_kept() {
+    let e = env();
+    let client = outside(&e.server);
+    let mut h = app([1280.0, 800.0]);
+    let conn = h.state().tabs[0].connection.unwrap();
+    let sid = open_transaction(&mut h);
+
+    // Something else (an export, here an outside client) holds the session.
+    let mut stream =
+        e.rt.block_on(client.query(
+            On::Session(sid),
+            &QueryRequest::new(
+                "WITH RECURSIVE r(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM r) \
+                 SELECT count(*) FROM r",
+            ),
+        ))
+        .unwrap();
+    h.state_mut().tabs[0].text = "UPDATE people SET score = 6 WHERE id = 2".into();
+    h.step();
+    run_with(&mut h, "run on a busy session", |h| h.key_press(Key::F5));
+    {
+        let tab = &h.state().tabs[0];
+        let run = tab.run.as_ref().unwrap();
+        assert!(run.failed);
+        assert!(
+            run.messages
+                .iter()
+                .any(|m| m.text.contains("running another")),
+            "{:?}",
+            run.messages.iter().map(|m| &m.text).collect::<Vec<_>>()
+        );
+        assert_eq!(tab.session.map(|s| s.1), Some(sid), "session kept");
+        assert!(tab.in_transaction);
+    }
+    e.rt.block_on(async {
+        use futures::StreamExt;
+        client.cancel(stream.query_id).await.unwrap();
+        while stream.events.next().await.is_some() {}
+    });
+
+    // Once free, the same session (and transaction) carries on.
+    run_with(&mut h, "run after the session is free", |h| {
+        h.key_press(Key::F5)
+    });
+    assert!(!h.state().tabs[0].run.as_ref().unwrap().failed);
+    assert_eq!(h.state().tabs[0].session.map(|s| s.1), Some(sid));
+    assert!(h.state().tabs[0].in_transaction);
+    assert_eq!(
+        scores(&e, &client, conn)[..2],
+        [serde_json::json!(9.5), serde_json::json!(8.25)],
+        "both updates still uncommitted"
+    );
+
+    // While an export uses the session, runs are refused up front.
+    h.state_mut().tabs[0].session_busy = true;
+    let before = run_id(&h);
+    h.key_press(Key::F5);
+    h.run_steps(3);
+    assert_eq!(run_id(&h), before, "nothing ran");
+    h.get_by_label_contains("Wait for the export to finish");
+
+    drop(h);
+    e.server.shutdown();
+}
+
+/// #154: quitting closes every session, so open transactions really roll
+/// back instead of holding locks until the idle timeout.
+#[test]
+fn quitting_closes_all_sessions() {
+    let e = env();
+    let client = outside(&e.server);
+    let mut h = app([1280.0, 800.0]);
+    let conn = h.state().tabs[0].connection.unwrap();
+    let sid = open_transaction(&mut h);
+    let idx = h.state_mut().new_tab(Some(conn));
+    h.state_mut().tabs[idx].text = "SELECT 1".into();
+    h.step();
+    run_with(&mut h, "second tab", |h| h.key_press(Key::F5));
+    let sid2 = h.state().tabs[idx].session.unwrap().1;
+
+    h.state_mut().close_sessions(Duration::from_secs(2));
+    assert!(h.state().tabs.iter().all(|t| t.session.is_none()));
+    for s in [sid, sid2] {
+        assert!(e.rt.block_on(client.session(s)).is_err(), "closed at once");
+    }
+    // The rolled-back transaction no longer blocks writers.
+    e.rt.block_on(client.query_all(
+        On::Connection(conn),
+        &QueryRequest::new("UPDATE people SET score = 7 WHERE id = 3"),
+    ))
+    .unwrap();
+    assert_eq!(
+        scores(&e, &client, conn),
+        [
+            serde_json::json!(9.5),
+            serde_json::json!(8.25),
+            serde_json::json!(7.0)
+        ]
+    );
+    // The tab knows its transaction went with the session (#152's guard
+    // must not report a lost transaction): the next run just starts over.
+    assert!(h.state().tabs.iter().all(|t| !t.in_transaction));
+    h.state_mut().active = 0;
+    h.state_mut().tabs[0].text = "SELECT score FROM people WHERE id = 1".into();
+    h.step();
+    run_with(&mut h, "run after closing sessions", |h| {
+        h.key_press(Key::F5)
+    });
+    assert!(!h.state().tabs[0].run.as_ref().unwrap().failed);
+    assert!(h.state().tabs[0].in_transaction, "a new transaction began");
+
+    drop(h);
+    e.server.shutdown();
 }

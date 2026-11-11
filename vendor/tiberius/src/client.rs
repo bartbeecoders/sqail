@@ -1,3 +1,4 @@
+mod attention;
 pub(crate) mod auth;
 mod config;
 mod connection;
@@ -10,6 +11,7 @@ mod tls;
 ))]
 mod tls_stream;
 
+pub use attention::AttentionHandle;
 pub use auth::*;
 pub use config::*;
 pub(crate) use connection::*;
@@ -722,6 +724,27 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
     pub async fn cancel_query(&mut self) -> crate::Result<()> {
         self.connection.cancel_request().await?;
         Ok(())
+    }
+
+    /// sqail patch: a handle that sends an Attention for the request in
+    /// flight while its future runs, unlike [`cancel_query`], which needs
+    /// that future dropped first. See [`AttentionHandle::request`]. The
+    /// response then ends early (rows that were already on their way still
+    /// arrive); afterwards call [`finish_attention`].
+    ///
+    /// [`cancel_query`]: #method.cancel_query
+    /// [`finish_attention`]: #method.finish_attention
+    pub fn attention_handle(&self) -> AttentionHandle {
+        self.connection.attention_handle()
+    }
+
+    /// sqail patch: call once a request whose response may have been cut
+    /// short by an [`AttentionHandle`] is read to its end. Reads the
+    /// Attention's acknowledgement if the response did not hold it, leaving
+    /// the connection ready for the next request, and clears the request.
+    /// Returns whether an Attention was requested.
+    pub async fn finish_attention(&mut self) -> crate::Result<bool> {
+        self.connection.finish_attention().await
     }
 
     /// Closes this database connection explicitly.

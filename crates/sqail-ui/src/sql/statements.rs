@@ -155,7 +155,7 @@ fn next_word(text: &str, rest: &[super::lex::Token]) -> Option<String> {
         })
 }
 
-fn is_alone_on_line(text: &str, range: &Range<usize>) -> bool {
+pub(super) fn is_alone_on_line(text: &str, range: &Range<usize>) -> bool {
     let line_start = text[..range.start].rfind('\n').map_or(0, |p| p + 1);
     let line_end = text[range.end..]
         .find('\n')

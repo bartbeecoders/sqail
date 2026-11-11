@@ -778,6 +778,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_handle_counts_packets_read() {
+        let (mut conn, _) = recording_conn(&done_token(0, 0, 0));
+        let handle = conn.attention_handle();
+        assert_eq!(handle.packets_read(), 0);
+        TokenStream::new(&mut conn).flush_done().await.unwrap();
+        assert_eq!(handle.packets_read(), 1);
+    }
+
+    #[tokio::test]
     async fn attention_requested_after_the_response_is_not_sent() {
         let (mut conn, written) = recording_conn(&done_token(0, 0, 0));
         TokenStream::new(&mut conn).flush_done().await.unwrap();

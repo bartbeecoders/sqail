@@ -516,14 +516,42 @@ pub fn preview(engine: Engine, sql: &str, params: &[Param]) -> String {
     s
 }
 
-/// Apply statements in one transaction on a fresh session.
+/// How edits relate to the transaction of the tab's session. Either way they
+/// apply atomically: all of them or none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditTx {
+    /// Auto-commit tab, no transaction open: a transaction of their own that
+    /// is committed.
+    Commit,
+    /// Manual-commit tab, no transaction open: open one and leave it open.
+    Begin,
+    /// A transaction is open: join it under a savepoint, uncommitted.
+    Join,
+}
+
+impl EditTx {
+    pub fn for_tab(autocommit: bool, in_transaction: bool) -> Self {
+        match (in_transaction, autocommit) {
+            (true, _) => EditTx::Join,
+            (false, true) => EditTx::Commit,
+            (false, false) => EditTx::Begin,
+        }
+    }
+}
+
+/// Savepoint that makes edits inside an open transaction all-or-nothing.
+const SAVEPOINT: &str = "sqail_edit";
+
+/// Apply statements atomically on `session`, the tab's own session, so they
+/// hit the table the result came from (its search path, database and
+/// temporary tables) and see its uncommitted rows.
 pub async fn apply(
     client: &Client,
-    connection: Uuid,
+    session: Uuid,
     engine: Engine,
     stmts: Vec<(String, Vec<Param>)>,
+    tx: EditTx,
 ) -> Result<usize> {
-    let session = client.open_session(connection).await?.id;
     let run = |sql: String, params: Vec<Param>| async move {
         let events = client
             .query_all(
@@ -547,13 +575,15 @@ pub async fn apply(
         }
         Ok::<u64, anyhow::Error>(affected)
     };
-    let begin = if engine == Engine::Mssql {
-        "BEGIN TRANSACTION"
-    } else {
-        "BEGIN"
+    let mssql = engine == Engine::Mssql;
+    let start = match (tx, mssql) {
+        (EditTx::Join, true) => format!("SAVE TRANSACTION {SAVEPOINT}"),
+        (EditTx::Join, false) => format!("SAVEPOINT {SAVEPOINT}"),
+        (_, true) => "BEGIN TRANSACTION".into(),
+        (_, false) => "BEGIN".into(),
     };
     let result = async {
-        run(begin.into(), vec![]).await?;
+        run(start, vec![]).await?;
         let n = stmts.len();
         for (i, (sql, params)) in stmts.into_iter().enumerate() {
             let affected = run(sql.clone(), params)
@@ -567,14 +597,34 @@ pub async fn apply(
                 );
             }
         }
-        run("COMMIT".into(), vec![]).await?;
+        match tx {
+            EditTx::Commit => {
+                run("COMMIT".into(), vec![]).await?;
+            }
+            // SQL Server savepoints need no release.
+            EditTx::Join if !mssql => {
+                run(format!("RELEASE SAVEPOINT {SAVEPOINT}"), vec![]).await?;
+            }
+            EditTx::Join | EditTx::Begin => {}
+        }
         Ok::<usize, anyhow::Error>(n)
     }
     .await;
     if result.is_err() {
-        let _ = run("ROLLBACK".into(), vec![]).await;
+        let undo = match (tx, mssql) {
+            // Back to before the edits; the rest of the transaction stays.
+            // An error that doomed or ended the transaction leaves nothing to
+            // go back to.
+            (EditTx::Join, true) => {
+                format!("IF XACT_STATE() = 1 ROLLBACK TRANSACTION {SAVEPOINT}")
+            }
+            (EditTx::Join, false) => {
+                format!("ROLLBACK TO SAVEPOINT {SAVEPOINT}; RELEASE SAVEPOINT {SAVEPOINT}")
+            }
+            _ => "ROLLBACK".into(),
+        };
+        let _ = run(undo, vec![]).await;
     }
-    let _ = client.close_session(session).await;
     result
 }
 

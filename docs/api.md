@@ -204,6 +204,11 @@ privileges; `supported` is `false` on SQLite. `GET
 /v1/connections/{id}/ddl?schema=&name=` returns a best-effort `CREATE`
 script for a table, view or routine. `read` tokens may browse every profile.
 
+`GET /v1/sessions/{id}/schema/columns?schema=&name=` reads a table's columns
+as a session sees it: its search path, current database and temp tables.
+Without `schema`, the table is the one an unqualified name in a statement on
+that session resolves to (an empty list when there is none).
+
 ## Administration
 
 `/v1/tokens` (list, create, and revoke with `DELETE /v1/tokens/{id}`) and

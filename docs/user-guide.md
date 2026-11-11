@@ -280,8 +280,14 @@ transaction that is **always rolled back**, so it is safe for `UPDATE` and
   first.
 * **✎ Edit data** is available when a result comes from a single table with a
   primary key. Edit cells (double-click or F2), add rows and delete rows. The
-  changes are shown as SQL before **Apply** runs them in one transaction.
-  Only `*` and plain column names are editable: aliased columns
+  changes are shown as SQL before **Apply** runs them, all or none, in the
+  tab's session: the same table the result came from, even after
+  `SET search_path`, `USE` or with a temp table of the same name, and with
+  the tab's uncommitted rows visible. With Auto-commit and no transaction
+  open, they are committed at once. Otherwise (Auto-commit off, or a
+  transaction open) they become part of the tab's transaction and are not
+  committed until you click **Commit**. Only `*` and plain column names are
+  editable: aliased columns
   (`a AS b`), literals and expressions stay read-only, and the primary key
   must be selected once, without an alias.
 * Messages (`RAISERROR`, `RAISE NOTICE`, `PRINT`) and row counts appear in the

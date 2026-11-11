@@ -171,6 +171,45 @@ async fn sqlite_schema(conn: &mut dyn Conn, schema: Option<&str>) -> Result<Sqli
 
 // -------------------------------------------------------------- columns --
 
+/// The schema an unqualified `table` resolves to on `conn`, the way the
+/// engine resolves it in a statement: PostgreSQL's search path, SQL Server's
+/// default schema then `dbo`, SQLite's `temp`, `main`, then attached
+/// databases. `None` when no such table or view is visible.
+pub async fn resolve_schema(conn: &mut dyn Conn, table: &str) -> Result<Option<String>> {
+    let sql = match conn.engine() {
+        Engine::Unknown => return Err(DbError::unknown_engine()),
+        Engine::Postgres => {
+            "SELECT n.nspname::text FROM pg_class c
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE c.oid = to_regclass(quote_ident($1))"
+        }
+        Engine::Mssql => "SELECT OBJECT_SCHEMA_NAME(OBJECT_ID(QUOTENAME(@P1)))",
+        Engine::Sqlite => {
+            let dbs = rows(
+                conn,
+                "SELECT name FROM pragma_database_list ORDER BY name <> 'temp', seq",
+                vec![],
+            )
+            .await?;
+            for db in dbs.iter().filter_map(|r| get_str(&r[0])) {
+                let sql = format!(
+                    "SELECT 1 FROM \"{}\".sqlite_master
+                     WHERE type IN ('table', 'view') AND name = ?1 COLLATE NOCASE",
+                    db.replace('"', "\"\"")
+                );
+                if !rows(conn, &sql, vec![param(Some(table))]).await?.is_empty() {
+                    return Ok(Some(db));
+                }
+            }
+            return Ok(None);
+        }
+    };
+    Ok(rows(conn, sql, vec![param(Some(table))])
+        .await?
+        .first()
+        .and_then(|r| get_str(&r[0])))
+}
+
 pub async fn columns(
     conn: &mut dyn Conn,
     schema: Option<&str>,

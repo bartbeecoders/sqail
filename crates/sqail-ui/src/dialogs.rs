@@ -1937,7 +1937,9 @@ fn import(ctx: &egui::Context, app: &mut SqailApp) {
 
 pub struct ApplyEdits {
     pub tab: u64,
-    pub connection: Uuid,
+    /// The tab's session: the edits run where the result came from.
+    pub session: Uuid,
+    pub tx: crate::editing::EditTx,
     pub engine: sqail_client::proto::Engine,
     pub statements: Vec<(String, Vec<sqail_client::proto::Param>)>,
     pub previews: Vec<String>,
@@ -1955,9 +1957,15 @@ fn apply_edits(ctx: &egui::Context, app: &mut SqailApp) {
         ui.set_width(700.0);
         ui.heading(format!("Apply {} change(s)", d.statements.len()));
         ui.label(
-            RichText::new(
-                "These statements run in one transaction; if any fails, nothing is changed.",
-            )
+            RichText::new(match d.tx {
+                crate::editing::EditTx::Commit => {
+                    "These statements run in one transaction; if any fails, nothing is changed."
+                }
+                _ => {
+                    "These statements become part of the tab's transaction and are not \
+                     committed until you click Commit. If any fails, none of them is applied."
+                }
+            })
             .weak(),
         );
         egui::ScrollArea::vertical()
@@ -2006,9 +2014,10 @@ fn apply_edits(ctx: &egui::Context, app: &mut SqailApp) {
     if apply && let Some(client) = app.service.client.clone() {
         d.busy = true;
         d.error = None;
-        let (tab, conn, engine, stmts) = (d.tab, d.connection, d.engine, d.statements.clone());
+        let (tab, session, tx, engine, stmts) =
+            (d.tab, d.session, d.tx, d.engine, d.statements.clone());
         app.worker.run(async move {
-            let result = crate::editing::apply(&client, conn, engine, stmts)
+            let result = crate::editing::apply(&client, session, engine, stmts, tx)
                 .await
                 .map_err(|e| format!("{e:#}"));
             Msg::EditsApplied { tab, result }

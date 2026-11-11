@@ -116,11 +116,14 @@ impl Assistant {
         self.running.is_some()
     }
 
-    /// Forget the conversation (and its CLI session folder).
+    /// Forget the conversation (and its CLI session folder, removed in the
+    /// background: it can be large, and the UI must not wait for the disk).
     pub fn new_chat(&mut self) {
         self.stop();
         if let Some(c) = self.conversation.take() {
-            let _ = std::fs::remove_dir_all(&c.workdir);
+            std::thread::spawn(move || {
+                let _ = std::fs::remove_dir_all(&c.workdir);
+            });
         }
         self.entries.clear();
     }
@@ -249,7 +252,8 @@ impl SqailApp {
                 .push(Entry::Error("Connect to a service first.".into()));
             return;
         };
-        let Some((token, _)) = crate::secrets::load_token(&profile.url) else {
+        // Loaded on connect, off the UI thread (the credential store may block).
+        let Some(token) = self.service.token.clone() else {
             self.assistant.entries.push(Entry::Error(
                 "No token for this service; reconnect to it.".into(),
             ));

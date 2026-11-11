@@ -41,7 +41,15 @@ const RAIL_WIDTH: f32 = 28.0;
 pub enum Msg {
     Connected {
         url: String,
+        generation: u64,
+        /// The stored token and where it came from; `None` when there is none.
+        token: Option<(String, secrets::Store)>,
         result: Result<(Client, ServiceInfo), sqail_client::Error>,
+    },
+    /// The token of a new service was stored (or not).
+    TokenSaved {
+        profile: ServiceProfile,
+        result: Result<secrets::Store, String>,
     },
     Connections(Result<Vec<Connection>, String>),
     /// What a request of the current client showed about the service, sent
@@ -175,6 +183,9 @@ pub struct Service {
     pub status: ServiceStatus,
     pub connections: Vec<Connection>,
     pub token_store: Option<secrets::Store>,
+    /// The token the client uses, loaded once per connect (off the UI
+    /// thread) for those that need it again (the AI assistant).
+    pub token: Option<String>,
     /// Counts connects, so reports from an older client are ignored.
     pub generation: u64,
 }
@@ -202,8 +213,13 @@ pub struct SqailApp {
     pub snippets: crate::local::Snippets,
     pub sidebar: crate::sidebar::View,
     pub history_filter: String,
+    /// The filtered history list, kept between frames.
+    pub history_view: crate::sidebar::HistoryView,
     pub snippet_filter: String,
-    saved_workspace: Option<crate::local::Workspace>,
+    /// What autosave last handed to the writer, and how many it handed.
+    saved_workspace: crate::local::WorkspaceSnapshot,
+    workspace_seq: u64,
+    workspace_writer: crate::local::WorkspaceWriter,
     workspace_checked: Instant,
     pub keymap: crate::commands::Keymap,
     /// Set once the user confirmed quitting despite open transactions.
@@ -234,6 +250,7 @@ impl SqailApp {
                 status: ServiceStatus::Unconfigured,
                 connections: Vec::new(),
                 token_store: None,
+                token: None,
                 generation: 0,
             },
             tabs: Vec::new(),
@@ -248,8 +265,11 @@ impl SqailApp {
             snippets,
             sidebar: Default::default(),
             history_filter: String::new(),
+            history_view: Default::default(),
             snippet_filter: String::new(),
-            saved_workspace: None,
+            saved_workspace: Default::default(),
+            workspace_seq: 0,
+            workspace_writer: Default::default(),
             workspace_checked: Instant::now(),
             keymap: crate::commands::Keymap::load(),
             allow_close: false,
@@ -311,16 +331,12 @@ impl SqailApp {
 
     // ------------------------------------------------------------ service --
 
-    /// Connect to a configured service using its stored token.
+    /// Connect to a configured service using its stored token. The token is
+    /// read on the worker: the OS credential store may block (unlock prompt).
     pub fn connect(&mut self, profile: ServiceProfile) {
-        let Some((token, store)) = secrets::load_token(&profile.url) else {
-            self.service.profile = Some(profile.clone());
-            self.service.status = ServiceStatus::Failed("no token stored for this service".into());
-            self.dialog = Dialog::Welcome(WelcomeForm::for_url(&profile.url));
-            return;
-        };
         self.service.profile = Some(profile.clone());
-        self.service.token_store = Some(store);
+        self.service.token_store = None;
+        self.service.token = None;
         self.service.client = None;
         self.service.status = ServiceStatus::Connecting;
         self.service.generation += 1;
@@ -333,7 +349,23 @@ impl SqailApp {
         let autostart = profile.local && self.settings.autostart_local;
         let (cert, key) = (profile.client_cert.clone(), profile.client_key.clone());
         let url = profile.url.clone();
+        let dir = crate::settings::config_dir();
         self.worker.run(async move {
+            let lookup = url.clone();
+            let loaded = tokio::task::spawn_blocking(move || secrets::load_token_in(&dir, &lookup))
+                .await
+                .ok()
+                .flatten();
+            let Some((token, store)) = loaded else {
+                return Msg::Connected {
+                    url,
+                    generation,
+                    token: None,
+                    result: Err(sqail_client::Error::Config(
+                        "no token stored for this service".into(),
+                    )),
+                };
+            };
             if autostart && let Err(e) = local_service::ensure_running(&url).await {
                 tracing::warn!(error = %e, "could not start the local service");
             }
@@ -344,7 +376,7 @@ impl SqailApp {
                 };
                 let client = Client::new(&Target {
                     url: url.clone(),
-                    token,
+                    token: token.clone(),
                     trust,
                     identity,
                 })?
@@ -353,7 +385,12 @@ impl SqailApp {
                 Ok((client, info))
             }
             .await;
-            Msg::Connected { url, result }
+            Msg::Connected {
+                url,
+                generation,
+                token: Some((token, store)),
+                result,
+            }
         });
     }
 
@@ -366,23 +403,48 @@ impl SqailApp {
         });
     }
 
-    /// Store a new service (token → credential store) and connect to it.
+    /// Store a new service (token → credential store, on the worker) and
+    /// connect to it.
     pub fn adopt_service(&mut self, profile: ServiceProfile, token: &str) {
-        match secrets::save_token(&profile.url, token) {
+        if let Dialog::Welcome(form) = &mut self.dialog {
+            form.busy = true;
+            form.error = None;
+        }
+        let dir = crate::settings::config_dir();
+        let token = token.to_string();
+        self.worker.run(async move {
+            let url = profile.url.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                secrets::save_token_in(&dir, &url, &token).map_err(|e| e.to_string())
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+            Msg::TokenSaved { profile, result }
+        });
+    }
+
+    fn token_saved(&mut self, profile: ServiceProfile, result: Result<secrets::Store, String>) {
+        match result {
             Ok(store) => {
                 if store == secrets::Store::File {
                     self.notify("No OS credential store found: the token is saved in tokens.toml (owner-only).", false);
                 }
+                self.settings.upsert_service(profile.clone());
+                self.settings.save();
+                self.dialog = Dialog::None;
+                self.connect(profile);
             }
             Err(e) => {
-                self.notify(format!("Could not store the token: {e}"), true);
-                return;
+                let e = format!("Could not store the token: {e}");
+                match &mut self.dialog {
+                    Dialog::Welcome(form) => {
+                        form.busy = false;
+                        form.error = Some(e);
+                    }
+                    _ => self.notify(e, true),
+                }
             }
         }
-        self.settings.upsert_service(profile.clone());
-        self.settings.save();
-        self.dialog = Dialog::None;
-        self.connect(profile);
     }
 
     /// A request found the service gone, the token rejected, or the service
@@ -425,12 +487,17 @@ impl SqailApp {
 
     pub fn forget_service(&mut self) {
         if let Some(p) = self.service.profile.take() {
-            secrets::delete_token(&p.url);
+            let (dir, url) = (crate::settings::config_dir(), p.url.clone());
+            self.worker.detach(async move {
+                let _ =
+                    tokio::task::spawn_blocking(move || secrets::delete_token_in(&dir, &url)).await;
+            });
             self.settings.services.retain(|s| s.url != p.url);
             self.settings.active_service = None;
             self.settings.save();
         }
         self.service.client = None;
+        self.service.token = None;
         self.service.info = None;
         self.service.connections.clear();
         self.service.status = ServiceStatus::Unconfigured;
@@ -460,7 +527,7 @@ impl SqailApp {
         let active = self.tabs[self.active].id;
         self.tabs.sort_by_key(|t| !t.pinned);
         self.active = self.tab_index(active).unwrap_or(0);
-        self.saved_workspace = Some(ws);
+        self.saved_workspace = self.workspace_snapshot().0;
         None
     }
 
@@ -490,16 +557,68 @@ impl SqailApp {
         }
     }
 
+    /// The open tabs, sharing the text of every tab that did not change
+    /// since the last snapshot; and whether anything changed.
+    fn workspace_snapshot(&self) -> (crate::local::WorkspaceSnapshot, bool) {
+        use std::sync::Arc;
+        let last = &self.saved_workspace;
+        let mut changed = last.tabs.len() != self.tabs.len() || last.active != self.active;
+        let tabs = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let prev = last.tabs.get(i);
+                // A memcmp, and a copy only of the tab that changed.
+                let text = match prev {
+                    Some(p) if *p.text == *t.text => p.text.clone(),
+                    _ => Arc::from(t.text.as_str()),
+                };
+                let snap = crate::local::TabSnapshot {
+                    title: t.title.clone(),
+                    path: t.path.clone(),
+                    text,
+                    connection: t.connection,
+                    cursor: t.cursor.primary.index.0,
+                    pinned: t.pinned,
+                };
+                // Same text `Arc`s compare by pointer.
+                changed |= prev != Some(&snap);
+                snap
+            })
+            .collect();
+        let ws = crate::local::WorkspaceSnapshot {
+            tabs,
+            active: self.active,
+        };
+        (ws, changed)
+    }
+
     /// Persist open tabs when they changed (checked about once a second).
+    /// The file is serialised and written on the worker; only when quitting
+    /// (`force`) is it written here.
     fn autosave_workspace(&mut self, force: bool) {
         if !force && self.workspace_checked.elapsed() < Duration::from_secs(1) {
             return;
         }
         self.workspace_checked = Instant::now();
-        let ws = self.workspace();
-        if self.saved_workspace.as_ref() != Some(&ws) {
-            ws.save();
-            self.saved_workspace = Some(ws);
+        let (ws, changed) = self.workspace_snapshot();
+        if !changed && !(force && self.workspace_seq > 0) {
+            return;
+        }
+        self.saved_workspace = ws.clone();
+        self.workspace_seq += 1;
+        let (seq, writer, path) = (
+            self.workspace_seq,
+            self.workspace_writer.clone(),
+            crate::local::Workspace::path(),
+        );
+        if force {
+            writer.write(&path, &ws, seq);
+        } else {
+            self.worker.detach(async move {
+                let _ = tokio::task::spawn_blocking(move || writer.write(&path, &ws, seq)).await;
+            });
         }
     }
 
@@ -850,13 +969,28 @@ impl SqailApp {
 
     fn handle(&mut self, msg: Msg) {
         match msg {
-            Msg::Connected { url, result } => {
-                if self.service.profile.as_ref().map(|p| &p.url) != Some(&url) {
+            Msg::Connected {
+                url,
+                generation,
+                token,
+                result,
+            } => {
+                if generation != self.service.generation
+                    || self.service.profile.as_ref().map(|p| &p.url) != Some(&url)
+                {
                     return; // a newer connect superseded this one
                 }
+                let Some((token, store)) = token else {
+                    self.service.status =
+                        ServiceStatus::Failed("no token stored for this service".into());
+                    self.dialog = Dialog::Welcome(WelcomeForm::for_url(&url));
+                    return;
+                };
+                self.service.token_store = Some(store);
                 match result {
                     Ok((client, info)) => {
                         self.service.client = Some(client);
+                        self.service.token = Some(token);
                         self.service.info = Some(info);
                         self.service.status = ServiceStatus::Connected;
                         self.refresh_connections();
@@ -901,6 +1035,7 @@ impl SqailApp {
                 self.notify(format!("Could not load connections: {e}"), true)
             }
             Msg::ServiceReach { generation, reach } => self.service_reach(generation, reach),
+            Msg::TokenSaved { profile, result } => self.token_saved(profile, result),
             Msg::Probed(r) => {
                 if let Dialog::Welcome(form) = &mut self.dialog {
                     form.on_probed(r);

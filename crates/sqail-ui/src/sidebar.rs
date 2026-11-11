@@ -92,6 +92,40 @@ fn apply(app: &mut SqailApp, ctx: &egui::Context, pick: Pick) {
     }
 }
 
+/// The history entries that match the filter (indices, newest first). Only
+/// recomputed when the filter or the history changes, not every frame.
+#[derive(Default)]
+pub struct HistoryView {
+    key: Option<(String, u64)>,
+    matching: Vec<usize>,
+}
+
+impl HistoryView {
+    pub fn matching(&mut self, history: &crate::local::History, filter: &str) -> &[usize] {
+        if self
+            .key
+            .as_ref()
+            .is_none_or(|(f, r)| f != filter || *r != history.revision())
+        {
+            let f = filter.to_lowercase();
+            self.matching = history
+                .entries
+                .iter()
+                .enumerate()
+                .rev()
+                .filter(|(_, e)| {
+                    f.is_empty()
+                        || e.sql.to_lowercase().contains(&f)
+                        || e.connection_name.to_lowercase().contains(&f)
+                })
+                .map(|(i, _)| i)
+                .collect();
+            self.key = Some((filter.to_string(), history.revision()));
+        }
+        &self.matching
+    }
+}
+
 fn history_ui(ui: &mut egui::Ui, app: &mut SqailApp) {
     ui.horizontal(|ui| {
         ui.add(
@@ -107,37 +141,44 @@ fn history_ui(ui: &mut egui::Ui, app: &mut SqailApp) {
             app.history.clear();
         }
     });
-    let filter = app.history_filter.to_lowercase();
+    let matching = app.history_view.matching(&app.history, &app.history_filter);
+    if matching.is_empty() {
+        let text = if app.history.entries.is_empty() {
+            "Nothing yet. Queries you run appear here."
+        } else {
+            "No matching queries."
+        };
+        ui.label(RichText::new(text).weak());
+        return;
+    }
+    let entries = &app.history.entries;
     let mut pick = None;
+    // Every row has the same height, so only the visible ones are laid out.
+    let gap = ui.spacing().item_spacing.y;
+    let row_height = ui.text_style_height(&egui::TextStyle::Monospace)
+        + gap
+        + ui.text_style_height(&egui::TextStyle::Small)
+        + 2.0 * gap;
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
-        .show(ui, |ui| {
-            let matching = app
-                .history
-                .entries
-                .iter()
-                .rev()
-                .filter(|e| {
-                    filter.is_empty()
-                        || e.sql.to_lowercase().contains(&filter)
-                        || e.connection_name.to_lowercase().contains(&filter)
-                })
-                .take(500);
-            let mut any = false;
-            for e in matching {
-                any = true;
+        .show_rows(ui, row_height, matching.len(), |ui, rows| {
+            for &i in &matching[rows] {
+                let e = &entries[i];
                 let color = match e.outcome {
                     Outcome::Ok => ui.visuals().text_color(),
                     Outcome::Failed => Color32::from_rgb(0xd6, 0x45, 0x45),
                     Outcome::Cancelled => Color32::from_rgb(0xe6, 0xa2, 0x3c),
                 };
+                let size = egui::vec2(ui.available_width(), row_height);
                 let resp = ui
-                    .vertical(|ui| {
+                    .allocate_ui_with_layout(size, egui::Layout::top_down(egui::Align::Min), |ui| {
+                        ui.set_min_size(size);
                         ui.add(
                             egui::Label::new(
                                 RichText::new(first_line(&e.sql)).monospace().color(color),
                             )
-                            .selectable(false),
+                            .selectable(false)
+                            .truncate(),
                         );
                         ui.add(
                             egui::Label::new(
@@ -151,12 +192,19 @@ fn history_ui(ui: &mut egui::Ui, app: &mut SqailApp) {
                                 .small()
                                 .weak(),
                             )
-                            .selectable(false),
+                            .selectable(false)
+                            .truncate(),
                         );
                     })
                     .response
                     .interact(egui::Sense::click())
                     .on_hover_text(&e.sql);
+                let r = resp.rect;
+                ui.painter().hline(
+                    r.x_range(),
+                    r.bottom() - gap / 2.0,
+                    ui.visuals().widgets.noninteractive.bg_stroke,
+                );
                 if resp.double_clicked() {
                     pick = Some(Pick::NewTab(e.sql.clone(), e.connection));
                 }
@@ -174,10 +222,6 @@ fn history_ui(ui: &mut egui::Ui, app: &mut SqailApp) {
                         ui.close();
                     }
                 });
-                ui.separator();
-            }
-            if !any {
-                ui.label(RichText::new("Nothing yet. Queries you run appear here.").weak());
             }
         });
     if let Some(p) = pick {

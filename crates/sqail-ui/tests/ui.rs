@@ -64,6 +64,23 @@ fn run_with(
     });
 }
 
+/// Wait until autosave (written on the worker) has put `text` in the
+/// workspace file in `dir`.
+fn wait_workspace(dir: &std::path::Path, text: &str) -> String {
+    let start = Instant::now();
+    loop {
+        let saved = std::fs::read_to_string(dir.join("workspace.json")).unwrap_or_default();
+        if saved.contains(text) {
+            return saved;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "workspace.json never got {text:?}: {saved}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// A running service with an SQLite connection "people db" (table `people`),
 /// and a UI config dir pointing at it.
 struct Env {
@@ -174,8 +191,8 @@ fn workspace_history_and_snippets_survive_a_restart() {
         // Autosave runs about once a second; no clean shutdown afterwards.
         std::thread::sleep(Duration::from_millis(1100));
         h.run_steps(3);
+        wait_workspace(&e.ui_dir, "unsaved draft");
     }
-    assert!(e.ui_dir.join("workspace.json").exists());
     // A custom keybinding takes effect on the next start.
     std::fs::write(
         e.ui_dir.join("keybindings.toml"),
@@ -248,8 +265,7 @@ fn a_damaged_workspace_is_kept_and_reported() {
         damaged,
         "the damaged file is kept"
     );
-    let saved = std::fs::read_to_string(e.ui_dir.join("workspace.json")).unwrap();
-    assert!(saved.contains("new work"), "{saved}");
+    wait_workspace(&e.ui_dir, "new work");
     drop(h);
 
     // The next start is clean and keeps the earlier .bad file.
@@ -567,6 +583,67 @@ fn tabs_are_not_bound_to_the_first_of_several_connections() {
         None,
         "not bound to production"
     );
+}
+
+/// Storing a new service's token and reading it back on connect happen on
+/// the worker, with the UI thread's config dir (#158).
+#[test]
+fn adopting_a_service_stores_its_token_in_the_background() {
+    let e = env();
+    let mut h = app([1280.0, 800.0]);
+    let mut profile = h.state().service.profile.clone().unwrap();
+    profile.name = "again".into();
+    let token = e.server.bootstrap_token.clone().unwrap();
+    std::fs::remove_file(e.ui_dir.join("tokens.toml")).unwrap();
+    let before = h.state().service.generation;
+    h.state_mut().adopt_service(profile, &token);
+    wait(&mut h, "connected again", |a| {
+        a.service.generation > before
+            && a.service.status == ServiceStatus::Connected
+            && a.service.token.as_deref() == Some(token.as_str())
+    });
+    assert!(
+        std::fs::read_to_string(e.ui_dir.join("tokens.toml"))
+            .unwrap()
+            .contains(&token)
+    );
+    assert!(
+        h.state()
+            .settings
+            .services
+            .iter()
+            .any(|s| s.name == "again")
+    );
+}
+
+/// The history list only lays out the rows in view, and its filter is not
+/// recomputed every frame (#158).
+#[test]
+fn history_list_is_virtualised() {
+    let _e = env();
+    let mut h = app([1280.0, 800.0]);
+    for i in 0..3000 {
+        h.state_mut().history.push(sqail_ui::local::HistoryEntry {
+            at: 0,
+            connection: None,
+            connection_name: "people db".into(),
+            sql: format!("SELECT {i} AS n_{}", i % 7),
+            duration_ms: 1,
+            rows: 1,
+            outcome: sqail_ui::local::Outcome::Ok,
+        });
+    }
+    h.state_mut().sidebar = sqail_ui::sidebar::View::History;
+    h.state_mut().settings.sidebar_open = true;
+    h.run_steps(3);
+    let shown = h.query_all_by_label_contains("SELECT ").count();
+    assert!(shown > 5 && shown < 100, "{shown} rows laid out");
+    h.get_by_label("SELECT 2999 AS n_3");
+    h.state_mut().history_filter = "n_3".into();
+    h.run_steps(3);
+    h.get_by_label("SELECT 2999 AS n_3");
+    assert!(h.query_by_label("SELECT 2998 AS n_2").is_none());
+    shot(&mut h, "15-history-virtualised");
 }
 
 /// A profile of an engine newer than this build is listed as unsupported, and

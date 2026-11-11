@@ -222,6 +222,50 @@ fn workspace_history_and_snippets_survive_a_restart() {
     drop(e.dir);
 }
 
+/// A `workspace.json` that does not parse (torn write, hand edit) is kept as
+/// `workspace.json.bad` and reported, not replaced by the next autosave.
+#[test]
+fn a_damaged_workspace_is_kept_and_reported() {
+    let e = env();
+    let damaged = r#"{"tabs":[{"title":"x""#;
+    std::fs::write(e.ui_dir.join("workspace.json"), damaged).unwrap();
+
+    let mut h = app([1280.0, 800.0]);
+    assert_eq!(h.state().tabs.len(), 1, "starts with one empty tab");
+    h.state_mut().tabs[0].text = "SELECT 'new work'".into();
+    // Autosave runs about once a second.
+    std::thread::sleep(Duration::from_millis(1100));
+    h.run_steps(3);
+    assert!(
+        h.query_by_label_contains("workspace.json could not be read")
+            .is_some(),
+        "the user is told"
+    );
+    shot(&mut h, "damaged-workspace");
+
+    assert_eq!(
+        std::fs::read_to_string(e.ui_dir.join("workspace.json.bad")).unwrap(),
+        damaged,
+        "the damaged file is kept"
+    );
+    let saved = std::fs::read_to_string(e.ui_dir.join("workspace.json")).unwrap();
+    assert!(saved.contains("new work"), "{saved}");
+    drop(h);
+
+    // The next start is clean and keeps the earlier .bad file.
+    let h = app([1280.0, 800.0]);
+    assert_eq!(h.state().tabs[0].text, "SELECT 'new work'");
+    assert!(
+        h.query_by_label_contains("could not be read").is_none(),
+        "no notice for a good file"
+    );
+    assert!(!e.ui_dir.join("workspace.json.1.bad").exists());
+    drop(h);
+    e.server.shutdown();
+    drop(e.rt);
+    drop(e.dir);
+}
+
 /// The Azure discovery dialog with a canned result (no Azure needed): add
 /// the new databases, and see the existing one marked as added.
 #[test]

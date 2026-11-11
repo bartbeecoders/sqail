@@ -10,7 +10,7 @@ it.
 |---|---|
 | Database credentials | `service.db` (encrypted, AES-256-GCM); in memory while a pool is open. Entra client secrets and PostgreSQL client keys are stored the same way; Entra access tokens (Azure SQL, and Resource Manager for discovery) only in memory |
 | Master key | `<data-dir>/master.key` (mode 0600) or `SQAIL_MASTER_KEY` |
-| API tokens | Client: OS credential store (fallback: `tokens.toml`, mode 0600). Service: only a SHA-256 hash |
+| API tokens | Client: OS credential store (fallback: `tokens.toml`, created with mode 0600 and written atomically, so it is never readable by others, not even briefly). Service: only a SHA-256 hash |
 | Query results | In transit (TLS); never logged; kept in UI memory only |
 | Audit log | `service.db`: who ran what, where, and how long it took. Never row values |
 

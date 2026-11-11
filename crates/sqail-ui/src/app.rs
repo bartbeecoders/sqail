@@ -203,7 +203,8 @@ pub struct SqailApp {
 impl SqailApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::install(&cc.egui_ctx);
-        let settings = Settings::load();
+        let (settings, settings_error) = Settings::load();
+        let (snippets, snippets_error) = crate::local::Snippets::load();
         let theme_error = theme::apply(&cc.egui_ctx, settings.theme).err();
         // The UI scale is a setting; egui's own Ctrl+0 would bypass it.
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
@@ -227,7 +228,7 @@ impl SqailApp {
             notice: None,
             viewer: None,
             history: crate::local::History::load(),
-            snippets: crate::local::Snippets::load(),
+            snippets,
             sidebar: Default::default(),
             history_filter: String::new(),
             snippet_filter: String::new(),
@@ -242,17 +243,35 @@ impl SqailApp {
             theme_checked: Instant::now(),
             settings,
         };
-        app.restore_workspace();
+        let workspace_error = app.restore_workspace();
         if let Some(w) = app.keymap.warnings.first().cloned() {
             app.notify(w, true);
         }
         if let Some(e) = theme_error {
             app.notify(e, true);
         }
+        // Damaged local files were set aside, not lost: say so (last, so no
+        // other notice hides it).
+        let damaged: Vec<&str> = [&settings_error, &workspace_error, &snippets_error]
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .collect();
+        if !damaged.is_empty() {
+            app.notify(damaged.join(" · "), true);
+        }
         match app.settings.active().cloned() {
             Some(profile) => app.connect(profile),
             None => {
-                let mut form = WelcomeForm::default();
+                let mut form = WelcomeForm {
+                    error: settings_error.map(|e| {
+                        format!(
+                            "{e}. Your services are in that file: fix it and rename it back \
+                             to settings.toml, or set up a service again here."
+                        )
+                    }),
+                    ..Default::default()
+                };
                 // Development convenience (scripts/dev.sh): skip the first-run
                 // choice and set up the local service directly.
                 if std::env::var_os("SQAIL_AUTO_LOCAL").is_some()
@@ -361,11 +380,16 @@ impl SqailApp {
 
     // ---------------------------------------------------------- workspace --
 
-    fn restore_workspace(&mut self) {
-        let ws = crate::local::Workspace::load().filter(|w| !w.tabs.is_empty());
+    /// Reopen the saved tabs. Returns why `workspace.json` could not be read
+    /// (it is then kept as `workspace.json.bad`, not overwritten).
+    fn restore_workspace(&mut self) -> Option<String> {
+        let (ws, error) = match crate::local::Workspace::load() {
+            Ok(ws) => (ws.filter(|w| !w.tabs.is_empty()), None),
+            Err(e) => (None, Some(e)),
+        };
         let Some(ws) = ws else {
             self.new_tab(None);
-            return;
+            return error;
         };
         for saved in &ws.tabs {
             let id = self.next_tab;
@@ -378,6 +402,7 @@ impl SqailApp {
         self.tabs.sort_by_key(|t| !t.pinned);
         self.active = self.tab_index(active).unwrap_or(0);
         self.saved_workspace = Some(ws);
+        None
     }
 
     fn tab_index(&self, id: u64) -> Option<usize> {

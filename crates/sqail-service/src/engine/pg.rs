@@ -164,6 +164,15 @@ const PG_RESET_PROBE: &str = "SELECT now() <> statement_timestamp(), \
      coalesce((SELECT string_agg('DEALLOCATE ' || quote_ident(name), '; ') \
                FROM pg_prepared_statements WHERE from_sql), '')";
 
+const COPY_FROM_STDIN: &str = "COPY … FROM STDIN is not supported here: the rows that follow it \
+     in a psql or pg_dump script cannot be sent through sqail. Use Import CSV, INSERT \
+     statements, or COPY … FROM a file on the database server. Nothing in the script was run.";
+const COPY_TO_STDOUT_BINARY: &str = "COPY … TO STDOUT in binary format is not supported here; use \
+     the text or CSV format, or Export. Nothing in the script was run.";
+const COPY_UNSPLIT: &str = "COPY … TO STDOUT can only run in a script whose statements can be \
+     split safely (a backslash before a quote in a plain string prevents that); run it on its \
+     own. Nothing in the script was run.";
+
 struct PgCancel {
     token: CancelToken,
     tls: MakeRustlsConnect,
@@ -306,10 +315,47 @@ impl PgConn {
                 // `execute` loaded them before the first statement.
                 self.load_type_names().await;
             }
-            self.run_simple(s.sql, s.offset, None, out).await?;
+            if pg_guard::copy_stdio(s.sql) == Some(pg_guard::CopyStdio::ToStdout) {
+                self.run_copy_out(s.sql, s.offset, out).await?;
+            } else {
+                self.run_simple(s.sql, s.offset, None, out).await?;
+            }
             created_types |= creates_types;
         }
         Ok(())
+    }
+
+    /// `COPY … TO STDOUT` (text or CSV) as a result set with one `text`
+    /// column, `copy`, and a row per line the server sends. The simple
+    /// protocol cannot take it (tokio-postgres refuses the CopyOut
+    /// response), so it runs through the extended protocol.
+    async fn run_copy_out(
+        &mut self,
+        sql: &str,
+        offset: usize,
+        out: &mut ResultWriter<'_>,
+    ) -> Result<()> {
+        let err = |e| db_err_at(e, offset);
+        let stream = self.client.copy_out(sql).await.map_err(err)?;
+        out.start(vec![Column {
+            name: "copy".into(),
+            type_name: "text".into(),
+            logical: LogicalType::Text,
+        }])
+        .await?;
+        futures::pin_mut!(stream);
+        while let Some(data) = stream.try_next().await.map_err(err)? {
+            if out.is_truncated() {
+                out.skip_row();
+                continue;
+            }
+            // One CopyData message per row; a CSV value may span lines.
+            let line = String::from_utf8_lossy(&data);
+            out.row(vec![text(line.strip_suffix('\n').unwrap_or(&line))])
+                .await?;
+        }
+        out.end().await?;
+        self.forward_notices(out).await
     }
 
     async fn run_prepared(
@@ -389,6 +435,19 @@ impl PgConn {
 impl Conn for PgConn {
     async fn execute(&mut self, req: &ExecRequest, sink: &EventSink) -> Result<()> {
         let mut out = ResultWriter::new(sink, req.max_rows);
+        // Refused before anything is sent, so the connection (and a
+        // session's transaction and temp tables) stays as it was.
+        let copy = pg_guard::copy_stdio(&req.sql);
+        match copy {
+            Some(pg_guard::CopyStdio::FromStdin) => {
+                return Err(DbError::Unsupported(COPY_FROM_STDIN.into()));
+            }
+            Some(pg_guard::CopyStdio::ToStdoutBinary) => {
+                return Err(DbError::Unsupported(COPY_TO_STDOUT_BINARY.into()));
+            }
+            _ => {}
+        }
+        let copy_out = copy == Some(pg_guard::CopyStdio::ToStdout);
         self.load_type_names().await;
         let res = if req.params.is_empty() {
             // A single query stops at max_rows on the server; a script can
@@ -405,9 +464,10 @@ impl Conn for PgConn {
                 self.client.prepare(&req.sql).await.map_err(db_err)?;
             }
             match pg_guard::split_statements(&req.sql) {
-                Some(stmts) if limit.is_none() && stmts.len() > 1 => {
+                Some(stmts) if limit.is_none() && (stmts.len() > 1 || copy_out) => {
                     self.run_statements(&stmts, &mut out).await
                 }
+                None if copy_out => Err(DbError::Unsupported(COPY_UNSPLIT.into())),
                 // Statement boundaries depend on standard_conforming_strings:
                 // one message, so one transaction, as before.
                 None if limit.is_none() => self

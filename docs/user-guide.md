@@ -252,6 +252,13 @@ depends on how the server reads backslashes in strings (`'a\'`) does the
 script run as one transaction, and the error then says that the statements
 before it were rolled back too.
 
+`COPY … TO STDOUT` (text or CSV) on PostgreSQL shows its output as a result
+with one `copy` column, a row per line. `COPY … FROM STDIN`, as in pg_dump
+output, can't be run: sqail refuses the whole script before running any of
+it, so the tab's transaction and temp tables stay as they were. Use
+*Import CSV*, `INSERT` statements, or `COPY … FROM` a file on the database
+server instead.
+
 **Plans:** *Explain* (Ctrl+E) shows the estimated plan as a tree, with cost
 and row estimates and the most expensive nodes highlighted. *Explain analyze*
 actually runs the statement to get real timings and row counts, and its

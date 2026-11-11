@@ -25,8 +25,164 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 
 pub type Result<T, E = DbError> = std::result::Result<T, E>;
 
-/// Rows per `rows` event.
+/// Most rows per `rows` event.
 pub const ROW_BATCH: usize = 500;
+/// A `rows` event is sent once its rows' JSON reaches this size, so that
+/// one NDJSON line stays bounded however wide the rows are. A query's
+/// response channel holds up to 32 events, so this also bounds what the
+/// service buffers for a slow client (about 32 MiB).
+pub const BATCH_BYTES: usize = 1024 * 1024;
+/// Largest JSON size of one row. Longer values are cut to fit, with a
+/// warning, so that a single huge cell cannot make a line the client
+/// refuses (its `MAX_LINE`, 256 MiB). A line is at most about
+/// `BATCH_BYTES + MAX_ROW_BYTES`.
+pub const MAX_ROW_BYTES: usize = 64 * 1024 * 1024;
+
+/// The rows of one result set waiting to be sent: flushed at [`ROW_BATCH`]
+/// rows or [`BATCH_BYTES`] of JSON, whichever comes first.
+pub(crate) struct RowBatch {
+    rows: Vec<Vec<serde_json::Value>>,
+    bytes: usize,
+    cut_warned: bool,
+}
+
+impl RowBatch {
+    pub(crate) fn new() -> Self {
+        Self {
+            rows: Vec::with_capacity(ROW_BATCH),
+            bytes: 0,
+            cut_warned: false,
+        }
+    }
+
+    /// Add a row, cutting values that make it longer than [`MAX_ROW_BYTES`].
+    /// Returns a warning to send when this is the result set's first row
+    /// with a cut value.
+    pub(crate) fn push(&mut self, mut row: Vec<serde_json::Value>) -> Option<String> {
+        let (bytes, cut) = cap_row(&mut row, MAX_ROW_BYTES);
+        self.bytes += bytes;
+        self.rows.push(row);
+        if cut && !self.cut_warned {
+            self.cut_warned = true;
+            return Some(format!(
+                "Some values in this result were cut (ending in …): a row may take at \
+                 most {} MiB in a result. Select a part of them (substring) to see the rest.",
+                MAX_ROW_BYTES / (1024 * 1024)
+            ));
+        }
+        None
+    }
+
+    pub(crate) fn is_full(&self) -> bool {
+        self.rows.len() >= ROW_BATCH || self.bytes >= BATCH_BYTES
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    pub(crate) fn take(&mut self) -> Vec<Vec<serde_json::Value>> {
+        self.bytes = 0;
+        std::mem::replace(&mut self.rows, Vec::with_capacity(ROW_BATCH))
+    }
+}
+
+/// Bytes `s` takes as a JSON string, quotes included.
+fn json_str_len(s: &str) -> usize {
+    2 + s.bytes().map(escaped_len).sum::<usize>()
+}
+
+fn escaped_len(b: u8) -> usize {
+    match b {
+        b'"' | b'\\' | b'\n' | b'\r' | b'\t' | 0x08 | 0x0c => 2,
+        0..0x20 => 6,
+        _ => 1,
+    }
+}
+
+/// Bytes `v` takes as JSON (an upper bound for numbers).
+fn json_len(v: &serde_json::Value) -> usize {
+    use serde_json::Value;
+    match v {
+        Value::Null => 4,
+        Value::Bool(b) => {
+            if *b {
+                4
+            } else {
+                5
+            }
+        }
+        Value::Number(_) => 24,
+        Value::String(s) => json_str_len(s),
+        // Brackets, and a `,` between values.
+        Value::Array(a) => 1 + a.iter().map(|v| json_len(v) + 1).sum::<usize>().max(1),
+        Value::Object(o) => {
+            1 + o
+                .iter()
+                .map(|(k, v)| json_str_len(k) + json_len(v) + 2)
+                .sum::<usize>()
+                .max(1)
+        }
+    }
+}
+
+/// Cut values so that `row` takes at most about `max` bytes as JSON: a
+/// string keeps the prefix that fits, followed by `…`; a JSON array or
+/// object becomes the start of its JSON text. Returns the row's JSON size
+/// and whether anything was cut.
+fn cap_row(row: &mut [serde_json::Value], max: usize) -> (usize, bool) {
+    use serde_json::Value;
+    // `[` and `]`, and a `,` after each value but the last.
+    let mut used = 1;
+    let mut cut = false;
+    for v in row.iter_mut() {
+        let len = json_len(v) + 1;
+        if used + len <= max {
+            used += len;
+            continue;
+        }
+        let budget = max.saturating_sub(used + 1);
+        let text = match std::mem::take(v) {
+            Value::String(s) => s,
+            other @ (Value::Array(_) | Value::Object(_)) => other.to_string(),
+            // Scalars are a few bytes: keep them.
+            other => {
+                *v = other;
+                used += len;
+                continue;
+            }
+        };
+        let s = cut_to_json_len(text, budget);
+        used += json_str_len(&s) + 1;
+        *v = Value::String(s);
+        cut = true;
+    }
+    (used, cut)
+}
+
+/// The longest prefix of `s` (on a char boundary) that, with a trailing
+/// `…`, takes at most `budget` bytes as a JSON string.
+fn cut_to_json_len(mut s: String, budget: usize) -> String {
+    const MARK: &str = "…";
+    let room = budget.saturating_sub(2 + MARK.len());
+    let mut used = 0;
+    // Bytes of a multi-byte char are all >= 0x80, so they take one byte
+    // each; back off to a char boundary afterwards.
+    let mut end = s.len();
+    for (i, b) in s.bytes().enumerate() {
+        used += escaped_len(b);
+        if used > room {
+            end = i;
+            break;
+        }
+    }
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
+    s.push_str(MARK);
+    s
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
@@ -140,7 +296,7 @@ struct OpenResult {
     index: u32,
     count: u64,
     truncated: bool,
-    batch: Vec<Vec<serde_json::Value>>,
+    batch: RowBatch,
 }
 
 impl<'a> ResultWriter<'a> {
@@ -162,7 +318,7 @@ impl<'a> ResultWriter<'a> {
             index,
             count: 0,
             truncated: false,
-            batch: Vec::with_capacity(ROW_BATCH),
+            batch: RowBatch::new(),
         });
         self.sink
             .send(QueryEvent::ResultStart { index, columns })
@@ -178,22 +334,25 @@ impl<'a> ResultWriter<'a> {
             return Ok(());
         }
         cur.count += 1;
-        cur.batch.push(row);
-        if cur.batch.len() >= ROW_BATCH {
-            let rows = std::mem::replace(&mut cur.batch, Vec::with_capacity(ROW_BATCH));
-            let index = cur.index;
+        let warning = cur.batch.push(row);
+        let index = cur.index;
+        let full = cur.batch.is_full().then(|| cur.batch.take());
+        if let Some(text) = warning {
+            self.message("warning", text).await?;
+        }
+        if let Some(rows) = full {
             self.sink.send(QueryEvent::Rows { index, rows }).await?;
         }
         Ok(())
     }
 
     pub async fn end(&mut self) -> Result<()> {
-        if let Some(cur) = self.current.take() {
+        if let Some(mut cur) = self.current.take() {
             if !cur.batch.is_empty() {
                 self.sink
                     .send(QueryEvent::Rows {
                         index: cur.index,
-                        rows: cur.batch,
+                        rows: cur.batch.take(),
                     })
                     .await?;
             }
@@ -717,6 +876,122 @@ mod tests {
         assert_eq!(idle(&p), 0);
         c.conn();
         c.release();
+    }
+
+    #[test]
+    fn json_len_matches_serde() {
+        use serde_json::json;
+        for v in [
+            json!(null),
+            json!(true),
+            json!("plain"),
+            json!("quote \" back \\ nl \n tab \t ctl \u{1} é ☃"),
+            json!(["a", null, false]),
+            json!({"k": "v", "n": null}),
+        ] {
+            assert_eq!(
+                json_len(&v),
+                serde_json::to_string(&v).unwrap().len(),
+                "{v}"
+            );
+        }
+        assert!(
+            json_len(&json!(-1.5e300)) >= serde_json::to_string(&json!(-1.5e300)).unwrap().len()
+        );
+    }
+
+    /// Wide rows are sent in batches of about `BATCH_BYTES`, so that one
+    /// NDJSON line stays far below what the typed client accepts.
+    #[tokio::test]
+    async fn row_batches_are_capped_by_size() {
+        let sink = EventSink::Collect(Mutex::new(Vec::new()));
+        let mut w = ResultWriter::new(&sink, u64::MAX);
+        w.start(Vec::new()).await.unwrap();
+        let cell = "x".repeat(600_000);
+        for i in 0..500 {
+            w.row(vec![serde_json::json!(i), serde_json::json!(cell)])
+                .await
+                .unwrap();
+        }
+        w.end().await.unwrap();
+        let EventSink::Collect(buf) = sink else {
+            unreachable!()
+        };
+        let mut rows = 0;
+        let mut lines = 0;
+        for ev in buf.into_inner().unwrap() {
+            if let QueryEvent::Rows { rows: r, .. } = &ev {
+                let line = serde_json::to_vec(&ev).unwrap().len();
+                assert!(line < BATCH_BYTES + 1_000_000, "{line}");
+                rows += r.len();
+                lines += 1;
+            }
+            assert!(!matches!(ev, QueryEvent::Message { .. }));
+        }
+        assert_eq!(rows, 500);
+        assert!(lines > 50, "{lines}");
+    }
+
+    #[test]
+    fn the_largest_line_fits_the_client() {
+        // A batch flushes once it reaches BATCH_BYTES, so its last row
+        // starts below it; that row takes at most MAX_ROW_BYTES (plus the
+        // event's own few bytes).
+        const { assert!(BATCH_BYTES + MAX_ROW_BYTES + 4096 < sqail_client::MAX_LINE) };
+    }
+
+    /// A single value too large for a line is cut, with one warning per
+    /// result set, instead of producing a line the client would refuse.
+    #[tokio::test]
+    async fn huge_values_are_cut_with_a_warning() {
+        let sink = EventSink::Collect(Mutex::new(Vec::new()));
+        let mut w = ResultWriter::new(&sink, u64::MAX);
+        w.start(Vec::new()).await.unwrap();
+        let huge = "é".repeat(MAX_ROW_BYTES / 2 + 10);
+        for _ in 0..2 {
+            w.row(vec![serde_json::json!(1), serde_json::json!(huge)])
+                .await
+                .unwrap();
+        }
+        w.row(vec![serde_json::json!("small")]).await.unwrap();
+        w.end().await.unwrap();
+        let EventSink::Collect(buf) = sink else {
+            unreachable!()
+        };
+        let events = buf.into_inner().unwrap();
+        let warnings = events
+            .iter()
+            .filter(|e| matches!(e, QueryEvent::Message { severity, .. } if severity == "warning"))
+            .count();
+        assert_eq!(warnings, 1);
+        let rows: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                QueryEvent::Rows { rows, .. } => Some(rows.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(rows.len(), 3);
+        for row in &rows[..2] {
+            let len = serde_json::to_string(row).unwrap().len();
+            assert!(len <= MAX_ROW_BYTES && len > MAX_ROW_BYTES - 64, "{len}");
+            let s = row[1].as_str().unwrap();
+            assert!(s.ends_with('…') && s.starts_with("éé"));
+        }
+        assert_eq!(rows[2], vec![serde_json::json!("small")]);
+    }
+
+    #[test]
+    fn cutting_respects_escapes() {
+        let mut row = vec![serde_json::json!("\u{1}".repeat(100))];
+        let (len, cut) = cap_row(&mut row, 64);
+        assert!(cut);
+        assert_eq!(len, serde_json::to_string(&row).unwrap().len());
+        assert!(len <= 64, "{len}");
+        let mut row = vec![serde_json::json!({"a": "b".repeat(100)})];
+        assert!(cap_row(&mut row, 40).1);
+        assert!(row[0].as_str().unwrap().starts_with("{\"a\":\"bbb"));
     }
 
     #[tokio::test]

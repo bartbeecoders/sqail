@@ -298,6 +298,9 @@ or XML plan.
   Rows are measured as they come into view, so the scrollbar can adjust
   slightly while you scroll through a large result.
 * Double-click a cell to see its full value (long text, JSON, binary as hex).
+  A row may take at most 64 MiB in a result: longer values are cut (they end
+  in `…`) and a warning says so. Select a part of them (`substring`) to see
+  the rest.
 * Values show as the database has them. Floats print like psql: very large
   or small ones with an exponent (`1.1805916207174113e+21`, `1e-05`), and
   `NaN`, `Infinity`, `-Infinity`. SQL Server `money` shows its four decimals

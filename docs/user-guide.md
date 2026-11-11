@@ -224,7 +224,13 @@ Postgres dollar quotes and SQL Server `GO` lines, so *Run statement* picks
 exactly the statement you're in. On SQL Server a `CREATE`/`ALTER`
 procedure, function, trigger or view runs to the next `GO` (or the end of
 the tab), with or without `BEGIN … END`, so semicolons and blank lines in
-its body don't cut it short. Completion knows keywords, schemas, tables,
+its body don't cut it short. A SQL Server batch from a `DECLARE` on also
+runs to the next `GO`, since its variables only exist in that batch, and
+`IF … ; ELSE …` stays one statement. A `GO` line is `GO`, optionally with a
+repeat count of 1 or more (`GO 0` is not a separator, for the editor nor
+for the service). An unclosed `(` or `CASE` ends at a blank line followed by
+a new statement (`SELECT`, `DELETE`, …), so it doesn't pull the rest of the
+script into the statement under the cursor. Completion knows keywords, schemas, tables,
 columns and functions of the current connection. After `alias.` it lists
 that alias's columns: tables (`FROM orders o`), CTEs (`WITH x AS (…)`) and
 subqueries (`FROM (SELECT …) s`), with the innermost subquery winning when

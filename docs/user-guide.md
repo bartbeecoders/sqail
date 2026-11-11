@@ -371,6 +371,20 @@ remember their state.
   writes SQL for you (completion, the table designer): mixed case, special
   characters, and every word the engine reserves, such as `"user"` or
   `"position"` on PostgreSQL.
+  The filter box above the tree matches table, view and routine names, and
+  column names of tables whose columns are already loaded. While it is
+  set, every schema, group and table with a match opens (also one you
+  closed before), and schemas without a match are hidden. On PostgreSQL
+  and SQL Server the first filter loads every schema's tables and routines
+  in one request each. Long lists only draw the rows on screen, so a
+  schema with thousands of tables scrolls smoothly.
+  The tree is cached. When SQL run in a query tab changes the schema
+  (`CREATE`, `ALTER`, `DROP`, `SELECT … INTO`, `sp_rename`, …), the
+  connection's tree is reloaded; in a manual-commit tab that happens when
+  the transaction ends. DDL hidden in a string (`EXEC('…')`) or a
+  procedure is not noticed: right-click a schema, its *Tables*, *Views* or
+  *Routines*, or a table for *Refresh*, or a connection for *Refresh
+  schema*.
 * **History:** every query you ran, with its connection, duration and row
   count. Filter it, open an entry in a new tab, or clear it. The last 5 000
   entries are kept.

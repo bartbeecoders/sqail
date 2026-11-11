@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -66,11 +67,31 @@ pub struct Request {
     /// Environment for the CLI, which passes it on to the MCP server
     /// (service URL, token, connection). Kept out of files and arguments.
     pub env: Vec<(String, String)>,
+    /// Timeouts of the turn.
+    pub limits: Limits,
 }
 
 pub enum Outcome {
     Finished,
     Stopped,
+}
+
+/// How long a turn may take before sqail gives up on the CLI.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    /// No output at all for this long (e.g. a CLI waiting for a login).
+    pub idle: Duration,
+    /// The whole turn.
+    pub total: Duration,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            idle: Duration::from_secs(5 * 60),
+            total: Duration::from_secs(30 * 60),
+        }
+    }
 }
 
 /// Run one turn, sending every event to `on_event`, until the CLI exits or
@@ -114,11 +135,17 @@ pub async fn run(
     let mut child = cmd
         .spawn()
         .with_context(|| format!("starting {}", program.display()))?;
-    if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
-        pipe.write_all(text.as_bytes()).await?;
-        // Dropping the pipe closes it, so the CLI stops reading.
-    }
-    let stdout = child.stdout.take().context("no stdout")?;
+    // The prompt is written while stdout is read: a CLI that exits at once
+    // (unknown flag, old version) then reports its own error, not a broken
+    // pipe.
+    let writer = match (stdin, child.stdin.take()) {
+        (Some(text), Some(mut pipe)) => Some(tokio::spawn(async move {
+            // Dropping the pipe closes it, so the CLI stops reading.
+            pipe.write_all(text.as_bytes()).await
+        })),
+        _ => None,
+    };
+    let mut stdout = BufReader::new(child.stdout.take().context("no stdout")?);
     let mut stderr = child.stderr.take().context("no stderr")?;
     let stderr_task = tokio::spawn(async move {
         let mut buf = Vec::new();
@@ -126,19 +153,71 @@ pub async fn run(
         String::from_utf8_lossy(&buf).into_owned()
     });
 
-    let mut lines = BufReader::new(stdout).lines();
+    let label = req.provider.label();
     let mut parser = Parser::default();
     let mut done = false;
+    // Whether the turn left anything to show in the conversation.
+    let mut answered = false;
+    // Output that is not the CLI's JSON (e.g. plain text from a CLI that
+    // ignored the output format), shown when nothing else came.
+    let mut stray = String::new();
+    let deadline = tokio::time::Instant::now() + req.limits.total;
+    let mut buf = Vec::new();
     loop {
+        buf.clear();
+        let read = tokio::time::timeout_at(
+            deadline.min(tokio::time::Instant::now() + req.limits.idle),
+            stdout.read_until(b'\n', &mut buf),
+        );
         tokio::select! {
-            line = lines.next_line() => match line? {
-                Some(line) => {
-                    for ev in parser.line(&line) {
+            read = read => match read {
+                Ok(Ok(0)) => break,
+                Ok(Ok(_)) => {
+                    // Lossy: one odd byte must not end the turn.
+                    let text = String::from_utf8_lossy(&buf);
+                    let line = text.trim_end_matches(['\r', '\n']);
+                    let events = parser.line(line);
+                    if events.is_empty() && !line.trim_start().starts_with('{') {
+                        stray.push_str(line);
+                        stray.push('\n');
+                        keep_tail(&mut stray, TAIL_CHARS);
+                    }
+                    for ev in events {
                         done |= matches!(ev, Event::Done { .. });
+                        answered |= shows_something(&ev);
+                        let ev = match ev {
+                            Event::McpFailed { server, status } => {
+                                let why = tokio::select! {
+                                    why = diagnose_mcp(&req) => why,
+                                    _ = &mut stop => {
+                                        let _ = child.kill().await;
+                                        return Ok(Outcome::Stopped);
+                                    }
+                                };
+                                Event::Error(mcp_failed_message(&server, &status, &why))
+                            }
+                            ev => ev,
+                        };
                         on_event(ev);
                     }
                 }
-                None => break,
+                Ok(Err(e)) => {
+                    let _ = child.kill().await;
+                    return Err(anyhow!(e).context(format!("reading {label}'s output")));
+                }
+                Err(_) => {
+                    let _ = child.kill().await;
+                    let stderr = stderr_tail(stderr_task).await;
+                    let what = if tokio::time::Instant::now() >= deadline {
+                        format!("did not finish within {}", minutes(req.limits.total))
+                    } else {
+                        format!(
+                            "printed nothing for {} (is it waiting for a sign-in?)",
+                            minutes(req.limits.idle)
+                        )
+                    };
+                    bail!("{label} {what}, so sqail stopped it{}", with_tail(&stderr));
+                }
             },
             _ = &mut stop => {
                 let _ = child.kill().await;
@@ -147,28 +226,134 @@ pub async fn run(
         }
     }
     let status = child.wait().await?;
-    let stderr = stderr_task.await.unwrap_or_default();
+    let stderr = stderr_tail(stderr_task).await;
+    let written = match writer {
+        Some(w) => w.await.unwrap_or(Ok(())),
+        None => Ok(()),
+    };
     if !status.success() && !done {
-        let tail: String = stderr
-            .trim()
-            .chars()
-            .rev()
-            .take(1500)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        bail!(
-            "{} exited with {status}{}",
-            req.provider.label(),
-            if tail.is_empty() {
-                String::new()
-            } else {
-                format!(":\n{tail}")
+        bail!("{label} exited with {status}{}", with_tail(&stderr));
+    }
+    if let Err(e) = written
+        && e.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        bail!("sending the question to {label}: {e}{}", with_tail(&stderr));
+    }
+    if !answered {
+        let mut why = stray.trim().to_string();
+        if !stderr.is_empty() {
+            if !why.is_empty() {
+                why.push('\n');
             }
-        );
+            why.push_str(&stderr);
+        }
+        keep_tail(&mut why, TAIL_CHARS);
+        bail!("No answer received from {label}{}", with_tail(&why));
     }
     Ok(Outcome::Finished)
+}
+
+/// The most of a CLI's stderr or stray output shown in an error.
+const TAIL_CHARS: usize = 1500;
+
+/// Whether an event leaves something visible in the conversation.
+fn shows_something(ev: &Event) -> bool {
+    match ev {
+        Event::Session(_) => false,
+        Event::Done {
+            is_error, message, ..
+        } => *is_error || message.is_some(),
+        Event::TextDelta(t) | Event::Text(t) => !t.is_empty(),
+        Event::ToolUse { .. }
+        | Event::ToolResult { .. }
+        | Event::McpFailed { .. }
+        | Event::Error(_) => true,
+    }
+}
+
+fn minutes(d: Duration) -> String {
+    match d.as_secs() {
+        s if s < 120 => format!("{s} seconds"),
+        s => format!("{} minutes", s / 60),
+    }
+}
+
+/// The end of the CLI's stderr, once it is closed.
+async fn stderr_tail(task: tokio::task::JoinHandle<String>) -> String {
+    // A grandchild (the MCP server) may keep stderr open after a kill.
+    let text = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default();
+    let mut text = text.trim().to_string();
+    keep_tail(&mut text, TAIL_CHARS);
+    text
+}
+
+/// Keep the last `max` characters of `s`.
+fn keep_tail(s: &mut String, max: usize) {
+    let n = s.chars().count();
+    if n > max {
+        let cut = s.char_indices().nth(n - max).map_or(0, |(i, _)| i);
+        s.drain(..cut);
+    }
+}
+
+fn with_tail(tail: &str) -> String {
+    if tail.is_empty() {
+        ".".into()
+    } else {
+        format!(":\n{tail}")
+    }
+}
+
+fn mcp_failed_message(server: &str, status: &str, why: &str) -> String {
+    let what = if server == "sqail" {
+        "sqail's database tools did not start".to_string()
+    } else {
+        format!("The MCP server `{server}` did not start")
+    };
+    format!(
+        "{what} (status: {status}), so the assistant cannot see the database{}",
+        with_tail(why)
+    )
+}
+
+/// Why `sqail mcp` fails: start it the way the CLI does, with no input, and
+/// return its error. It connects to the service before it reads anything,
+/// so a stopped service, a rejected token or a deleted connection shows here.
+async fn diagnose_mcp(req: &Request) -> String {
+    let Some((exe, args)) = req.mcp_command.split_first() else {
+        return "no MCP server command".into();
+    };
+    let mut cmd = tokio::process::Command::new(exe);
+    cmd.args(args)
+        .current_dir(&req.workdir)
+        .envs(req.env.iter().map(|(k, v)| (k, v)))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = match tokio::time::timeout(Duration::from_secs(20), cmd.output()).await {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => return format!("starting {exe}: {e}"),
+        Err(_) => return "it did not finish starting within 20 seconds".into(),
+    };
+    let mut text = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    keep_tail(&mut text, TAIL_CHARS);
+    if !text.is_empty() {
+        text
+    } else if out.status.success() {
+        "it starts when sqail runs it directly; the CLI's own logs may say more".into()
+    } else {
+        format!("it exited with {}", out.status)
+    }
 }
 
 /// The CLI arguments, and the prompt when it goes through stdin. Also writes
@@ -335,6 +520,7 @@ mod tests {
             workdir: dir.to_path_buf(),
             mcp_command: vec!["/opt/sqail/sqail".into(), "mcp".into()],
             env: vec![],
+            limits: Limits::default(),
         }
     }
 
@@ -388,6 +574,129 @@ mod tests {
         let (args, _) = arguments(&req(Provider::Grok, dir.path(), Some("g1"))).unwrap();
         assert!(args.contains(&"--continue".to_string()));
         assert_eq!(args[0], "--single=line one\nline two");
+    }
+
+    /// An executable shell script in `dir`.
+    #[cfg(unix)]
+    fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// One turn of a fake `claude` whose script is `body`.
+    #[cfg(unix)]
+    fn turn(body: &str, edit: impl FnOnce(&mut Request)) -> (Result<Outcome>, Vec<Event>) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = req(Provider::ClaudeCode, &dir.path().join("work"), None);
+        r.program = Some(script(dir.path(), "claude", body));
+        edit(&mut r);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (_stop, rx) = oneshot::channel();
+        let mut events = Vec::new();
+        let outcome = rt.block_on(run(r, |e| events.push(e), rx));
+        (outcome, events)
+    }
+
+    #[cfg(unix)]
+    const RESULT: &str = r#"{"type":"result","is_error":false,"result":"fine","session_id":"s"}"#;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_turn_without_an_answer_says_so_with_the_output() {
+        let (outcome, events) = turn(
+            "cat > /dev/null; echo 'Hello from plain text'; echo 'some warning' >&2",
+            |_| {},
+        );
+        let err = format!("{:#}", outcome.err().expect("an error"));
+        assert!(
+            err.starts_with("No answer received from Claude Code"),
+            "{err}"
+        );
+        assert!(err.contains("Hello from plain text"), "{err}");
+        assert!(err.contains("some warning"), "{err}");
+        assert!(events.is_empty(), "{events:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_that_exits_at_once_reports_its_stderr() {
+        // It never reads the prompt, which is larger than a pipe buffer.
+        let (outcome, _) = turn("echo 'error: unknown option --foo' >&2; exit 2", |r| {
+            r.prompt = "x".repeat(1 << 20);
+        });
+        let err = format!("{:#}", outcome.err().expect("an error"));
+        assert!(err.contains("exited with"), "{err}");
+        assert!(err.contains("unknown option --foo"), "{err}");
+        assert!(!err.to_lowercase().contains("broken pipe"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_utf8_does_not_end_the_turn() {
+        let (outcome, events) = turn(
+            &format!("cat > /dev/null; printf 'bad \\377 byte\\n'; echo '{RESULT}'"),
+            |_| {},
+        );
+        assert!(matches!(outcome, Ok(Outcome::Finished)));
+        assert!(
+            matches!(events.last(), Some(Event::Done { message: Some(m), .. }) if m == "fine"),
+            "{events:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_silent_cli_times_out() {
+        let (outcome, _) = turn("echo 'waiting for login' >&2; exec sleep 30", |r| {
+            r.limits.idle = Duration::from_millis(300);
+        });
+        let err = format!("{:#}", outcome.err().expect("an error"));
+        assert!(err.contains("printed nothing for 0 seconds"), "{err}");
+        assert!(err.contains("waiting for login"), "{err}");
+
+        let (outcome, _) = turn(
+            "while true; do echo '{\"type\":\"keepalive\"}'; sleep 0.1; done",
+            |r| r.limits.total = Duration::from_millis(500),
+        );
+        let err = format!("{:#}", outcome.err().expect("an error"));
+        assert!(err.contains("did not finish within"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_mcp_server_is_reported_with_its_reason() {
+        let init = r#"{"type":"system","subtype":"init","session_id":"s","mcp_servers":[{"name":"sqail","status":"failed"}]}"#;
+        let (outcome, events) = turn(
+            &format!("cat > /dev/null; echo '{init}'; echo '{RESULT}'"),
+            |r| {
+                let mcp = script(
+                    r.workdir.parent().unwrap(),
+                    "fake-sqail",
+                    "echo \"sqail mcp: looking up the connection: $SQAIL_TEST_WHY\" >&2; exit 1",
+                );
+                r.mcp_command = vec![mcp.to_string_lossy().into_owned(), "mcp".into()];
+                r.env = vec![("SQAIL_TEST_WHY".into(), "404 not found".into())];
+            },
+        );
+        assert!(matches!(outcome, Ok(Outcome::Finished)));
+        let error = events
+            .iter()
+            .find_map(|e| match e {
+                Event::Error(e) => Some(e.as_str()),
+                _ => None,
+            })
+            .expect("an error event");
+        assert!(
+            error.contains("sqail's database tools did not start (status: failed)"),
+            "{error}"
+        );
+        assert!(
+            error.contains("looking up the connection: 404 not found"),
+            "{error}"
+        );
     }
 
     #[test]

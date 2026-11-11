@@ -348,6 +348,7 @@ fn cli_answers_with_sqail_tools() {
             (Env::FINGERPRINT.into(), fp.clone()),
             (Env::CONNECTION.into(), f.ms.to_string()),
         ],
+        limits: cli::Limits::default(),
     };
     let (_stop, rx) = tokio::sync::oneshot::channel();
     let mut events = Vec::new();

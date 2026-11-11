@@ -28,22 +28,20 @@ fn file_path() -> PathBuf {
     crate::settings::config_dir().join("tokens.toml")
 }
 
+/// The fallback tokens. A damaged file is kept as `tokens.toml.bad` (its
+/// owner-only mode goes with it) rather than replaced by the next save.
 fn read_file() -> BTreeMap<String, String> {
-    std::fs::read_to_string(file_path())
-        .ok()
-        .and_then(|t| toml::from_str(&t).ok())
-        .unwrap_or_default()
+    crate::local::load_file(&file_path(), |t| {
+        toml::from_str(t).map_err(|e| e.message().to_string())
+    })
+    .unwrap_or_default()
+    .unwrap_or_default()
 }
 
+/// Written atomically and created owner-only (0600 on Unix) from the start,
+/// so the tokens are never readable by other users, not even briefly.
 fn write_file(map: &BTreeMap<String, String>) -> anyhow::Result<()> {
-    let path = file_path();
-    std::fs::create_dir_all(crate::settings::config_dir())?;
-    std::fs::write(&path, toml::to_string(map)?)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    crate::local::write_private(&file_path(), toml::to_string(map)?.as_bytes())?;
     Ok(())
 }
 

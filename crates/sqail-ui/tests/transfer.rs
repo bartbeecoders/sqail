@@ -203,6 +203,58 @@ line'), (3, 'Grace', NULL, '');
         s.rows(conn, "SELECT count(*) FROM dst"),
         vec![vec![serde_json::json!(3)]]
     );
+
+    // Binary values export as 0x… and import as the same bytes.
+    s.rows(
+        conn,
+        "CREATE TABLE bsrc (id INTEGER PRIMARY KEY, b BLOB);
+         INSERT INTO bsrc VALUES (1, X'DEADBEEF'), (2, X''), (3, NULL), (4, X'00FF');
+         CREATE TABLE bdst (id INTEGER PRIMARY KEY, b BLOB);",
+    );
+    round_trip(
+        &s,
+        conn,
+        Engine::Sqlite,
+        Some("main"),
+        "bsrc",
+        "SELECT * FROM bsrc ORDER BY id",
+        "bdst",
+        "SELECT id, typeof(b), length(b), hex(b) FROM {t} ORDER BY id",
+    );
+    assert_eq!(
+        s.rows(conn, "SELECT typeof(b), length(b) FROM bdst WHERE id = 1"),
+        vec![vec![serde_json::json!("blob"), serde_json::json!(4)]]
+    );
+
+    // Text that is not 0x hex is refused for a binary column.
+    let csv = s.dir.path().join("badhex.csv");
+    std::fs::write(&csv, "id,b\n10,0xdeadbeef\n11,hello\n").unwrap();
+    let columns =
+        s.rt.block_on(s.client.columns(conn, Some("main"), "bdst"))
+            .unwrap();
+    let spec = ImportSpec {
+        connection: conn,
+        engine: Engine::Sqlite,
+        schema: Some("main".into()),
+        table: "bdst".into(),
+        mapping: vec![Some(0), Some(1)],
+        columns,
+        has_header: true,
+        delimiter: b',',
+        empty_is_null: true,
+    };
+    let err =
+        s.rt.block_on(transfer::import_csv(&s.client, &csv, &spec, |_| {}))
+            .unwrap_err();
+    let err = format!("{err:#}");
+    assert!(
+        err.contains("CSV line 3, column b: 'hello' is not a binary value"),
+        "{err}"
+    );
+    assert_eq!(
+        s.rows(conn, "SELECT count(*) FROM bdst"),
+        vec![vec![serde_json::json!(4)]]
+    );
 }
 
 /// "Export whole result" re-runs only the statement behind the result, on
@@ -293,6 +345,28 @@ fn csv_round_trip_on_every_engine() {
     );
     s.rows(pg, &format!("DROP TABLE sales.{t}"));
 
+    // bytea exports as 0x… and imports as the same bytes, not their ASCII.
+    let (bs, bd) = (format!("it_bsrc_{suffix}"), format!("it_bdst_{suffix}"));
+    s.rows(
+        pg,
+        &format!(
+            "CREATE TABLE sales.{bs} (id int PRIMARY KEY, b bytea);
+             INSERT INTO sales.{bs} VALUES (1, '\\xdeadbeef'), (2, ''), (3, NULL);
+             CREATE TABLE sales.{bd} (id int PRIMARY KEY, b bytea); SELECT 1"
+        ),
+    );
+    round_trip(
+        &s,
+        pg,
+        Engine::Postgres,
+        Some("sales"),
+        &bs,
+        &format!("SELECT * FROM sales.{bs} ORDER BY id"),
+        &bd,
+        "SELECT id, octet_length(b), encode(b, 'hex') FROM sales.{t} ORDER BY id",
+    );
+    s.rows(pg, &format!("DROP TABLE sales.{bs}, sales.{bd}; SELECT 1"));
+
     let ms = s.connect(
         "ms",
         ConnectionParams::Mssql(MssqlParams {
@@ -320,6 +394,26 @@ fn csv_round_trip_on_every_engine() {
         "SELECT id, sku, name, price, active FROM sales.{t} ORDER BY id",
     );
     s.rows(ms, &format!("DROP TABLE sales.{t}"));
+
+    s.rows(
+        ms,
+        &format!(
+            "CREATE TABLE sales.{bs} (id int PRIMARY KEY, b varbinary(max), f binary(3));
+             INSERT INTO sales.{bs} VALUES (1, 0xdeadbeef, 0x0102), (2, 0x, NULL), (3, NULL, 0xffffff);
+             CREATE TABLE sales.{bd} (id int PRIMARY KEY, b varbinary(max), f binary(3)); SELECT 1"
+        ),
+    );
+    round_trip(
+        &s,
+        ms,
+        Engine::Mssql,
+        Some("sales"),
+        &bs,
+        &format!("SELECT * FROM sales.{bs} ORDER BY id"),
+        &bd,
+        "SELECT id, DATALENGTH(b), b, f FROM sales.{t} ORDER BY id",
+    );
+    s.rows(ms, &format!("DROP TABLE sales.{bs}, sales.{bd}; SELECT 1"));
 }
 
 fn rss_kb() -> u64 {

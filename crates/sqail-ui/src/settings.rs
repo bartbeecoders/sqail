@@ -194,25 +194,59 @@ impl Settings {
         config_dir().join("settings.toml")
     }
 
-    pub fn load() -> Self {
-        match std::fs::read_to_string(Self::path()) {
-            Ok(text) => toml::from_str(&text).unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "settings.toml is invalid; using defaults");
-                Self::default()
-            }),
+    /// The settings, and a message when `settings.toml` was damaged: it is
+    /// then kept as `settings.toml.bad` and the defaults are used, so the
+    /// next save does not destroy the user's services and pinned
+    /// fingerprints.
+    pub fn load() -> (Self, Option<String>) {
+        let loaded = crate::local::load_file(&Self::path(), |t| {
+            toml::from_str::<Self>(t).map_err(|e| match e.span() {
+                Some(s) => format!(
+                    "line {}: {}",
+                    t.as_bytes()[..s.start.min(t.len())]
+                        .iter()
+                        .filter(|&&b| b == b'\n')
+                        .count()
+                        + 1,
+                    e.message()
+                ),
+                None => e.message().to_string(),
+            })
+        });
+        match loaded {
+            Ok(Some(mut s)) => {
+                s.clamp();
+                (s, None)
+            }
             // First start: on Omarchy, look like the rest of the desktop.
-            Err(_) if crate::theme::omarchy_available() => Self {
-                theme: ThemePref::Omarchy,
-                ..Self::default()
-            },
-            Err(_) => Self::default(),
+            Ok(None) if crate::theme::omarchy_available() => (
+                Self {
+                    theme: ThemePref::Omarchy,
+                    ..Self::default()
+                },
+                None,
+            ),
+            Ok(None) => (Self::default(), None),
+            Err(e) => (Self::default(), Some(e)),
         }
+    }
+
+    /// Bring hand-edited values into the ranges the settings page offers;
+    /// e.g. `ui_scale = 0.1` would make the window unusable.
+    pub fn clamp(&mut self) {
+        let finite = |v: f32, default: f32| if v.is_finite() { v } else { default };
+        self.ui_scale = finite(self.ui_scale, 1.0).clamp(0.75, 2.0);
+        self.editor_font_size = finite(self.editor_font_size, 14.0).clamp(9.0, 28.0);
+        // No upper bound: the service caps it (`limits.max_rows`), and a
+        // hand-set higher cap is deliberate.
+        self.max_rows = self.max_rows.max(1);
+        self.format_indent = self.format_indent.clamp(2, 4);
+        self.assistant.max_rows = self.assistant.max_rows.clamp(1, 10_000);
     }
 
     pub fn save(&self) {
         let res = (|| -> anyhow::Result<()> {
-            std::fs::create_dir_all(config_dir())?;
-            std::fs::write(Self::path(), toml::to_string_pretty(self)?)?;
+            crate::local::write_atomic(&Self::path(), toml::to_string_pretty(self)?.as_bytes())?;
             Ok(())
         })();
         if let Err(e) = res {
@@ -258,5 +292,60 @@ mod tests {
         assert_eq!(old.theme, ThemePref::Light);
         assert!(old.confirm_close_tab);
         assert_eq!(old.ui_scale, 1.0);
+    }
+
+    #[test]
+    fn hand_edited_values_are_clamped_to_what_the_ui_offers() {
+        let mut s: Settings = toml::from_str(
+            "ui_scale = 0.1\neditor_font_size = 300.0\nmax_rows = 0\nformat_indent = 200\n\
+             [assistant]\nmax_rows = 0\n",
+        )
+        .unwrap();
+        s.clamp();
+        assert_eq!(s.ui_scale, 0.75);
+        assert_eq!(s.editor_font_size, 28.0);
+        assert_eq!(s.max_rows, 1);
+        assert_eq!(s.format_indent, 4);
+        assert_eq!(s.assistant.max_rows, 1);
+
+        let mut s = Settings {
+            ui_scale: f32::NAN,
+            editor_font_size: f32::INFINITY,
+            max_rows: 2_000_000,
+            ..Default::default()
+        };
+        s.clamp();
+        assert_eq!(s.ui_scale, 1.0);
+        assert_eq!(s.editor_font_size, 14.0);
+        assert_eq!(s.max_rows, 2_000_000, "the service caps rows, not the UI");
+        // Valid values are left alone.
+        let mut d = Settings::default();
+        d.clamp();
+        assert_eq!(d, Settings::default());
+    }
+
+    #[test]
+    fn a_damaged_settings_file_is_kept_and_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        override_config_dir(dir.path().to_path_buf());
+        let path = dir.path().join("settings.toml");
+        std::fs::write(&path, "services = [\nui_scale = 1.5\n").unwrap();
+        let (s, err) = Settings::load();
+        let err = err.expect("reported");
+        assert!(err.contains("settings.toml could not be read"), "{err}");
+        assert!(err.contains("line "), "{err}");
+        assert!(s.services.is_empty());
+        // The next save does not destroy the original.
+        s.save();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("settings.toml.bad")).unwrap(),
+            "services = [\nui_scale = 1.5\n"
+        );
+        let (_, err) = Settings::load();
+        assert_eq!(err, None, "the new file is valid");
+        // A valid file with an unusable value loads, clamped.
+        std::fs::write(&path, "ui_scale = 0.1\n").unwrap();
+        let (s, err) = Settings::load();
+        assert_eq!((s.ui_scale, err), (0.75, None));
     }
 }

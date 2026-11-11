@@ -479,6 +479,24 @@ start sqail moves its `sqail2` settings folder and saved tokens over. The files:
 | `history.jsonl`, `snippets.json`, `workspace.json` | History, snippets, open tabs |
 | `tokens.toml` | Only when the OS credential store is unavailable (mode 0600) |
 
+sqail writes these files atomically (a temporary file, flushed to disk, then
+renamed over the old one), so a crash or power cut never leaves half a file.
+If `settings.toml`, `workspace.json` or `snippets.json` can't be read
+anyway (a hand-edit typo, say), sqail renames it to `<name>.bad`
+(`<name>.1.bad` and so on if that exists), starts without it and says so in
+the status bar; a bad `settings.toml` also shows the error in the welcome
+dialog. (A bad `tokens.toml` is set aside the same way and logged.) Fix the
+`.bad` file and rename it back while sqail is closed to get your services,
+tabs or snippets back. Out-of-range values in `settings.toml` are brought
+into the range the Settings window offers: interface size 75–200 %, font
+size 9–28, indent 2–4, assistant rows 1–10,000, row limit at least 1 (its
+upper bound is the service's).
+
+Only one sqail runs per settings folder: starting a second one shows
+"sqail is already running" and closes, because two windows would overwrite
+each other's tabs and settings. To run two side by side, give the second
+its own folder with `SQAIL_CONFIG_DIR`.
+
 Example `keybindings.toml`. A list binds several shortcuts to one command,
 and an empty list `[]` removes a default shortcut. Problems (an unknown command
 or a shortcut that can't be parsed) are reported once when sqail starts.

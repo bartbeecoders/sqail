@@ -470,7 +470,13 @@ result.
 admin commands, multiple statements, unfinished strings or comments and
 functions with side effects (also when the name is quoted, like
 `"pg_sleep"(1)`, or written with `U&"…"` escapes) are refused. A quoted
-column or table that happens to share such a function's name is still fine. The service also refuses anything
+column or table that happens to share such a function's name is still fine. On
+PostgreSQL the assistant may only call functions the database marks `STABLE`
+or `IMMUTABLE` (plus a few harmless built-ins such as `random()` and
+`pg_relation_size()`); a query that calls a `VOLATILE` one, such as most
+user-defined functions, is refused with the function's name. This check
+needs the `TEMPORARY` privilege on the database, which every login has by
+default. The service also refuses anything
 but a single statement for the assistant. Every assistant query also runs in
 its own transaction that is always rolled back (read-only on PostgreSQL), so
 even something that slipped through would be undone. On SQL Server, locking

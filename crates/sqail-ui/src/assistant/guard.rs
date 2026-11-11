@@ -340,6 +340,22 @@ pub fn check_read_only(sql: &str, engine: Engine) -> Result<(), String> {
     {
         return Err("run one statement at a time".into());
     }
+    // Balanced parentheses: the query must mean the same when it is wrapped
+    // in a subquery, as the function check on PostgreSQL does.
+    let mut depth = 0i32;
+    for t in &tokens {
+        depth += match t.kind {
+            Kind::Open => 1,
+            Kind::Close => -1,
+            _ => 0,
+        };
+        if depth < 0 {
+            break;
+        }
+    }
+    if depth != 0 {
+        return Err("the parentheses in the query don't match".into());
+    }
     let word = |t: &Token| sql[t.range.clone()].to_ascii_uppercase();
     let first_word = if first.kind == Kind::Word {
         word(first)
@@ -456,6 +472,42 @@ pub fn check_read_only(sql: &str, engine: Engine) -> Result<(), String> {
     Ok(())
 }
 
+/// `sql` without its trailing `;` (and whatever space or comments follow
+/// it), for wrapping a statement that passed [`check_read_only`] in another.
+pub fn without_terminator(sql: &str, engine: Engine) -> &str {
+    let (tokens, _) = tokenize_checked(sql, Some(engine));
+    match tokens.iter().find(|t| t.kind == Kind::Semicolon) {
+        Some(t) => &sql[..t.range.start],
+        None => sql,
+    }
+}
+
+/// The names `sql` calls as functions, lowercased: a word or quoted name
+/// before `(`, or after `.` (Postgres' attribute notation, `t.f` is
+/// `f(t)`). Keywords such as `IN` or `OVER` come along; they name no
+/// function, which is harmless for the lookup this is for.
+pub fn called_names(sql: &str, engine: Engine) -> Vec<String> {
+    let (tokens, _) = tokenize_checked(sql, Some(engine));
+    let tokens: Vec<Token> = tokens
+        .into_iter()
+        .filter(|t| !matches!(t.kind, Kind::Space | Kind::Comment))
+        .collect();
+    let mut out: Vec<String> = Vec::new();
+    for (i, t) in tokens.iter().enumerate() {
+        let name = match t.kind {
+            Kind::Word => sql[t.range.clone()].to_lowercase(),
+            Kind::QuotedIdent => unquote(&sql[t.range.clone()]),
+            _ => continue,
+        };
+        let called = tokens.get(i + 1).is_some_and(|n| n.kind == Kind::Open)
+            || (i > 0 && &sql[tokens[i - 1].range.clone()] == ".");
+        if called && !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -552,6 +604,35 @@ mod tests {
                 rejected(sql, e);
             }
         }
+    }
+
+    #[test]
+    fn unbalanced_parentheses_are_rejected() {
+        for e in [Engine::Postgres, Engine::Mssql, Engine::Sqlite] {
+            rejected("SELECT (1", e);
+            rejected("SELECT 1) AS q, LATERAL (SELECT 2", e);
+            rejected("SELECT f(1))", e);
+        }
+        ok("SELECT ((1)), f(g(2)), ')' FROM t");
+    }
+
+    #[test]
+    fn called_names_are_found() {
+        assert_eq!(
+            called_names(
+                r#"SELECT my_fn(1), s."Other" (2), t.col, (1).f, count(*) FROM t WHERE a IN (1)"#,
+                Engine::Postgres
+            ),
+            ["my_fn", "other", "col", "f", "count", "in"]
+        );
+    }
+
+    #[test]
+    fn terminators_are_stripped() {
+        let pg = Engine::Postgres;
+        assert_eq!(without_terminator("SELECT 1; -- x\n;", pg), "SELECT 1");
+        assert_eq!(without_terminator("SELECT ';' -- ;", pg), "SELECT ';' -- ;");
+        assert_eq!(without_terminator("SELECT 1", pg), "SELECT 1");
     }
 
     #[test]

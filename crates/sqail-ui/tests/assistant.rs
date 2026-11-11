@@ -196,17 +196,20 @@ fn postgres_assistant_transactions_are_read_only() {
         )
         .await;
         assert!(!r[0].1, "{:?}", r[0]);
-        let err = backend
+        // A write past the guard fails: it can't be wrapped in the
+        // function check's view, and the query itself runs read-only.
+        backend
             .query(
                 "INSERT INTO sales.customers (name, email) VALUES ('x', 'assistant@test')",
                 5,
             )
             .await
             .unwrap_err();
-        assert!(
-            format!("{err:#}").contains("read-only transaction"),
-            "{err:#}"
-        );
+        let r = backend
+            .query("SELECT current_setting('transaction_read_only')", 5)
+            .await
+            .unwrap();
+        assert_eq!(r.rows[0][0], json!("on"));
         // The session is usable again afterwards.
         let r = mcp(
             &backend,
@@ -215,6 +218,120 @@ fn postgres_assistant_transactions_are_read_only() {
         .await;
         assert_eq!(r[0], ("one\n1\n(1 row)".into(), false));
         backend.close().await;
+    });
+}
+
+/// PostgreSQL: a function call passes only when the catalog marks the
+/// function as not volatile, resolved by the server (overloads, schemas,
+/// quoted names, operators); also where the probe view can't be created.
+#[test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+fn postgres_assistant_queries_call_only_non_volatile_functions() {
+    let f = fixture();
+    let s = format!("sqail_fn_{}", Uuid::new_v4().simple());
+    let role = format!("{s}_ro");
+    f.rt.block_on(async {
+        admin(
+            &f,
+            f.pg,
+            &format!(
+                "CREATE SCHEMA {s};
+                 CREATE FUNCTION {s}.vol() RETURNS int LANGUAGE sql VOLATILE AS 'SELECT 1';
+                 CREATE FUNCTION {s}.\"Mixed\"() RETURNS int LANGUAGE sql VOLATILE AS 'SELECT 1';
+                 CREATE FUNCTION {s}.calm() RETURNS int LANGUAGE sql STABLE AS 'SELECT 1';
+                 CREATE FUNCTION {s}.ov(int) RETURNS int LANGUAGE sql IMMUTABLE AS 'SELECT 1';
+                 CREATE FUNCTION {s}.ov(text) RETURNS int LANGUAGE sql VOLATILE AS 'SELECT 1';
+                 CREATE FUNCTION {s}.add_vol(int, int) RETURNS int LANGUAGE sql VOLATILE AS 'SELECT $1 + $2';
+                 CREATE OPERATOR {s}.### (LEFTARG = int, RIGHTARG = int, FUNCTION = {s}.add_vol);
+                 CREATE ROLE {role} LOGIN PASSWORD 'sqail_ro_pw';
+                 ALTER ROLE {role} SET default_transaction_read_only = on;
+                 GRANT USAGE ON SCHEMA {s} TO {role};"
+            ),
+        )
+        .await;
+        let backend = ServiceBackend::connect(&f.target, f.pg).await.unwrap();
+        let refused = [
+            format!("SELECT {s}.vol()"),
+            format!("SELECT \"{s}\".\"vol\" ()"),
+            format!("SELECT {s}.\"Mixed\"()"),
+            format!("SELECT {s}.ov('a'::text)"),
+            format!("SELECT x FROM (SELECT {s}.vol() AS x) q WHERE true"),
+            format!("SELECT 1 OPERATOR({s}.###) 2"),
+            format!("WITH c AS (SELECT {s}.vol()) SELECT 1;"),
+        ];
+        for sql in &refused {
+            let err = backend.query(sql, 5).await.unwrap_err();
+            let err = format!("{err:#}");
+            assert!(err.contains("marks VOLATILE"), "{sql}: {err}");
+        }
+        for sql in [
+            format!("SELECT {s}.calm(), {s}.ov(1), 1 AS a, 2 AS a"),
+            "SELECT random() < 2 AS r, pg_relation_size('sales.orders') >= 0 AS s".into(),
+            "SELECT count(*) FROM sales.orders o WHERE o.id = 1; -- done".into(),
+            "SHOW search_path".into(),
+            "VALUES (1)".into(),
+            "TABLE sales.customers".into(),
+            "SELECT * FROM pg_stat_activity WHERE false".into(),
+        ] {
+            let r = backend.query(&sql, 5).await;
+            assert!(r.is_ok(), "{sql}: {:#}", r.unwrap_err());
+        }
+        // A broken query reports its own error.
+        let err = backend.query("SELECT * FROM no_such_table", 5).await.unwrap_err();
+        assert!(format!("{err:#}").contains("no_such_table"), "{err:#}");
+        // Still read-only after the check.
+        let r = backend
+            .query("SELECT current_setting('transaction_read_only')", 5)
+            .await
+            .unwrap();
+        assert_eq!(r.rows[0][0], json!("on"));
+        backend.close().await;
+
+        // A login whose transactions are read-only by default can't create
+        // the probe view: the check falls back to the names called.
+        let client = Client::new(&f.target).unwrap();
+        let ro = client
+            .create_connection(&ConnectionInput {
+                name: role.clone(),
+                params: ConnectionParams::Postgres(PostgresParams {
+                    host: "127.0.0.1".into(),
+                    port: 55432,
+                    database: "sqail_test".into(),
+                    user: role.clone(),
+                    ssl_mode: PgSslMode::Disable,
+                    ssl_root_cert: None,
+                    ssl_client_cert: None,
+                }),
+                password: Some("sqail_ro_pw".into()),
+                ssl_client_key: None,
+                read_only: false,
+                color: None,
+                environment: None,
+                folder: None,
+            })
+            .await
+            .unwrap()
+            .id;
+        let backend = ServiceBackend::connect(&f.target, ro).await.unwrap();
+        let r = backend
+            .query("SELECT current_setting('default_transaction_read_only')", 5)
+            .await
+            .unwrap();
+        assert_eq!(r.rows[0][0], json!("on"));
+        for sql in &refused[..4] {
+            let err = backend.query(sql, 5).await.unwrap_err();
+            assert!(format!("{err:#}").contains("marks VOLATILE"), "{sql}: {err:#}");
+        }
+        let r = backend.query(&format!("SELECT {s}.calm(), random()"), 5).await;
+        assert!(r.is_ok(), "{:#}", r.unwrap_err());
+        backend.close().await;
+        client.delete_connection(ro).await.unwrap();
+        admin(
+            &f,
+            f.pg,
+            &format!("DROP SCHEMA {s} CASCADE; DROP OWNED BY {role}; DROP ROLE {role}"),
+        )
+        .await;
     });
 }
 

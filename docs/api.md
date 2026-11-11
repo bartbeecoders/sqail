@@ -198,8 +198,11 @@ api $URL/v1/connections/$ID/query -d '{"sql": "SELECT id, name FROM customers; U
 `started`, then call `DELETE /v1/queries/{query_id}`. The stream finishes with
 `done` and `cancelled: true`. Only the running batch stops: a session keeps
 its connection, open transaction and temp tables. SQL Server is sent a TDS
-Attention (as SSMS does); only if it does not acknowledge that within 3 s
-does the service fall back to `KILL`, which ends the session. Closing the HTTP
+Attention (as SSMS does); only if it does not acknowledge that and the
+connection receives nothing for 3 s does the service fall back to `KILL`,
+which ends the session. Rows the server sent before the Attention reached it
+are read (and dropped) on the way to the acknowledgement, which over a slow
+link can take a while; the service waits for them, up to a minute. Closing the HTTP
 connection stops the query too:
 the service notices when it can no longer deliver events, and it discards a
 connection that was interrupted instead of returning it to the pool.

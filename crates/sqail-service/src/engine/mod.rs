@@ -439,6 +439,43 @@ pub trait Cancel: Send + Sync {
     async fn cancel_abandoned(&self) -> bool {
         self.cancel().await
     }
+
+    /// A count that grows while a cancelled query is still winding down
+    /// (its connection still receiving what the server sent before the
+    /// cancel reached it), or `None` when the driver cannot tell. Callers
+    /// keep waiting past their grace period while it grows
+    /// ([`wind_down`]).
+    fn progress(&self) -> Option<u64> {
+        None
+    }
+}
+
+/// The longest a cancelled query that keeps making progress gets to stop.
+pub const WIND_DOWN_LIMIT: Duration = Duration::from_secs(60);
+
+/// Wait for `work`, a query that was just cancelled, to stop: `grace` at a
+/// time for as long as `canceller` reports progress, at most
+/// [`WIND_DOWN_LIMIT`]. Its output, or `None` when it did not stop. A slow
+/// link or a busy service can take longer than one grace period to read
+/// what the server had already sent, and giving up then would cost a
+/// session the connection the cancel was meant to keep.
+pub async fn wind_down<F: Future + Unpin>(
+    canceller: &dyn Cancel,
+    grace: Duration,
+    work: &mut F,
+) -> Option<F::Output> {
+    let start = Instant::now();
+    let mut seen = canceller.progress();
+    loop {
+        if let Ok(out) = tokio::time::timeout(grace, &mut *work).await {
+            return Some(out);
+        }
+        let now = canceller.progress();
+        if now.is_none() || now == seen || start.elapsed() >= WIND_DOWN_LIMIT {
+            return None;
+        }
+        seen = now;
+    }
 }
 
 pub type Canceller = Arc<dyn Cancel>;
@@ -479,7 +516,7 @@ pub async fn with_deadline<T>(
     if !canceller.cancel().await {
         return (Err(DbError::Timeout), true);
     }
-    let stopped = tokio::time::timeout(grace, &mut work).await.is_ok();
+    let stopped = wind_down(&*canceller, grace, &mut work).await.is_some();
     (Err(DbError::Timeout), !stopped)
 }
 
@@ -1022,5 +1059,40 @@ mod tests {
         assert!(!broken);
         assert_eq!(n(&counts.cancels), 2);
         c.release();
+    }
+
+    /// A canceller whose progress is a shared counter.
+    struct Progressing(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl Cancel for Progressing {
+        async fn cancel(&self) -> bool {
+            true
+        }
+        fn progress(&self) -> Option<u64> {
+            Some(n(&self.0) as u64)
+        }
+    }
+
+    #[tokio::test]
+    async fn winding_down_waits_while_the_query_makes_progress() {
+        let ms = Duration::from_millis(20);
+        let packets = Arc::new(AtomicUsize::new(0));
+        let canceller = Progressing(packets.clone());
+        // Stops after six grace periods, receiving all the while: waited for.
+        let ticking = async {
+            for _ in 0..30 {
+                tokio::time::sleep(ms / 5).await;
+                packets.fetch_add(1, Ordering::Relaxed);
+            }
+            7
+        };
+        tokio::pin!(ticking);
+        assert_eq!(wind_down(&canceller, ms, &mut ticking).await, Some(7));
+        // Nothing arrives: given up on after one grace period.
+        let mut quiet = std::pin::pin!(std::future::pending::<()>());
+        let t = Instant::now();
+        assert_eq!(wind_down(&canceller, ms, &mut quiet).await, None);
+        assert!(t.elapsed() < ms * 5, "{:?}", t.elapsed());
     }
 }

@@ -283,7 +283,10 @@ transaction that is **always rolled back**, so it is safe for `UPDATE` and
   changes are shown as SQL before **Apply** runs them in one transaction.
   Only `*` and plain column names are editable: aliased columns
   (`a AS b`), literals and expressions stay read-only, and the primary key
-  must be selected once, without an alias.
+  must be selected once, without an alias. Binary columns (`bytea`,
+  `varbinary`, `BLOB`) are edited as `0x` followed by hex digits, as they are
+  shown (`0x` alone is an empty value); sqail writes the bytes themselves,
+  and refuses a value that isn't valid hex before anything is sent.
 * Messages (`RAISERROR`, `RAISE NOTICE`, `PRINT`) and row counts appear in the
   *Messages* tab.
 
@@ -298,7 +301,9 @@ remember their state.
 * **Connections:** a tree of schemas, tables, views, columns, indexes, foreign
   keys and routines, loaded lazily. Right-click a table for *SELECT top 100*,
   *Design table…*, *Import CSV…*, *Script CREATE*, *Drop table…* or *Copy
-  name*; right-click a routine for *Script definition* or *Copy name*. When
+  name*. *Import CSV* reads binary columns as `0x` + hex, the way CSV
+  export writes them, and stops (changing nothing) at a value that isn't
+  valid hex. Right-click a routine for *Script definition* or *Copy name*. When
   the object can't be scripted, the new tab says why instead; on SQL Server
   that is usually a missing `VIEW DEFINITION` grant for the service's login,
   and the tab shows the `GRANT` to run (see `docs/windows-setup.md`).

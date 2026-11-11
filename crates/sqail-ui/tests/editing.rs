@@ -111,8 +111,13 @@ fn exercise(s: &Svc, conn: Uuid, engine: Engine, schema: Option<&str>, table: &s
         Some(Some("0.5".into())),
     ]);
     let n =
-        s.rt.block_on(editing::apply(&s.client, conn, engine, e.statements(rs)))
-            .unwrap();
+        s.rt.block_on(editing::apply(
+            &s.client,
+            conn,
+            engine,
+            e.statements(rs).unwrap(),
+        ))
+        .unwrap();
     assert_eq!(n, 3);
 
     let after = s.run(conn, &select);
@@ -136,7 +141,7 @@ fn exercise(s: &Svc, conn: Uuid, engine: Engine, schema: Option<&str>, table: &s
             &s.client,
             conn,
             engine,
-            stale.statements(rs),
+            stale.statements(rs).unwrap(),
         ))
         .unwrap_err();
     assert!(format!("{err:#}").contains("matched no row"), "{err:#}");
@@ -145,6 +150,109 @@ fn exercise(s: &Svc, conn: Uuid, engine: Engine, schema: Option<&str>, table: &s
         again.results[0].raw_row(0)[2].display(again.results[0].columns[2].logical),
         "12.34",
         "rolled back"
+    );
+}
+
+/// Edits on a table keyed by a binary column write real bytes: change a
+/// value, insert a row, delete a row by its binary key. `len` is the
+/// engine's byte-length function.
+fn exercise_binary(s: &Svc, conn: Uuid, engine: Engine, schema: Option<&str>, table: &str) {
+    let q = |t: &str| sqail_ui::sql::quote_ident(engine, t);
+    let qualified = match schema {
+        Some(sc) => format!("{}.{}", q(sc), q(table)),
+        None => q(table),
+    };
+    let len = match engine {
+        Engine::Postgres => "octet_length",
+        Engine::Mssql => "DATALENGTH",
+        _ => "length",
+    };
+    let select = format!("SELECT k, b FROM {qualified} ORDER BY k");
+    let run = s.run(conn, &select);
+    let rs = &run.results[0];
+    let source = editing::source_table(&select, engine).unwrap();
+    let cols =
+        s.rt.block_on(
+            s.client
+                .columns(conn, source.schema.as_deref(), &source.table),
+        )
+        .unwrap();
+    let mut e = EditState::new(engine, source.clone(), &rs.columns, &cols).unwrap();
+    assert_eq!(
+        rs.raw_row(0)[1].display(rs.columns[1].logical),
+        "0xdeadbeef"
+    );
+
+    // Invalid hex never reaches the database.
+    e.set(0, 1, Some("0xdeadbeefz".into()), rs);
+    let err = e.statements(rs).unwrap_err().to_string();
+    assert!(err.contains("is not a binary value"), "{err}");
+
+    e.set(0, 1, Some("0xDEADBEEE".into()), rs); // key 0x0102
+    e.set(1, 1, Some("0x".into()), rs); // key 0x0a0b → empty
+    e.deleted.insert(2); // key 0x0c0d
+    e.inserted
+        .push(vec![Some(Some("0xff00".into())), Some(Some("0x00".into()))]);
+    let n =
+        s.rt.block_on(editing::apply(
+            &s.client,
+            conn,
+            engine,
+            e.statements(rs).unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(n, 4);
+
+    let check = s.run(
+        conn,
+        &format!("SELECT {len}(k), k, {len}(b), b FROM {qualified} ORDER BY k"),
+    );
+    let r = &check.results[0];
+    let rows: Vec<Vec<String>> = r
+        .raw_rows()
+        .map(|row| {
+            row.iter()
+                .zip(&r.columns)
+                .map(|(c, col)| c.display(col.logical).into_owned())
+                .collect()
+        })
+        .collect();
+    let row = |a: &str, b: &str, c: &str, d: &str| -> Vec<String> {
+        [a, b, c, d].iter().map(|s| s.to_string()).collect()
+    };
+    assert_eq!(
+        rows,
+        vec![
+            row("2", "0x0102", "4", "0xdeadbeee"),
+            row("2", "0x0a0b", "0", "0x"),
+            row("2", "0xff00", "1", "0x00"),
+        ],
+        "{engine:?}"
+    );
+}
+
+#[test]
+fn sqlite_binary_edits_write_bytes() {
+    let s = svc();
+    let conn = s.connect(
+        ConnectionParams::Sqlite(SqliteParams {
+            path: s.dir.path().join("b.db").to_string_lossy().into(),
+            create: true,
+        }),
+        None,
+    );
+    s.run(
+        conn,
+        "CREATE TABLE blobs (k BLOB PRIMARY KEY, b BLOB);
+         INSERT INTO blobs VALUES (X'0102', X'DEADBEEF'), (X'0A0B', X'01'), (X'0C0D', NULL);
+         SELECT 1",
+    );
+    exercise_binary(&s, conn, Engine::Sqlite, None, "blobs");
+    let types = s.run(conn, "SELECT DISTINCT typeof(b) FROM blobs");
+    assert_eq!(
+        types.results[0].raw_row(0),
+        &[Cell::Text("blob".into())],
+        "stored as blobs, not text"
     );
 }
 
@@ -193,6 +301,16 @@ fn edits_apply_on_postgres_and_mssql() {
     );
     exercise(&s, pg, Engine::Postgres, Some("sales"), &t);
     s.run(pg, &format!("DROP TABLE sales.{t}; SELECT 1"));
+    s.run(
+        pg,
+        &format!(
+            "CREATE TABLE sales.{t} (k bytea PRIMARY KEY, b bytea);
+         INSERT INTO sales.{t} VALUES ('\\x0102', '\\xdeadbeef'), ('\\x0a0b', '\\x01'), ('\\x0c0d', NULL);
+         SELECT 1"
+        ),
+    );
+    exercise_binary(&s, pg, Engine::Postgres, Some("sales"), &t);
+    s.run(pg, &format!("DROP TABLE sales.{t}; SELECT 1"));
 
     let ms = s.connect(
         ConnectionParams::Mssql(MssqlParams {
@@ -216,5 +334,16 @@ fn edits_apply_on_postgres_and_mssql() {
         ),
     );
     exercise(&s, ms, Engine::Mssql, Some("sales"), &t);
+    s.run(ms, &format!("DROP TABLE sales.{t}; SELECT 1"));
+    // binary(2): a fixed-length key compared with the varbinary parameter.
+    s.run(
+        ms,
+        &format!(
+            "CREATE TABLE sales.{t} (k binary(2) PRIMARY KEY, b varbinary(max));
+         INSERT INTO sales.{t} VALUES (0x0102, 0xdeadbeef), (0x0a0b, 0x01), (0x0c0d, NULL);
+         SELECT 1"
+        ),
+    );
+    exercise_binary(&s, ms, Engine::Mssql, Some("sales"), &t);
     s.run(ms, &format!("DROP TABLE sales.{t}; SELECT 1"));
 }

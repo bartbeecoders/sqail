@@ -450,10 +450,14 @@ most last quarter?"* or *"Why is the query in my editor slow?"*. The answer
 streams in. Each query it proposes gets **Insert** (at the cursor in the
 editor), **New tab** and **Copy** buttons. Follow-up questions continue the
 same conversation; **New chat** starts over. Enter sends, Shift+Enter adds a
-line. *Include editor SQL* sends the active tab's SQL along with your question.
+line. *Include editor SQL* sends the active tab's SQL along with your question
+(at most 8,000 characters; the assistant is told when it was cut off).
 
 A conversation stays on the connection of the tab that was active when it
-started (shown under the title). The assistant can:
+started (shown under the title). When the active tab is on another
+connection, its SQL is not sent (the conversation says so) and **Insert** is
+off; use **New tab**, which opens on the chat's connection, or start a new
+chat. The assistant can:
 
 | Tool | What it does |
 |---|---|
@@ -495,6 +499,19 @@ allowed to share with them.
 
 On Windows, sqail uses the native `grok.exe` behind npm's `grok.cmd`. If it
 can't find it, set `grok_path`.
+
+**When a turn fails** the conversation shows why, in red:
+
+* *sqail's database tools did not start* — the CLI could not start `sqail mcp`.
+  sqail runs it once itself and shows its error (service not running, token
+  rejected, connection deleted, …).
+* *No answer received* — the CLI ended without an answer; its output and the
+  end of its error output follow.
+* *printed nothing for 5 minutes* — the CLI went quiet (for example, it waits
+  for a sign-in in a terminal), so sqail stopped it. A turn also stops after
+  30 minutes.
+* *This chat's connection … is no longer available* — the connection was
+  deleted, or sqail is connected to another service. Start a **New chat**.
 
 ## Settings
 

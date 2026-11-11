@@ -120,6 +120,9 @@ pub fn ui(ui: &mut egui::Ui, app: &mut SqailApp) {
     for a in actions {
         match a {
             Action::Insert(sql) => {
+                if !app.assistant_tab_matches() {
+                    continue;
+                }
                 if let Some(t) = app.tabs.get_mut(app.active) {
                     t.insert_at_cursor(&sql);
                 }
@@ -175,6 +178,13 @@ fn input(ui: &mut egui::Ui, app: &mut SqailApp) {
         {
             app.settings.save();
         }
+        if !app.assistant_tab_matches() {
+            ui.label(RichText::new("⚠ tab on another connection").small().weak())
+                .on_hover_text(
+                    "The active tab is not on this chat's connection: its SQL is not sent and \
+                     Insert is off. Switch to a tab on the chat's connection, or start a new chat.",
+                );
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if app.assistant.is_running() {
                 if ui.button("■ Stop").clicked() {
@@ -209,6 +219,7 @@ fn conversation(ui: &mut egui::Ui, app: &SqailApp, actions: &mut Vec<Action>) {
         return;
     }
     let engine = app.assistant.conversation.as_ref().map(|c| c.engine);
+    let can_insert = app.assistant_tab_matches();
     for entry in &app.assistant.entries {
         match entry {
             Entry::User(text) => {
@@ -222,7 +233,7 @@ fn conversation(ui: &mut egui::Ui, app: &SqailApp, actions: &mut Vec<Action>) {
                         ui.label(text);
                     });
             }
-            Entry::Answer(text) => answer(ui, text, engine, actions),
+            Entry::Answer(text) => answer(ui, text, engine, can_insert, actions),
             Entry::Tool {
                 id,
                 name,
@@ -289,6 +300,7 @@ fn answer(
     ui: &mut egui::Ui,
     text: &str,
     engine: Option<sqail_client::proto::Engine>,
+    can_insert: bool,
     actions: &mut Vec<Action>,
 ) {
     for seg in segments(text) {
@@ -337,8 +349,12 @@ fn answer(
                             ui.horizontal(|ui| {
                                 let code = code.trim().to_string();
                                 if ui
-                                    .small_button("Insert")
+                                    .add_enabled(can_insert, egui::Button::new("Insert").small())
                                     .on_hover_text("Insert at the cursor in the editor")
+                                    .on_disabled_hover_text(
+                                        "The active tab is not on this chat's connection; \
+                                         use New tab",
+                                    )
                                     .clicked()
                                 {
                                     actions.push(Action::Insert(code.clone()));

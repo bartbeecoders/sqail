@@ -253,6 +253,13 @@ pub trait Cancel: Send + Sync {
     /// Returns whether the request reached the server; if not, the caller
     /// should not wait for the query to wind down but drop the connection.
     async fn cancel(&self) -> bool;
+
+    /// Like [`cancel`](Self::cancel), for a query whose connection is about
+    /// to be closed without being polled again. A driver whose cancel needs
+    /// the running query's future polled (SQL Server's Attention) overrides it.
+    async fn cancel_abandoned(&self) -> bool {
+        self.cancel().await
+    }
 }
 
 pub type Canceller = Arc<dyn Cancel>;
@@ -512,7 +519,8 @@ impl Drop for Pooled {
         if let Ok(rt) = tokio::runtime::Handle::try_current() {
             rt.spawn(async move {
                 let canceller = conn.canceller();
-                let _ = tokio::time::timeout(ABANDON_CANCEL_TIMEOUT, canceller.cancel()).await;
+                let _ = tokio::time::timeout(ABANDON_CANCEL_TIMEOUT, canceller.cancel_abandoned())
+                    .await;
                 drop(conn);
                 drop(permit);
             });

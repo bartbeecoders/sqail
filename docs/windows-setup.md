@@ -103,9 +103,11 @@ returns no source, and sqail says which grant is missing. To allow it for one
 schema only: `GRANT VIEW DEFINITION ON SCHEMA::dbo TO sqail_reader;`. Modules
 created `WITH ENCRYPTION` have no readable source for anyone.
 
-Optional: `GRANT ALTER ANY CONNECTION TO sqail_reader;` (on `master`) lets
-**Cancel** stop a running query with `KILL` straight away. Without it,
-sqail still stops the query by closing its connection.
+**Cancel** sends SQL Server an Attention, as SSMS does, which needs no
+permission. Optional: `GRANT ALTER ANY CONNECTION TO sqail_reader;` (on
+`master`) lets sqail fall back to `KILL` when the server does not
+acknowledge the Attention in time. Without it, sqail closes the connection
+instead.
 
 > **Read-only profiles:** a profile marked *read-only* tells SQL Server
 > `ApplicationIntent=ReadOnly`, which only routes to readable secondaries.

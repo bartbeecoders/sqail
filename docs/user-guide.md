@@ -236,6 +236,9 @@ connection dropped), the next run opens a new session. When a transaction was
 open, sqail doesn't run the statement: it reports that the session was lost
 and the transaction rolled back, and clears **Transaction open**. Run the
 statement again to start over in a new transaction.
+**Esc** stops only the running statement: the session keeps its open
+transaction, temp tables and `SET` options, as in SSMS. (On SQL Server with
+`SET XACT_ABORT ON`, the server rolls the transaction back.)
 
 **Plans:** *Explain* (Ctrl+E) shows the estimated plan as a tree, with cost
 and row estimates and the most expensive nodes highlighted. *Explain analyze*

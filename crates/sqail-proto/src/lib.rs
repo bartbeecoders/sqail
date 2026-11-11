@@ -735,15 +735,52 @@ pub struct TableInfo {
     pub kind: TableKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct ColumnInfo {
     pub name: String,
     pub ordinal: i64,
     pub data_type: String,
     pub nullable: bool,
+    /// The default expression. None for identity and generated columns,
+    /// whose values come from [`ColumnInfo::identity`] and
+    /// [`ColumnInfo::generated`].
     pub default: Option<String>,
     pub primary_key: bool,
+    /// The column numbers itself: PostgreSQL `GENERATED … AS IDENTITY`,
+    /// SQL Server `IDENTITY`, SQLite's `INTEGER PRIMARY KEY` (the rowid).
+    /// None from services older than this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<IdentityInfo>,
+    /// The column is computed from the others: PostgreSQL and SQLite
+    /// `GENERATED ALWAYS AS (…)`, SQL Server computed columns. None from
+    /// services older than this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated: Option<GeneratedInfo>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct IdentityInfo {
+    /// Values can't be written: PostgreSQL `GENERATED ALWAYS`, SQL Server
+    /// `IDENTITY` (short of `SET IDENTITY_INSERT`). False for PostgreSQL
+    /// `BY DEFAULT` and SQLite, where a written value wins.
+    pub always: bool,
+    /// The first value, as the engine prints it; None when unknown (SQLite).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<String>,
+    /// The step between values; None when unknown (SQLite).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub increment: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct GeneratedInfo {
+    /// The expression, as the engine prints it.
+    pub expression: String,
+    /// Stored (SQL Server `PERSISTED`) rather than computed when read.
+    pub stored: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -775,7 +812,7 @@ pub struct IndexInfo {
     pub clustered: Option<bool>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct ForeignKeyInfo {
     pub name: String,
@@ -783,6 +820,84 @@ pub struct ForeignKeyInfo {
     pub ref_schema: Option<String>,
     pub ref_table: String,
     pub ref_columns: Vec<String>,
+    /// What happens to the row when the referenced row is deleted. None
+    /// from services older than this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_delete: Option<ReferentialAction>,
+    /// What happens when the referenced key changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_update: Option<ReferentialAction>,
+    /// Further clauses the key was declared with, as DDL: PostgreSQL
+    /// `MATCH FULL`, `DEFERRABLE`, `INITIALLY DEFERRED`, `NOT VALID`; SQL
+    /// Server `NOT FOR REPLICATION`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ReferentialAction {
+    #[default]
+    NoAction,
+    Restrict,
+    Cascade,
+    SetNull,
+    SetDefault,
+}
+
+impl ReferentialAction {
+    pub const ALL: [Self; 5] = [
+        Self::NoAction,
+        Self::Restrict,
+        Self::Cascade,
+        Self::SetNull,
+        Self::SetDefault,
+    ];
+
+    /// As written after `ON DELETE` / `ON UPDATE`.
+    pub fn sql(self) -> &'static str {
+        match self {
+            Self::NoAction => "NO ACTION",
+            Self::Restrict => "RESTRICT",
+            Self::Cascade => "CASCADE",
+            Self::SetNull => "SET NULL",
+            Self::SetDefault => "SET DEFAULT",
+        }
+    }
+
+    /// From the engine's spelling (`SET NULL`, `SET_NULL`, `c`, …).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_uppercase().replace('_', " ").as_str() {
+            "NO ACTION" | "A" => Some(Self::NoAction),
+            "RESTRICT" | "R" => Some(Self::Restrict),
+            "CASCADE" | "C" => Some(Self::Cascade),
+            "SET NULL" | "N" => Some(Self::SetNull),
+            "SET DEFAULT" | "D" => Some(Self::SetDefault),
+            _ => None,
+        }
+    }
+}
+
+/// A foreign key of another table (or of the table itself) that references
+/// a table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct ReferencingKey {
+    /// The table that holds the key.
+    pub schema: Option<String>,
+    pub table: String,
+    pub key: ForeignKeyInfo,
+}
+
+/// A CHECK constraint.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct CheckInfo {
+    /// Empty when the engine keeps no name (SQLite, unnamed).
+    pub name: String,
+    /// The condition, as the engine prints it.
+    pub expression: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

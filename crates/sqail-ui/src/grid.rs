@@ -889,9 +889,9 @@ fn grid_ui(
                                 if sort.clicked() {
                                     clicked_sort = Some(c);
                                 }
-                                let read_only = edit.as_ref().is_some_and(|e| !e.editable(c));
+                                let read_only = edit.as_ref().and_then(|e| e.read_only_reason(c));
                                 let mut name = RichText::new(col.name.as_str()).strong();
-                                if read_only {
+                                if read_only.is_some() {
                                     name = name.weak();
                                 }
                                 let resp = ui
@@ -906,11 +906,9 @@ fn grid_ui(
                                         "{} · {}{}\nClick to select this column. Shift+click extends. The arrow sorts.\nDouble-click the column's right border to fit its values.",
                                         col.name,
                                         col.type_name,
-                                        if read_only {
-                                            " · read-only (not a table column)"
-                                        } else {
-                                            ""
-                                        }
+                                        read_only
+                                            .map(|why| format!(" · read-only ({why})"))
+                                            .unwrap_or_default()
                                     ));
                                 if resp.clicked() {
                                     clicked_col = Some((c, ui.input(|i| i.modifiers.shift)));

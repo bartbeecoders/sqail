@@ -551,6 +551,7 @@ mod tests {
                     nullable: false,
                     default: None,
                     primary_key: true,
+                    ..Default::default()
                 }],
                 vec![],
                 vec![ForeignKeyInfo {
@@ -559,6 +560,7 @@ mod tests {
                     ref_schema: Some("sales".into()),
                     ref_table: "customers".into(),
                     ref_columns: vec!["id".into()],
+                    ..Default::default()
                 }],
             ))
         }

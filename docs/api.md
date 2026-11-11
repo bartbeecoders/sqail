@@ -234,10 +234,18 @@ already failed (or a SQL Server one that can no longer commit) gets 400.
 
 All schema routes are `GET`s under `/v1/connections/{id}/schema/`:
 `databases`, `schemas`, `tables?schema=`, `routines?schema=`, and
-`columns`, `indexes`, `foreign-keys` and `privileges`, each with
-`?schema=&name=` for a table (`schema` defaults to the connection's current
-schema). An index's `constraint` flag says it backs a `PRIMARY KEY` or
-`UNIQUE` constraint. `privileges` lists the table's grants (owner excluded),
+`columns`, `indexes`, `foreign-keys`, `referencing-keys`, `checks` and
+`privileges`, each with `?schema=&name=` for a table (`schema` defaults to
+the connection's current schema). `referencing-keys` lists the foreign keys,
+in any table, that reference the table, each with the table that holds it.
+A foreign key's optional `on_delete` / `on_update` (`no_action`,
+`restrict`, `cascade`, `set_null`, `set_default`) and `options` (`MATCH
+FULL`, `DEFERRABLE`, `NOT FOR REPLICATION`, …) describe how it was
+declared. `checks` lists CHECK constraints by name and expression (SQLite
+keeps no names for unnamed ones). A column's optional `identity` (`always`, `seed`, `increment`)
+and `generated` (`expression`, `stored`) describe identity and generated
+(computed) columns; such a column has no `default`. An index's `constraint`
+flag says it backs a `PRIMARY KEY` or `UNIQUE` constraint. `privileges` lists the table's grants (owner excluded),
 its owner (Postgres) and the roles and users that could be granted
 privileges; `supported` is `false` on SQLite. `GET
 /v1/connections/{id}/ddl?schema=&name=` returns a best-effort `CREATE`

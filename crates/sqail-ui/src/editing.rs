@@ -407,7 +407,16 @@ impl EditState {
     }
 
     pub fn editable(&self, col: usize) -> bool {
-        self.target.get(col).is_some_and(Option::is_some)
+        self.read_only_reason(col).is_none()
+    }
+
+    /// Why result column `col` can't be edited; None when it can. Columns
+    /// the database fills are left out of INSERTs too.
+    pub fn read_only_reason(&self, col: usize) -> Option<&'static str> {
+        let Some(Some(c)) = self.target.get(col) else {
+            return Some("not a table column");
+        };
+        locked_column(self.engine, c)
     }
 
     pub fn pending(&self) -> usize {
@@ -554,6 +563,29 @@ impl EditState {
         }
         Ok(out)
     }
+}
+
+/// Why the database won't take a written value for table column `c`:
+/// identity columns it always numbers, generated (computed) columns, and
+/// SQL Server rowversion columns.
+pub fn locked_column(engine: Engine, c: &ColumnInfo) -> Option<&'static str> {
+    if c.generated.is_some() {
+        return Some(if engine == Engine::Mssql {
+            "computed column: the database calculates it"
+        } else {
+            "generated column: the database calculates it"
+        });
+    }
+    if c.identity.as_ref().is_some_and(|i| i.always) {
+        return Some("identity column: the database numbers it");
+    }
+    let ty = c.data_type.trim();
+    if engine == Engine::Mssql
+        && (ty.eq_ignore_ascii_case("timestamp") || ty.eq_ignore_ascii_case("rowversion"))
+    {
+        return Some("rowversion column: the database sets it");
+    }
+    None
 }
 
 /// Result column `c` holds bytes, shown as `0x` + hex.
@@ -789,6 +821,7 @@ mod tests {
             nullable: !pk,
             default: None,
             primary_key: pk,
+            ..Default::default()
         }
     }
 
@@ -879,6 +912,7 @@ mod tests {
             nullable: !pk,
             default: None,
             primary_key: pk,
+            ..Default::default()
         };
         let rcols = vec![
             Column {
@@ -931,12 +965,74 @@ mod tests {
             nullable: false,
             default: None,
             primary_key: true,
+            ..Default::default()
         }];
         let source = source_table("SELECT price FROM t", Engine::Postgres).unwrap();
         let err = EditState::new(Engine::Postgres, source, &rcols, &tcols)
             .err()
             .unwrap();
         assert!(err.to_string().contains("primary key"));
+    }
+
+    #[test]
+    fn columns_the_database_fills_are_read_only() {
+        use sqail_client::proto::{GeneratedInfo, IdentityInfo};
+        let tcol = |n: &str, t: &str| ColumnInfo {
+            name: n.into(),
+            ordinal: 0,
+            data_type: t.into(),
+            nullable: true,
+            ..Default::default()
+        };
+        let tcols = vec![
+            ColumnInfo {
+                primary_key: true,
+                identity: Some(IdentityInfo {
+                    always: true,
+                    ..Default::default()
+                }),
+                ..tcol("id", "int")
+            },
+            ColumnInfo {
+                generated: Some(GeneratedInfo {
+                    expression: "([qty]*(2))".into(),
+                    stored: false,
+                }),
+                ..tcol("total", "int")
+            },
+            tcol("rv", "timestamp"),
+            tcol("qty", "int"),
+            ColumnInfo {
+                identity: Some(IdentityInfo::default()),
+                ..tcol("seq", "int")
+            },
+        ];
+        let rcols: Vec<Column> = ["id", "total", "rv", "qty", "seq"]
+            .iter()
+            .map(|n| Column {
+                name: (*n).into(),
+                type_name: "int".into(),
+                logical: LogicalType::Int,
+            })
+            .collect();
+        let source = source_table("SELECT id, total, rv, qty, seq FROM t", Engine::Mssql).unwrap();
+        let mut e = EditState::new(Engine::Mssql, source, &rcols, &tcols).unwrap();
+        let reasons: Vec<Option<&str>> = (0..5).map(|c| e.read_only_reason(c)).collect();
+        assert_eq!(
+            reasons,
+            [
+                Some("identity column: the database numbers it"),
+                Some("computed column: the database calculates it"),
+                Some("rowversion column: the database sets it"),
+                None,
+                None, // by default: a written value wins
+            ]
+        );
+        assert_eq!(e.pk, vec![0], "an identity key still identifies rows");
+        let rs = ResultSet::for_test(rcols, vec![vec![Cell::Int(1); 5]]);
+        e.inserted.push(vec![Some(Some("7".into())); 5]);
+        let st = e.statements(&rs).unwrap();
+        assert_eq!(st[0].0, "INSERT INTO [t] ([qty], [seq]) VALUES (@P1, @P2)");
     }
 
     #[test]
@@ -1023,6 +1119,7 @@ mod tests {
                 nullable: i == 1,
                 default: None,
                 primary_key: i == 0,
+                ..Default::default()
             })
             .collect();
         let source = source_table("SELECT k, b FROM t", engine).unwrap();

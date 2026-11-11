@@ -11,7 +11,7 @@ use sqail_client::{Client, On};
 use uuid::Uuid;
 
 use crate::app::{Msg, SqailApp};
-use model::{Design, IndexPart, Plan, Status};
+use model::{Design, IndexPart, Plan, Status, ValueKind};
 
 const RED: Color32 = Color32::from_rgb(0xd6, 0x45, 0x45);
 const GREEN: Color32 = Color32::from_rgb(0x3f, 0xa3, 0x5b);
@@ -161,11 +161,13 @@ pub async fn fetch(
     table: &str,
 ) -> Result<Loaded, String> {
     let s = Some(schema);
-    let (cols, idx, fks, privs) = futures::join!(
+    let (cols, idx, fks, privs, checks, referencing) = futures::join!(
         client.columns(conn, s, table),
         client.indexes(conn, s, table),
         client.foreign_keys(conn, s, table),
         client.privileges(conn, s, table),
+        client.checks(conn, s, table),
+        client.referencing_keys(conn, s, table),
     );
     let err = |e: sqail_client::Error| e.to_string();
     let cols = cols.map_err(err)?;
@@ -179,10 +181,18 @@ pub async fn fetch(
         .as_ref()
         .map(|p| p.grants.clone())
         .unwrap_or_default();
-    Ok(Loaded {
-        design: Design::from_catalog(engine, schema, table, &cols, &idx, fks, &grants),
-        privileges,
-    })
+    let mut design = Design::from_catalog(engine, schema, table, &cols, &idx, fks, &grants);
+    // A service older than these calls answers 404: the constraints stay
+    // unknown, as before.
+    let older = |e: &sqail_client::Error| e.status() == Some(404);
+    match (checks, referencing) {
+        (Ok(checks), Ok(referencing)) => {
+            design = design.with_constraints(&checks, referencing);
+        }
+        (Err(e), _) | (_, Err(e)) if !older(&e) => return Err(err(e)),
+        _ => {}
+    }
+    Ok(Loaded { design, privileges })
 }
 
 /// Handle [`Msg::DesignerLoaded`].
@@ -555,6 +565,7 @@ fn columns(ui: &mut egui::Ui, d: &mut Designer) {
     let mut remove = None;
     let mut toggle_pk = None;
     let mut moved = None;
+    let mut set_kind = None;
     let row_h = ui.spacing().interact_size.y;
     egui::Grid::new(("designer_columns", id))
         .striped(true)
@@ -567,44 +578,158 @@ fn columns(ui: &mut egui::Ui, d: &mut Designer) {
             ui.label(RichText::new("Type").strong());
             ui.label(RichText::new("Null").strong())
                 .on_hover_text("Allows NULL");
-            ui.label(RichText::new("Default").strong());
+            ui.label(RichText::new("Default").strong()).on_hover_text(
+                "A default, or where the database takes the values from: \
+                 an identity or a generated (computed) expression",
+            );
             ui.label("");
             ui.label("");
             ui.end_row();
             let ids: Vec<u64> = design.table.columns.iter().map(|c| c.id).collect();
             let last = ids.len().saturating_sub(1);
+            let kinds: &[ValueKind] = match engine {
+                Engine::Postgres => &[
+                    ValueKind::Plain,
+                    ValueKind::IdentityByDefault,
+                    ValueKind::IdentityAlways,
+                    ValueKind::Generated,
+                ],
+                Engine::Mssql => &[
+                    ValueKind::Plain,
+                    ValueKind::IdentityAlways,
+                    ValueKind::Generated,
+                ],
+                Engine::Sqlite | Engine::Unknown => &[ValueKind::Plain, ValueKind::Generated],
+            };
             for (row, cid) in ids.iter().copied().enumerate() {
                 let mut in_pk = design.in_pk(cid);
                 if ui.checkbox(&mut in_pk, "").changed() {
                     toggle_pk = Some(cid);
                 }
                 let status = design.column_status(cid);
+                let allowed: Vec<(ValueKind, Result<(), &str>)> = kinds
+                    .iter()
+                    .map(|k| (*k, design.kind_allowed(cid, *k)))
+                    .collect();
+                let type_ok = design.type_editable(cid);
+                let expr_ok = design.expression_editable(cid);
+                let stored_ok = design.stored_editable(cid);
                 let c = design.column_mut(cid).expect("listed");
+                let kind = ValueKind::of(c);
+                // SQLite's rowid can be NULL-less only; identity columns
+                // elsewhere are NOT NULL.
+                let identity = c.identity.is_some() && engine != Engine::Sqlite;
                 ui.add_sized([170.0, row_h], egui::TextEdit::singleline(&mut c.name));
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
-                    ui.add(
+                    let ty = ui.add_enabled(
+                        type_ok.is_ok(),
                         egui::TextEdit::singleline(&mut c.data_type)
                             .desired_width(170.0)
                             .font(egui::TextStyle::Monospace),
                     );
-                    ui.menu_button("⏷", |ui| {
-                        for t in model::type_suggestions(engine) {
-                            if ui.button(RichText::new(*t).monospace()).clicked() {
-                                c.data_type = t.to_string();
+                    if let Err(why) = type_ok {
+                        ty.on_disabled_hover_text(why);
+                    }
+                    ui.add_enabled_ui(type_ok.is_ok(), |ui| {
+                        ui.menu_button("⏷", |ui| {
+                            for t in model::type_suggestions(engine) {
+                                if ui.button(RichText::new(*t).monospace()).clicked() {
+                                    c.data_type = t.to_string();
+                                    ui.close();
+                                }
+                            }
+                        });
+                    });
+                });
+                let why_not_null = if in_pk {
+                    Some("Key columns cannot be NULL")
+                } else if identity {
+                    Some("Identity columns cannot be NULL")
+                } else {
+                    type_ok.err()
+                };
+                let null = ui.add_enabled(
+                    why_not_null.is_none(),
+                    egui::Checkbox::new(&mut c.nullable, ""),
+                );
+                if let Some(why) = why_not_null {
+                    null.on_disabled_hover_text(why);
+                }
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    let menu = ui.menu_button(format!("{} ⏷", kind.label(engine)), |ui| {
+                        for (k, ok) in &allowed {
+                            let b = ui.add_enabled(
+                                ok.is_ok(),
+                                egui::Button::selectable(kind == *k, k.label(engine)),
+                            );
+                            if let Err(why) = ok {
+                                b.clone().on_disabled_hover_text(*why);
+                            }
+                            if b.clicked() {
+                                set_kind = Some((cid, *k));
                                 ui.close();
                             }
                         }
+                        if let Some(g) = c.generated.as_mut() {
+                            ui.separator();
+                            let label = if engine == Engine::Mssql {
+                                "Persisted"
+                            } else {
+                                "Stored"
+                            };
+                            let s = ui.add_enabled(
+                                stored_ok.is_ok(),
+                                egui::Checkbox::new(&mut g.stored, label),
+                            );
+                            if let Err(why) = stored_ok {
+                                s.on_disabled_hover_text(why);
+                            }
+                        }
                     });
+                    menu.response.on_hover_text(match kind {
+                        ValueKind::Plain => {
+                            "The value when none is given; click to choose \
+                                             identity or generated instead"
+                        }
+                        ValueKind::IdentityAlways | ValueKind::IdentityByDefault => {
+                            "The database numbers this column"
+                        }
+                        ValueKind::Generated => "Computed from the expression",
+                    });
+                    match (kind, c.generated.as_mut()) {
+                        (ValueKind::Generated, Some(g)) => {
+                            let e = ui.add_enabled(
+                                expr_ok.is_ok(),
+                                egui::TextEdit::singleline(&mut g.expression)
+                                    .hint_text("expression")
+                                    .desired_width(150.0)
+                                    .font(egui::TextStyle::Monospace),
+                            );
+                            if let Err(why) = expr_ok {
+                                e.on_disabled_hover_text(why);
+                            }
+                        }
+                        (ValueKind::Plain, _) => {
+                            ui.add_sized(
+                                [150.0, row_h],
+                                egui::TextEdit::singleline(&mut c.default)
+                                    .hint_text("none")
+                                    .font(egui::TextStyle::Monospace),
+                            );
+                        }
+                        _ => {
+                            if let Some(i) = &c.identity
+                                && let (Some(s), Some(n)) = (&i.seed, &i.increment)
+                            {
+                                ui.label(
+                                    RichText::new(format!("from {s}, step {n}")).small().weak(),
+                                );
+                            }
+                        }
+                    }
                 });
-                ui.add_enabled(!in_pk, egui::Checkbox::new(&mut c.nullable, ""))
-                    .on_disabled_hover_text("Key columns cannot be NULL");
-                ui.add_sized(
-                    [150.0, row_h],
-                    egui::TextEdit::singleline(&mut c.default)
-                        .hint_text("none")
-                        .font(egui::TextStyle::Monospace),
-                );
                 status_label(ui, status);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
@@ -635,6 +760,9 @@ fn columns(ui: &mut egui::Ui, d: &mut Designer) {
         });
     if let Some(c) = toggle_pk {
         design.toggle_pk(c);
+    }
+    if let Some((c, k)) = set_kind {
+        design.set_kind(c, k);
     }
     if let Some(c) = remove {
         design.remove_column(c);

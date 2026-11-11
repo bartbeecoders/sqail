@@ -357,6 +357,24 @@
         ],
         "type": "object"
       },
+      "CheckInfo": {
+        "description": "A CHECK constraint.",
+        "properties": {
+          "expression": {
+            "description": "The condition, as the engine prints it.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Empty when the engine keeps no name (SQLite, unnamed).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "expression"
+        ],
+        "type": "object"
+      },
       "Column": {
         "properties": {
           "logical": {
@@ -383,9 +401,32 @@
             "type": "string"
           },
           "default": {
+            "description": "The default expression. None for identity and generated columns,\nwhose values come from [`ColumnInfo::identity`] and\n[`ColumnInfo::generated`].",
             "type": [
               "string",
               "null"
+            ]
+          },
+          "generated": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GeneratedInfo",
+                "description": "The column is computed from the others: PostgreSQL and SQLite\n`GENERATED ALWAYS AS (…)`, SQL Server computed columns. None from\nservices older than this field."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "identity": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/IdentityInfo",
+                "description": "The column numbers itself: PostgreSQL `GENERATED … AS IDENTITY`,\nSQL Server `IDENTITY`, SQLite's `INTEGER PRIMARY KEY` (the rowid).\nNone from services older than this field."
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "name": {
@@ -757,6 +798,35 @@
           "name": {
             "type": "string"
           },
+          "on_delete": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReferentialAction",
+                "description": "What happens to the row when the referenced row is deleted. None\nfrom services older than this field."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "on_update": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReferentialAction",
+                "description": "What happens when the referenced key changes."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "options": {
+            "description": "Further clauses the key was declared with, as DDL: PostgreSQL\n`MATCH FULL`, `DEFERRABLE`, `INITIALLY DEFERRED`, `NOT VALID`; SQL\nServer `NOT FOR REPLICATION`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "ref_columns": {
             "items": {
               "type": "string"
@@ -781,6 +851,23 @@
         ],
         "type": "object"
       },
+      "GeneratedInfo": {
+        "properties": {
+          "expression": {
+            "description": "The expression, as the engine prints it.",
+            "type": "string"
+          },
+          "stored": {
+            "description": "Stored (SQL Server `PERSISTED`) rather than computed when read.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "expression",
+          "stored"
+        ],
+        "type": "object"
+      },
       "Health": {
         "description": "`GET /v1/health` — unauthenticated liveness probe.",
         "properties": {
@@ -794,6 +881,32 @@
         "required": [
           "status",
           "version"
+        ],
+        "type": "object"
+      },
+      "IdentityInfo": {
+        "properties": {
+          "always": {
+            "description": "Values can't be written: PostgreSQL `GENERATED ALWAYS`, SQL Server\n`IDENTITY` (short of `SET IDENTITY_INSERT`). False for PostgreSQL\n`BY DEFAULT` and SQLite, where a written value wins.",
+            "type": "boolean"
+          },
+          "increment": {
+            "description": "The step between values; None when unknown (SQLite).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "seed": {
+            "description": "The first value, as the engine prints it; None when unknown (SQLite).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "always"
         ],
         "type": "object"
       },
@@ -1595,6 +1708,39 @@
           "sql"
         ],
         "type": "object"
+      },
+      "ReferencingKey": {
+        "description": "A foreign key of another table (or of the table itself) that references\na table.",
+        "properties": {
+          "key": {
+            "$ref": "#/components/schemas/ForeignKeyInfo"
+          },
+          "schema": {
+            "description": "The table that holds the key.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "table": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "table",
+          "key"
+        ],
+        "type": "object"
+      },
+      "ReferentialAction": {
+        "enum": [
+          "no_action",
+          "restrict",
+          "cascade",
+          "set_null",
+          "set_default"
+        ],
+        "type": "string"
       },
       "Restarting": {
         "properties": {
@@ -2682,6 +2828,61 @@
         ]
       }
     },
+    "/v1/connections/{id}/schema/checks": {
+      "get": {
+        "operationId": "checks",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Defaults to the connection's current schema.",
+            "in": "query",
+            "name": "schema",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Table, view or routine name.",
+            "in": "query",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/CheckInfo"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          }
+        },
+        "summary": "A table's CHECK constraints.",
+        "tags": [
+          "schema"
+        ]
+      }
+    },
     "/v1/connections/{id}/schema/columns": {
       "get": {
         "operationId": "columns",
@@ -2924,6 +3125,61 @@
           }
         },
         "summary": "Grants on a table, and the roles and users that could receive them.",
+        "tags": [
+          "schema"
+        ]
+      }
+    },
+    "/v1/connections/{id}/schema/referencing-keys": {
+      "get": {
+        "operationId": "referencing_keys",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Defaults to the connection's current schema.",
+            "in": "query",
+            "name": "schema",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Table, view or routine name.",
+            "in": "query",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ReferencingKey"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          }
+        },
+        "summary": "The foreign keys, in any table of the database, that reference a table.",
         "tags": [
           "schema"
         ]

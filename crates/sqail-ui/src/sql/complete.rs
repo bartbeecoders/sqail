@@ -139,6 +139,7 @@ fn named_column(name: String) -> ColumnInfo {
         nullable: true,
         default: None,
         primary_key: false,
+        ..Default::default()
     }
 }
 
@@ -1030,6 +1031,7 @@ mod tests {
             nullable: !pk,
             default: None,
             primary_key: pk,
+            ..Default::default()
         }
     }
 
@@ -1069,6 +1071,7 @@ mod tests {
                     ref_schema: Some("sales".into()),
                     ref_table: "customers".into(),
                     ref_columns: vec!["id".into()],
+                    ..Default::default()
                 }],
                 _ => vec![],
             })

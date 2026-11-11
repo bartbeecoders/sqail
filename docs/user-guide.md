@@ -243,6 +243,15 @@ statement again to start over in a new transaction.
 transaction, temp tables and `SET` options, as in SSMS. (On SQL Server with
 `SET XACT_ABORT ON`, the server rolls the transaction back.)
 
+A script stops at the first statement that fails. The statements before it
+keep their effect, as in psql and SSMS: each statement commits on its own
+unless the script (or Auto-commit off) opened a transaction, which the error
+then leaves open in the tab (or, outside a session, rolls back). On
+PostgreSQL the service splits the script like psql does; only when that
+depends on how the server reads backslashes in strings (`'a\'`) does the
+script run as one transaction, and the error then says that the statements
+before it were rolled back too.
+
 **Plans:** *Explain* (Ctrl+E) shows the estimated plan as a tree, with cost
 and row estimates and the most expensive nodes highlighted. *Explain analyze*
 actually runs the statement to get real timings and row counts, and its

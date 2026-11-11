@@ -2244,6 +2244,178 @@ async fn postgres_float_and_type_names() {
         )
         .await;
     assert_eq!(column_types(&ev, 0)[0].1, ty, "{ev:?}");
+
+    // A script runs statement by statement, so a type it creates is named
+    // in its later statements already (#149).
+    let ty = format!("it_mood_{}", Uuid::new_v4().simple());
+    let ev = h
+        .query_on(
+            &sp,
+            json!({"sql": format!(
+                "create type pg_temp.{ty} as enum ('ok'); create temp table it_mood_t (i int); \
+                 select 'ok'::pg_temp.{ty} m"
+            )}),
+            None,
+        )
+        .await;
+    assert!(error(&ev).is_none(), "{ev:?}");
+    assert!(column_types(&ev, 0)[0].1.ends_with(&ty), "{ev:?}");
+}
+
+/// A PostgreSQL script runs statement by statement like in psql: a failing
+/// statement does not roll back the ones before it, unless the script
+/// opened a transaction (#149).
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn postgres_scripts_commit_each_statement() {
+    let h = harness().await;
+    let c = profile(&h, &postgres(), false).await;
+    let t = format!("sales.it_autocommit_{}", Uuid::new_v4().simple());
+    let count = |ev: &[QueryEvent]| rows(ev, 0)[0][0].clone();
+    let ev = h.query(c, &format!("create table {t} (i int)")).await;
+    assert!(error(&ev).is_none(), "{ev:?}");
+
+    let ev = h
+        .query(
+            c,
+            &format!("insert into {t} values (1); insert into {t} values (2); select 1/0"),
+        )
+        .await;
+    assert_eq!(affected(&ev), [1, 1], "{ev:?}");
+    assert_eq!(
+        error(&ev).map(|e| e.1),
+        Some("ERROR: division by zero".to_string())
+    );
+    let ev = h.query(c, &format!("select count(*) from {t}")).await;
+    assert_eq!(count(&ev), json!(2), "earlier statements stay: {ev:?}");
+
+    // A transaction the script opens is rolled back as a whole.
+    let ev = h
+        .query(
+            c,
+            &format!("begin; insert into {t} values (3); select 1/0; commit"),
+        )
+        .await;
+    assert!(error(&ev).is_some(), "{ev:?}");
+    let ev = h.query(c, &format!("select count(*) from {t}")).await;
+    assert_eq!(count(&ev), json!(2), "{ev:?}");
+    // ...and what it committed stays.
+    let ev = h
+        .query(
+            c,
+            &format!("begin; insert into {t} values (4); commit; select 1/0"),
+        )
+        .await;
+    assert!(error(&ev).is_some(), "{ev:?}");
+    let ev = h.query(c, &format!("select count(*) from {t}")).await;
+    assert_eq!(count(&ev), json!(3), "{ev:?}");
+
+    // Statements that refuse transaction blocks run inside a script.
+    let ev = h.query(c, &format!("select 1; vacuum {t}; select 2")).await;
+    assert!(error(&ev).is_none(), "{ev:?}");
+    assert_eq!(rows(&ev, 1), vec![vec![json!(2)]], "{ev:?}");
+
+    // Results, notices and row counts keep their order.
+    let ev = h
+        .query(
+            c,
+            &format!(
+                "select 1 a; do $$begin raise notice 'between'; end$$; \
+                 update {t} set i = i; select 2 b"
+            ),
+        )
+        .await;
+    let kinds: Vec<String> = ev
+        .iter()
+        .filter_map(|e| match e {
+            QueryEvent::ResultStart { index, .. } => Some(format!("result {index}")),
+            QueryEvent::Message { text, .. } => Some(text.clone()),
+            QueryEvent::RowsAffected { count } => Some(format!("affected {count}")),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "result 0",
+            "between",
+            "affected 0",
+            "affected 3",
+            "result 1"
+        ],
+        "{ev:?}"
+    );
+
+    // A function body with semicolons is one statement.
+    let ev = h
+        .query(
+            c,
+            "create function pg_temp.it_atomic() returns int language sql \
+             begin atomic select 1; select case when true then 2 end; end; \
+             select pg_temp.it_atomic()",
+        )
+        .await;
+    assert!(error(&ev).is_none(), "{ev:?}");
+    assert_eq!(rows(&ev, 0), vec![vec![json!(2)]], "{ev:?}");
+
+    // Error positions count from the start of the script.
+    let ev = h.query(c, "select 1; select it_no_such_column").await;
+    let msg = error(&ev).unwrap().1;
+    assert!(msg.ends_with("POSITION: 18"), "{msg}");
+
+    // Where the statements depend on standard_conforming_strings, the script
+    // runs as one message, and the error says what that means.
+    let ev = h
+        .query(
+            c,
+            &format!(r"insert into {t} values (6); select 'a\'; select 1/0; -- '"),
+        )
+        .await;
+    let msg = error(&ev).unwrap().1;
+    assert!(
+        msg.starts_with("ERROR: division by zero") && msg.contains("ran as one transaction"),
+        "{msg}"
+    );
+    let ev = h.query(c, &format!("select count(*) from {t}")).await;
+    assert_eq!(count(&ev), json!(3), "{ev:?}");
+
+    // max_rows still caps each result set.
+    let (ev, _) = timed(
+        &h,
+        &format!("/v1/connections/{c}/query"),
+        "select generate_series(1, 10); select 2",
+        json!([]),
+        5,
+    )
+    .await;
+    assert!(truncated_at(&ev, 0, 5), "{ev:?}");
+    assert_eq!(rows(&ev, 1), vec![vec![json!(2)]], "{ev:?}");
+
+    // A session keeps a transaction the script left open.
+    let s: SessionInfo = h
+        .post("/v1/sessions", &json!({"connection_id": c}), &h.admin)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let sp = format!("/v1/sessions/{}/query", s.id);
+    let ev = h
+        .query_on(
+            &sp,
+            json!({"sql": format!("begin; insert into {t} values (5); select 1")}),
+            None,
+        )
+        .await;
+    assert_eq!(done(&ev).1, Some(true), "{ev:?}");
+    let ev = h
+        .query_on(&sp, json!({"sql": "rollback; select 1"}), None)
+        .await;
+    assert_eq!(done(&ev).1, Some(false), "{ev:?}");
+
+    let ev = h
+        .query(c, &format!("select count(*) from {t}; drop table {t}"))
+        .await;
+    assert_eq!(count(&ev), json!(3), "{ev:?}");
 }
 
 #[tokio::test]

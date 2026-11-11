@@ -160,6 +160,18 @@ api $URL/v1/connections/$ID/query -d '{"sql": "SELECT id, name FROM customers; U
   and placeholders are the engine's own (`$1`, `@P1`, `?1`):
   `{"sql": "SELECT * FROM t WHERE id = $1", "params": [42]}`.
 * Scripts are split server-side, and SQL Server `GO` lines are honoured.
+  Statements run in order and the first error stops the script; the
+  statements before it keep their effect unless the script opened a
+  transaction (autocommit, as in psql and SSMS). PostgreSQL scripts are
+  split like psql splits them (on `;` outside quotes, comments, parentheses
+  and `BEGIN ATOMIC … END` function bodies) and each statement is its own
+  simple-query message, so statements that refuse transaction blocks
+  (`VACUUM`, `CREATE DATABASE`, `CREATE INDEX CONCURRENTLY`) work in a script
+  too, and an error's `POSITION:` counts from the start of the script. If
+  the split depends on `standard_conforming_strings` (a backslash before a
+  quote in a plain string), the script is sent as one message instead:
+  PostgreSQL then runs it as one transaction, and the error message says
+  that the statements before it were rolled back.
 * **`single_statement: true`** refuses (with an `error` event, before running
   anything) a script that is more than one statement. Postgres parses it as a
   prepared statement and SQLite checks what follows the first statement, so

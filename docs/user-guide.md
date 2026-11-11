@@ -450,16 +450,27 @@ most last quarter?"* or *"Why is the query in my editor slow?"*. The answer
 streams in. Each query it proposes gets **Insert** (at the cursor in the
 editor), **New tab** and **Copy** buttons. Follow-up questions continue the
 same conversation; **New chat** starts over. Enter sends, Shift+Enter adds a
-line. *Include editor SQL* sends the active tab's SQL along with your question.
+line. *Include editor SQL* sends the SQL you selected in the active tab, or
+else the statement at the cursor, along with your question, and, when the
+tab's last run failed, that run's SQL and error. Answers show headings,
+lists and tables.
+
+When a query fails, **Ask assistant** next to *Failed* in the results bar
+opens the assistant and asks why, sending the query and its error.
 
 A conversation stays on the connection of the tab that was active when it
 started (shown under the title). The assistant can:
 
 | Tool | What it does |
 |---|---|
-| `list_schemas`, `list_tables` | See what's in the database |
+| `list_schemas`, `list_tables` | See what's in the database (`list_tables` takes a name pattern and lists at most 200 tables unless asked for more, up to 1,000; on a large database without a schema or pattern it gives the number of tables per schema) |
 | `describe_table` | Columns, types, keys, indexes and foreign keys |
-| `run_query` | Run **one read-only statement** and see up to 100 rows |
+| `run_query` | Run **one read-only statement** and see up to 100 rows (`max_rows`, at most 1,000) |
+| `explain_query` | The estimated plan of one read-only statement, without running it (no `ANALYZE`) |
+
+Each tool result is kept under 40,000 characters, with at most 50 columns and
+200 characters per value; the assistant is told what was left out, so it can
+ask for less.
 
 Each tool call shows up in the conversation; click it to see the SQL and the
 result.
@@ -470,10 +481,21 @@ result.
 admin commands, multiple statements, unfinished strings or comments and
 functions with side effects (also when the name is quoted, like
 `"pg_sleep"(1)`, or written with `U&"…"` escapes) are refused. A quoted
-column or table that happens to share such a function's name is still fine. The service also refuses anything
+column or table that happens to share such a function's name is still fine. On
+PostgreSQL the assistant may only call functions the database marks `STABLE`
+or `IMMUTABLE` (plus a few harmless built-ins such as `random()` and
+`pg_relation_size()`); a query that calls a `VOLATILE` one, such as most
+user-defined functions, is refused with the function's name. This check
+needs the `TEMPORARY` privilege on the database, which every login has by
+default. The service also refuses anything
 but a single statement for the assistant. Every assistant query also runs in
 its own transaction that is always rolled back (read-only on PostgreSQL), so
-even something that slipped through would be undone. For the strongest
+even something that slipped through would be undone. On SQL Server, locking
+table hints (`TABLOCKX`, `HOLDLOCK`, `UPDLOCK`, …) and `NEXT VALUE FOR` are
+refused, and assistant queries take no shared locks (`SNAPSHOT` isolation
+where the database allows it, else `READ UNCOMMITTED`, which can show
+changes another session hasn't committed yet) and give up after waiting five
+seconds for a lock, so they don't hold up other users. For the strongest
 guarantee, point the assistant at a connection whose login can only read
 (see [security](security.md)). The CLI gets no other tools: no shell, no files, no web.
 When you ask for changes, it writes the SQL for you to review and run
@@ -491,7 +513,7 @@ allowed to share with them.
 | `provider` | `"claude_code"` | or `"grok"` |
 | `claude_path`, `grok_path` | found on `PATH` | Full path to the CLI |
 | `claude_model`, `grok_model` | the CLI's default | e.g. `"sonnet"` |
-| `max_rows` | `100` | Most rows one assistant query returns to the model |
+| `max_rows` | `100` | Most rows one assistant query returns to the model (1–1,000) |
 
 On Windows, sqail uses the native `grok.exe` behind npm's `grok.cmd`. If it
 can't find it, set `grok_path`.
@@ -546,7 +568,7 @@ dialog. (A bad `tokens.toml` is set aside the same way and logged.) Fix the
 `.bad` file and rename it back while sqail is closed to get your services,
 tabs or snippets back. Out-of-range values in `settings.toml` are brought
 into the range the Settings window offers: interface size 75–200 %, font
-size 9–28, indent 2–4, assistant rows 1–10,000, row limit at least 1 (its
+size 9–28, indent 2–4, assistant rows 1–1,000, row limit at least 1 (its
 upper bound is the service's).
 
 Only one sqail runs per settings folder: starting a second one shows

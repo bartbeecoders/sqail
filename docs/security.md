@@ -55,7 +55,7 @@ sqail ──TLS 1.3 + bearer token (+ optional client cert)──▶ sqail-servi
 | Crashes on hostile input | Lexers, splitters, completer, formatter and the NDJSON decoder are fuzzed | `cargo run --profile fuzz -p sqail-fuzz -- <secs>` (10 min: 13.2M inputs, 0 crashes; one real bug found and fixed; 2 min in every nightly and release build) |
 | Abandoned transactions holding locks | A transaction left open outside a session is rolled back and reported; idle sessions close (rollback); the UI asks before closing a tab or quitting with one open | `open_transaction_outside_session_is_rolled_back`, UI test |
 | EXPLAIN ANALYZE changing data | Runs inside a transaction that is always rolled back | engine matrix (`sum(price)` unchanged) |
-| The AI assistant changing data, or doing more than read | The CLI runs with no built-in tools (Claude Code `--tools ""` + `--strict-mcp-config`; Grok `--tools search_tool,use_tool` + `--permission-mode dontAsk` + an allow list of sqail's tools, which also denies the user's other MCP servers). `run_query` accepts one `SELECT`/`WITH`/`VALUES` statement without writing, transaction-control, DDL or admin keywords, side-effect functions (bare, quoted or schema-qualified; `U&"…"` names are refused) or unterminated strings/comments; the service then refuses anything but a single statement (`single_statement`: Postgres parses it as a prepared statement, SQLite checks the prepared statement's tail, SQL Server is best effort); and it runs in a transaction that is always rolled back (`BEGIN READ ONLY` on Postgres). The service token reaches `sqail mcp` through the environment, never arguments or files | `assistant::guard` tests (adversarial inputs per engine), `adversarial_queries_on_*_change_nothing`, `single_statement_check`, `mcp_tools_on_sql_server` (a forced `INSERT` is rolled back), `postgres_assistant_transactions_are_read_only`, `assistant_panel_streams_an_answer_and_inserts_sql` |
+| The AI assistant changing data, or doing more than read | The CLI runs with no built-in tools (Claude Code `--tools ""` + `--strict-mcp-config`; Grok `--tools search_tool,use_tool` + `--permission-mode dontAsk` + an allow list of sqail's tools, which also denies the user's other MCP servers). `run_query` accepts one `SELECT`/`WITH`/`VALUES` statement without writing, transaction-control, DDL or admin keywords, side-effect functions (bare, quoted or schema-qualified; `U&"…"` names are refused) or unterminated strings/comments; the service then refuses anything but a single statement (`single_statement`: Postgres parses it as a prepared statement, SQLite checks the prepared statement's tail, SQL Server is best effort); on Postgres every function the query calls must be non-volatile in the catalog (resolved by the server through a temporary view); and it runs in a transaction that is always rolled back (read-only on Postgres; lock timeout and no shared locks on SQL Server). `explain_query` passes the same check and asks the service for the estimated plan only (no `ANALYZE`), on Postgres inside a read-only transaction that is rolled back. The service token reaches `sqail mcp` through the environment, never arguments or files | `assistant::guard` tests (adversarial inputs per engine), `adversarial_queries_on_*_change_nothing`, `single_statement_check`, `mcp_tools_on_sql_server` (a forced `INSERT` is rolled back), `postgres_assistant_transactions_are_read_only`, `postgres_assistant_queries_call_only_non_volatile_functions`, `sql_server_assistant_queries_neither_block_nor_wait`, `explain_query_on_every_engine`, `assistant_panel_streams_an_answer_and_inserts_sql` |
 | Vulnerable or non-permissive dependencies | `cargo audit` and `cargo deny` (advisories, licences, sources) in the gate | `scripts/check.sh` |
 | Tampered or swapped downloads | Every release and nightly carries one `SHA256SUMS`, a GitHub build provenance attestation per file (signed through Sigstore by the workflow that built it) and CycloneDX SBOMs; the portal's `current.json` lists the same hashes | `gh attestation verify`, `sha256sum -c SHA256SUMS` (see below) |
 
@@ -105,20 +105,53 @@ the attestation is what catches a swapped one.
   (Claude Code) or xAI (Grok) under the user's own account. It uses the
   user's service token, so it sees exactly what the user may see. On SQL
   Server a rolled-back transaction undoes writes but can't stop every side
-  effect of a procedure; the statement check refuses `EXEC` for that reason.
+  effect of a procedure; the statement check refuses `EXEC` for that reason,
+  and also `NEXT VALUE FOR` (a sequence step survives the rollback) and
+  locking table hints (`TABLOCKX`, `HOLDLOCK`, `UPDLOCK`, `XLOCK`,
+  `SERIALIZABLE` and the like). Assistant transactions on SQL Server start
+  with `SET LOCK_TIMEOUT 5000` and the `SNAPSHOT` isolation level where the
+  database allows it, else `READ UNCOMMITTED`: they take no shared locks
+  and give up on a lock after five seconds, so they neither block other
+  sessions nor wait on them for long. Under `READ UNCOMMITTED` the
+  assistant may see changes another session has not committed yet.
   The statement check and the rollback are defence in depth, not a
   permission system: give the connection the assistant uses a **low-privilege
   login** that can only read (Postgres: a role with `SELECT` grants only, or
   `default_transaction_read_only`; SQL Server: `db_datareader` and nothing
   else; SQLite: a read-only profile). SQL Server's single-statement check is
   best effort, because T-SQL needs no separator between statements. The
-  side-effect function check is a denylist (quoted and schema-qualified names
-  included, `U&"…"` names refused): it covers the known families (backend
-  signals, advisory locks, `dblink`, sleeps, statistics resets, replication
-  slots and origins, server file and directory functions, backups, WAL
-  replay), but an extension's function it doesn't know passes it, and a
-  read-only transaction doesn't stop non-transactional effects. The
-  low-privilege login is what closes that gap.
+  side-effect function check starts with a denylist (quoted and
+  schema-qualified names included, `U&"…"` names refused) of the known
+  families (backend signals, advisory locks, `dblink`, sleeps, statistics
+  resets, replication slots and origins, server file and directory
+  functions, backups, WAL replay). On SQL Server and SQLite that denylist is
+  all there is: an extension's or a user's function it doesn't know passes
+  it.
+
+  On PostgreSQL the assistant also asks the server which functions a query
+  calls, and refuses any the catalog marks `VOLATILE` (apart from a short
+  list of built-in readers such as `random()`, `clock_timestamp()` and
+  `pg_relation_size()`). The server resolves the names itself (search path,
+  overloads, quoted and schema-qualified names, and the functions behind
+  operators): the query is wrapped in a temporary view inside the
+  assistant's transaction, which parses it without running it, and the
+  view's dependencies list what it calls; the view goes with the rollback,
+  and the transaction is made read-only before the query runs. The view is
+  created while the transaction is still read-write, and parsing runs the
+  input functions of typed literals. Where the transaction can't be
+  read-write (a standby, or a login with `default_transaction_read_only`),
+  the check falls back to the names written as calls in the query and
+  refuses a name if any function of that name in any schema is volatile
+  (operators are then not checked). A login without the `TEMPORARY`
+  privilege can't create the view, and its queries are refused. Limits:
+  `VOLATILE` is the function author's declaration, and a stable function
+  may still call a volatile one; functions used inside a view, a default
+  or a row-level security policy the query reads aren't visible to the
+  check (querying `pg_stat_activity`, a view over volatile functions, stays
+  possible); nor are the support functions of aggregates and the input and
+  output functions of types. A read-only transaction doesn't stop
+  non-transactional effects. The low-privilege login is what closes that
+  gap.
 
 * **SQL Server read-only profiles** use `ApplicationIntent=ReadOnly`, which is
   only enforced on availability-group secondaries. Use a login with read-only

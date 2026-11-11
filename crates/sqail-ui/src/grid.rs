@@ -26,6 +26,8 @@ pub struct GridOutput {
     pub copy_note: Option<String>,
     /// Switch multi-line rows on or off (a setting).
     pub toggle_multiline: bool,
+    /// Ask the AI assistant about the failed run.
+    pub ask_assistant: bool,
 }
 
 /// Longest text we lay out in a cell; the viewer shows the rest.
@@ -130,6 +132,15 @@ pub fn results_ui(
                 } else {
                     "Done"
                 };
+                if run.failed
+                    && !run.cancelled
+                    && ui
+                        .button("Ask assistant")
+                        .on_hover_text("Ask the AI assistant why this failed and how to fix it")
+                        .clicked()
+                {
+                    out.ask_assistant = true;
+                }
                 RichText::new(format!(
                     "{status} · {} rows · {}",
                     fmt_count(run.total_rows()),

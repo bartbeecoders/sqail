@@ -8,7 +8,7 @@ use sqail_client::proto::Engine;
 use sqlformat::{Dialect, FormatOptions, Indent, QueryParams};
 
 use super::lex::{Kind, Token, tokenize};
-use super::statements::is_alone_on_line;
+use super::statements::is_go_line;
 
 pub struct Style {
     pub uppercase: bool,
@@ -41,11 +41,7 @@ pub fn format(sql: &str, engine: Option<Engine>, style: &Style) -> Result<String
         let mut out = Vec::new();
         let mut from = 0;
         for t in tokenize(sql, engine) {
-            if t.range.start < from
-                || t.kind != Kind::Word
-                || !sql[t.range.clone()].eq_ignore_ascii_case("go")
-                || !is_alone_on_line(sql, &t.range)
-            {
+            if t.range.start < from || t.kind != Kind::Word || !is_go_line(sql, &t.range) {
                 continue;
             }
             let line_start = sql[..t.range.start].rfind('\n').map_or(0, |p| p + 1);

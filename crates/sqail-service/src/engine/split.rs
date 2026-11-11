@@ -2,6 +2,8 @@
 //! statements. It only needs to understand what can hide a `GO` or a `;`:
 //! strings, quoted identifiers and comments.
 
+use sqail_proto::go_line;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum St {
     Code,
@@ -106,27 +108,6 @@ pub fn split_go(script: &str) -> Vec<Batch> {
 fn push_batch(out: &mut Vec<Batch>, sql: String, repeat: u32, line: u32) {
     if !sql.trim().is_empty() {
         out.push(Batch { sql, repeat, line });
-    }
-}
-
-fn go_line(line: &str) -> Option<u32> {
-    let line = line.trim();
-    let line = match line.find("--") {
-        Some(i) => line[..i].trim_end(),
-        None => line,
-    };
-    // `get` rather than slicing: the line may start with a multi-byte char.
-    let (Some(word), Some(rest)) = (line.get(..2), line.get(2..)) else {
-        return None;
-    };
-    if !word.eq_ignore_ascii_case("go") {
-        return None;
-    }
-    let rest = rest.trim();
-    if rest.is_empty() {
-        Some(1)
-    } else {
-        rest.parse().ok().filter(|&n| n > 0)
     }
 }
 

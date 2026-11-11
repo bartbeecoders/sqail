@@ -1412,6 +1412,14 @@ fn editor_runs_queries_end_to_end() {
         h.state().tabs[0].text,
         "SELECT\n  id,\n  name\nFROM\n  people\nWHERE\n  score > 1"
     );
+    // One Ctrl+Z takes back the format, and only the format (#145).
+    h.step();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.step();
+    assert_eq!(
+        h.state().tabs[0].text,
+        "select id,name from people where score>1"
+    );
 
     // --- query plan ----------------------------------------------------------
     h.state_mut().tabs[0].text = "SELECT * FROM people p WHERE p.id = 1".into();

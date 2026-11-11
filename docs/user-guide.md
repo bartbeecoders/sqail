@@ -183,6 +183,7 @@ an admin token.
 | F5 / Ctrl+Shift+Enter | Run the whole script |
 | Esc | Cancel the running query |
 | Ctrl+E | Show the plan of the statement under the cursor |
+| Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z) | Undo / redo. Typing undoes a word or a line at a time (and at each pause, paste or cursor jump); a format, completion, replace, drop, insert, indent or comment toggle is one step of its own, so undoing it keeps what you typed before it |
 | Ctrl+Space | Completion (also opens by itself while you type a name it can finish, but not when the word is already a whole name or keyword, nor in comments and strings; a space, comma or other punctuation closes it, so Enter and Tab go to the text) |
 | Ctrl+Shift+F | Format the selection or the whole tab. It only changes layout and keyword case: when the formatter would change more (some string literals, `0x…` numbers, Postgres `E'…'` or dollar-quoted strings), the text is left alone with a notice |
 | Tab / Shift+Tab | Indent / outdent the selected lines (without a selection, Tab types a tab and Shift+Tab outdents the line) |

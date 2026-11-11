@@ -476,6 +476,99 @@ fn saving_and_close_prompts_follow_the_right_text_and_tab() {
     assert!(matches!(h.state().dialog, sqail_ui::dialogs::Dialog::None));
 }
 
+/// A revoked token, found by any request after startup, shows in the status
+/// bar and leads back to the token prompt (#157).
+#[test]
+fn a_revoked_token_leads_back_to_the_token_prompt() {
+    let e = env();
+    let mut h = app([1280.0, 800.0]);
+    let out = outside(&e.server);
+    e.rt.block_on(async {
+        for t in out.tokens().await.unwrap() {
+            out.revoke_token(t.id).await.unwrap();
+        }
+    });
+    h.state_mut().tabs[0].text = "SELECT 1".into();
+    h.step();
+    run_with(&mut h, "rejected query", |h| h.key_press(Key::F5));
+    wait(&mut h, "token prompt", |a| {
+        matches!(a.dialog, sqail_ui::dialogs::Dialog::Welcome(_))
+    });
+    assert!(matches!(h.state().service.status, ServiceStatus::Failed(_)));
+    h.get_by_label_contains("no longer accepts the token");
+    shot(&mut h, "13-token-revoked");
+}
+
+/// When the service goes away the status bar says so (with Reconnect), and
+/// says Connected again once it answers (#157).
+#[test]
+fn losing_the_service_shows_in_the_status_bar() {
+    let Env {
+        rt,
+        dir: _dir,
+        server,
+        ui_dir: _,
+    } = env();
+    let mut h = app([1280.0, 800.0]);
+    server.shutdown();
+    rt.block_on(server.wait()).unwrap();
+    h.state_mut().tabs[0].text = "SELECT 1".into();
+    h.step();
+    run_with(&mut h, "query without a service", |h| h.key_press(Key::F5));
+    assert!(h.state().tabs[0].run.as_ref().unwrap().failed);
+    wait(&mut h, "status failed", |a| {
+        matches!(a.service.status, ServiceStatus::Failed(_))
+    });
+    h.get_by_label("Reconnect");
+    shot(&mut h, "14-service-lost");
+}
+
+/// A tab is bound to a connection by itself only when it is the only one:
+/// deleting the tab's connection leaves it unbound when several remain (#157).
+#[test]
+fn tabs_are_not_bound_to_the_first_of_several_connections() {
+    let e = env();
+    let mut h = app([1280.0, 800.0]);
+    let only = h.state().tabs[0].connection;
+    assert!(only.is_some(), "the only connection is chosen");
+    let out = outside(&e.server);
+    e.rt.block_on(async {
+        for name in ["production", "staging"] {
+            out.create_connection(&ConnectionInput {
+                name: name.into(),
+                params: ConnectionParams::Sqlite(SqliteParams {
+                    path: e
+                        .dir
+                        .path()
+                        .join(format!("{name}.db"))
+                        .to_string_lossy()
+                        .into(),
+                    create: true,
+                }),
+                password: None,
+                ssl_client_key: None,
+                read_only: false,
+                color: None,
+                environment: None,
+                folder: None,
+            })
+            .await
+            .unwrap();
+        }
+        // The tab's connection goes away; two others remain.
+        out.delete_connection(only.unwrap()).await.unwrap();
+    });
+    h.state_mut().refresh_connections();
+    wait(&mut h, "new list", |a| {
+        a.service.connections.len() == 2 && a.service.connections.iter().all(|c| Some(c.id) != only)
+    });
+    assert_eq!(
+        h.state().tabs[0].connection,
+        None,
+        "not bound to production"
+    );
+}
+
 /// A profile of an engine newer than this build is listed as unsupported, and
 /// not offered in the tab's connection picker.
 #[test]

@@ -116,6 +116,50 @@ async fn bad_token_is_an_auth_error() {
     assert!(sqail_client::is_auth_error(&err), "{err:?}");
 }
 
+/// The observer hears about every request: answered, token rejected, and
+/// the service gone.
+#[tokio::test]
+async fn observer_reports_reachability() {
+    use sqail_client::Reach;
+    use std::sync::{Arc, Mutex};
+    let e = env().await;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let log = seen.clone();
+    let c = e.client().observe(move |r| log.lock().unwrap().push(r));
+    c.connections().await.unwrap();
+    // An API error that is not about the token still means "answered".
+    assert!(c.session(uuid::Uuid::new_v4()).await.is_err());
+    let bad = Client::new(&Target {
+        url: e.url(),
+        token: "sq2_nope".into(),
+        trust: Trust::Pinned(e.server.fingerprint.clone()),
+        identity: None,
+    })
+    .unwrap();
+    let log = seen.clone();
+    let bad = bad.observe(move |r| log.lock().unwrap().push(r));
+    bad.connections().await.unwrap_err();
+    e.server.shutdown();
+    let (addr, fingerprint) = (e.server.addr, e.server.fingerprint.clone());
+    e.server.wait().await.unwrap();
+    // Nothing listens there any more.
+    let gone = Client::new(&Target {
+        url: format!("https://{addr}"),
+        token: e.token.clone(),
+        trust: Trust::Pinned(fingerprint),
+        identity: None,
+    })
+    .unwrap();
+    let log = seen.clone();
+    let gone = gone.observe(move |r| log.lock().unwrap().push(r));
+    gone.connections().await.unwrap_err();
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen[..2], [Reach::Answered, Reach::Answered]);
+    assert!(matches!(seen[2], Reach::Unauthorized(_)), "{seen:?}");
+    assert!(matches!(seen[3], Reach::Unreachable(_)), "{seen:?}");
+    assert_eq!(seen.len(), 4);
+}
+
 #[tokio::test]
 async fn streams_query_events() {
     let e = env().await;

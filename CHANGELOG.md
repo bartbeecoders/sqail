@@ -77,6 +77,10 @@ the Tauri app that came before it (0.x) lives in `sqail-legacy/`.
   running batch (TDS Attention, as in SSMS). The session keeps its open
   transaction, #temp tables and SET options, and no `ALTER ANY CONNECTION`
   permission is needed; `KILL` is only a fallback (#148).
+- **Fix:** cancelling a large SQL Server result no longer ends the session
+  when reading the rows already on their way takes more than a few seconds
+  (slow link, busy service): the service waits while they still arrive
+  instead of falling back to `KILL` or dropping the connection (#215).
 - **Fix:** SQL Server `PRINT` and `RAISERROR` messages, per-statement row
   counts and errors arrive in the order the server sends them. A `GO` script
   continues after a failed batch, as in SSMS, and error line numbers count

@@ -857,9 +857,54 @@ pub struct AuditPage {
     pub next_before: Option<i64>,
 }
 
+/// A SQL Server batch separator line: `GO`, optionally followed by a repeat
+/// count `n > 0` and a `--` comment, case-insensitive. Returns the count (1
+/// for a bare `GO`). The caller makes sure the line does not start inside a
+/// string or block comment. Shared by the service (which runs the batches)
+/// and the editor (which picks the statement at the cursor), so both agree
+/// on what a `GO` line is.
+pub fn go_line(line: &str) -> Option<u32> {
+    let line = line.trim();
+    let line = match line.find("--") {
+        Some(i) => line[..i].trim_end(),
+        None => line,
+    };
+    // `get` rather than slicing: the line may start with a multi-byte char.
+    let (Some(word), Some(rest)) = (line.get(..2), line.get(2..)) else {
+        return None;
+    };
+    if !word.eq_ignore_ascii_case("go") {
+        return None;
+    }
+    let rest = rest.trim();
+    if rest.is_empty() {
+        Some(1)
+    } else {
+        rest.parse().ok().filter(|&n| n > 0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn go_lines() {
+        for (line, n) in [
+            ("GO", Some(1)),
+            (" go \r\n", Some(1)),
+            ("GO 3 -- thrice", Some(3)),
+            ("GO--x", Some(1)),
+            ("GO 0", None),
+            ("GO -1", None),
+            ("GO x", None),
+            ("GOTO label", None),
+            ("é", None),
+            ("", None),
+        ] {
+            assert_eq!(go_line(line), n, "{line:?}");
+        }
+    }
 
     #[test]
     fn engine_serializes_lowercase() {

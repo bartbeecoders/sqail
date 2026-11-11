@@ -5,7 +5,13 @@
 //! procedure and trigger bodies stay whole. In T-SQL a module
 //! (`CREATE|ALTER [OR ALTER] PROC|FUNCTION|TRIGGER|VIEW`) runs to the next
 //! `GO` whether or not its body has `BEGIN … END`, so `;` and blank lines
-//! inside it don't end it.
+//! inside it don't end it. So does a batch from a `DECLARE` on: its
+//! variables only exist within the batch.
+//!
+//! An unclosed `(` or `CASE` must not swallow the rest of the buffer: a blank
+//! line followed by a word that starts a statement (`SELECT`, `DELETE`, …)
+//! ends it anyway, unless the text before the blank line clearly continues
+//! (`(`, `,`, `UNION`, `IN`, …). In T-SQL, `IF … ; ELSE` stays one statement.
 
 use std::ops::Range;
 
@@ -20,7 +26,12 @@ pub fn split(text: &str, engine: Option<Engine>) -> Vec<Range<usize>> {
     let mut start: Option<usize> = None;
     let mut end = 0usize;
     let mut parens = 0i32;
+    // `BEGIN … END` blocks, and open `CASE`s (always the innermost).
     let mut blocks = 0i32;
+    let mut cases = 0i32;
+    let mssql = engine == Some(Engine::Mssql);
+    // The last token that is not space or a comment.
+    let mut prev_sig: Option<usize> = None;
     let mut prev_word: Option<String> = None;
     // The first words of the current statement, to spot a T-SQL module.
     let mut head: Vec<String> = Vec::new();
@@ -41,29 +52,48 @@ pub fn split(text: &str, engine: Option<Engine>) -> Vec<Range<usize>> {
             continue;
         }
         let s = &text[t.range.clone()];
+        if !matches!(t.kind, Kind::Space | Kind::Comment) {
+            prev_sig = Some(idx);
+        }
         match t.kind {
             Kind::Space => {
                 let blank_line = s.matches('\n').count() >= 2;
-                if blank_line && parens == 0 && blocks <= 0 && !module {
+                if !blank_line || module {
+                    continue;
+                }
+                let next = next_word(text, &tokens[idx + 1..]);
+                if (parens > 0 || cases > 0)
+                    && next.as_deref().is_some_and(starts_statement)
+                    && prev_sig.is_some_and(|p| ends_expression(text, &tokens[p]))
+                {
+                    // An unclosed `(` or `CASE` before a new statement.
+                    parens = 0;
+                    cases = 0;
+                }
+                let else_follows = mssql && next.as_deref() == Some("ELSE");
+                if parens == 0 && blocks + cases <= 0 && !else_follows {
                     close(&mut start, end, &mut out);
                     head.clear();
                 }
                 continue;
             }
-            Kind::Semicolon if parens <= 0 && blocks <= 0 && !module => {
+            Kind::Semicolon
+                if parens <= 0
+                    && blocks + cases <= 0
+                    && !module
+                    // T-SQL `IF … ; ELSE …` is one statement.
+                    && !(mssql && next_word(text, &tokens[idx + 1..]).as_deref() == Some("ELSE")) =>
+            {
                 // `BEGIN;` in Postgres starts a transaction, not a block.
                 close(&mut start, end, &mut out);
                 prev_word = None;
                 head.clear();
                 continue;
             }
-            Kind::Word
-                if engine == Some(Engine::Mssql)
-                    && s.eq_ignore_ascii_case("GO")
-                    && is_alone_on_line(text, &t.range) =>
-            {
+            Kind::Word if mssql && is_go_line(text, &t.range) => {
                 close(&mut start, end, &mut out);
                 blocks = 0;
+                cases = 0;
                 parens = 0;
                 module = false;
                 head.clear();
@@ -74,11 +104,12 @@ pub fn split(text: &str, engine: Option<Engine>) -> Vec<Range<usize>> {
                 continue;
             }
             Kind::Open => parens += 1,
-            Kind::Close => parens -= 1,
+            // A stray `)` must not turn off splitting for the rest.
+            Kind::Close => parens = (parens - 1).max(0),
             Kind::Word => {
                 let upper = s.to_ascii_uppercase();
                 match upper.as_str() {
-                    "CASE" => blocks += 1,
+                    "CASE" => cases += 1,
                     "BEGIN" => {
                         let next = next_word(text, &tokens[idx + 1..]);
                         let is_tx = next.as_deref().is_none_or(is_transaction_word)
@@ -87,10 +118,11 @@ pub fn split(text: &str, engine: Option<Engine>) -> Vec<Range<usize>> {
                             blocks += 1;
                         }
                     }
+                    "END" if cases > 0 => cases -= 1,
                     "END" if blocks > 0 => blocks -= 1,
                     _ => {}
                 }
-                if engine == Some(Engine::Mssql) && !module && head.len() < 4 {
+                if mssql && !module && head.len() < 4 {
                     head.push(upper.clone());
                     module = is_tsql_module(&head);
                 }
@@ -110,9 +142,11 @@ pub fn split(text: &str, engine: Option<Engine>) -> Vec<Range<usize>> {
 }
 
 /// Whether a statement starting with `head` is a T-SQL module definition,
-/// whose body runs to the next `GO`.
+/// whose body runs to the next `GO`, or a `DECLARE`, whose variables the rest
+/// of the batch needs.
 fn is_tsql_module(head: &[String]) -> bool {
     let rest = match head {
+        [first, ..] if first == "DECLARE" => return true,
         [first, rest @ ..] if first == "CREATE" || first == "ALTER" => rest,
         _ => return false,
     };
@@ -143,7 +177,85 @@ fn is_transaction_word(word: &str) -> bool {
             | "READ"
             | "NOT"
             | "DEFERRABLE"
+            // T-SQL Service Broker: `BEGIN DIALOG [CONVERSATION]`,
+            // `BEGIN CONVERSATION TIMER`.
+            | "DIALOG"
+            | "CONVERSATION"
     )
+}
+
+/// Words that start a statement, for ending an unclosed `(` or `CASE` at a
+/// blank line.
+fn starts_statement(word: &str) -> bool {
+    matches!(
+        word,
+        "SELECT"
+            | "INSERT"
+            | "UPDATE"
+            | "DELETE"
+            | "MERGE"
+            | "CREATE"
+            | "ALTER"
+            | "DROP"
+            | "TRUNCATE"
+            | "DECLARE"
+            | "SET"
+            | "EXEC"
+            | "EXECUTE"
+            | "IF"
+            | "WHILE"
+            | "PRINT"
+            | "USE"
+            | "GRANT"
+            | "REVOKE"
+            | "COMMIT"
+            | "ROLLBACK"
+    )
+}
+
+/// Whether `t` can be the last token of a statement, rather than one that
+/// asks for more (`(`, `,`, an operator, `UNION`, `IN`, …).
+fn ends_expression(text: &str, t: &super::lex::Token) -> bool {
+    match t.kind {
+        Kind::Number | Kind::String | Kind::QuotedIdent | Kind::Variable | Kind::Close => true,
+        Kind::Semicolon => true,
+        Kind::Word => !matches!(
+            text[t.range.clone()].to_ascii_uppercase().as_str(),
+            "AND"
+                | "OR"
+                | "NOT"
+                | "IN"
+                | "EXISTS"
+                | "ANY"
+                | "SOME"
+                | "ALL"
+                | "UNION"
+                | "EXCEPT"
+                | "INTERSECT"
+                | "MINUS"
+                | "AS"
+                | "THEN"
+                | "ELSE"
+                | "WHEN"
+                | "ON"
+                | "SELECT"
+                | "FROM"
+                | "WHERE"
+                | "BY"
+                | "IS"
+                | "LIKE"
+                | "BETWEEN"
+                | "JOIN"
+                | "WITH"
+                | "VALUES"
+                | "INTO"
+                | "SET"
+                | "RETURN"
+                | "RETURNS"
+                | "BEGIN"
+        ),
+        _ => false,
+    }
 }
 
 fn next_word(text: &str, rest: &[super::lex::Token]) -> Option<String> {
@@ -155,15 +267,16 @@ fn next_word(text: &str, rest: &[super::lex::Token]) -> Option<String> {
         })
 }
 
-pub(super) fn is_alone_on_line(text: &str, range: &Range<usize>) -> bool {
+/// Whether the word token at `range` starts a `GO` line: first on its line,
+/// and the line is a batch separator by the same rule the service uses
+/// ([`sqail_client::proto::go_line`]: `GO`, `GO n` with n > 0, a comment).
+pub(super) fn is_go_line(text: &str, range: &Range<usize>) -> bool {
     let line_start = text[..range.start].rfind('\n').map_or(0, |p| p + 1);
     let line_end = text[range.end..]
         .find('\n')
         .map_or(text.len(), |p| range.end + p);
-    let before = text[line_start..range.start].trim();
-    let after = text[range.end..line_end].trim();
-    let after = after.split("--").next().unwrap_or("").trim();
-    before.is_empty() && (after.is_empty() || after.chars().all(|c| c.is_ascii_digit()))
+    text[line_start..range.start].trim().is_empty()
+        && sqail_client::proto::go_line(&text[line_start..line_end]).is_some()
 }
 
 /// The statement to run for a cursor at byte offset `cursor`: the one that
@@ -352,6 +465,79 @@ mod tests {
         );
         let t = "SELECT 'a\nGO\nb'\n/* x\nGO\n*/ SELECT 2";
         assert_eq!(stmts(t, ms), [t]);
+    }
+
+    #[test]
+    fn if_else_is_one_statement() {
+        let ms = Some(Engine::Mssql);
+        let t = "IF 1 = 1\n    SELECT 1;\nELSE\n    SELECT 2;\nSELECT 3";
+        let body = "IF 1 = 1\n    SELECT 1;\nELSE\n    SELECT 2";
+        assert_eq!(stmts(t, ms), [body, "SELECT 3"]);
+        assert_eq!(&t[at(t, ms, t.find("ELSE").unwrap()).unwrap()], body);
+        let t = "IF 1 = 1\nBEGIN\n  SELECT 1;\nEND;\n\nELSE\nBEGIN\n  SELECT 2;\nEND";
+        assert_eq!(stmts(t, ms), [t]);
+        // Elsewhere ELSE is not special (it isn't valid there).
+        assert_eq!(stmts("SELECT 1;\nELSE", None).len(), 2);
+    }
+
+    #[test]
+    fn unclosed_parens_and_case_end_before_a_new_statement() {
+        for e in [None, Some(Engine::Postgres), Some(Engine::Mssql)] {
+            let t = "SELECT f(1;\n\nSELECT 2;\n\nDELETE FROM t";
+            assert_eq!(
+                &t[at(t, e, t.find('2').unwrap()).unwrap()],
+                "SELECT 2",
+                "{e:?}"
+            );
+            assert_eq!(stmts(t, e).last(), Some(&"DELETE FROM t"), "{e:?}");
+            let t = "SELECT CASE WHEN a THEN 1\n\nSELECT 2;\nDELETE FROM t;";
+            assert_eq!(
+                stmts(t, e),
+                ["SELECT CASE WHEN a THEN 1", "SELECT 2", "DELETE FROM t"],
+                "{e:?}"
+            );
+        }
+        // A blank line inside parentheses that clearly continue is kept.
+        let t = "SELECT * FROM t WHERE a IN (\n\nSELECT b FROM u\n)";
+        assert_eq!(stmts(t, None), [t]);
+        let t = "SELECT * FROM (SELECT 1 UNION\n\nSELECT 2) x";
+        assert_eq!(stmts(t, None), [t]);
+        // A blank line inside a BEGIN … END block is kept.
+        let t = "BEGIN TRY\n  SELECT 1\n\n  SELECT 2\nEND TRY";
+        assert_eq!(stmts(t, Some(Engine::Mssql)), [t]);
+        // A stray `)` does not turn off blank-line splitting.
+        assert_eq!(stmts("SELECT 1)\n\nSELECT 2\n\nSELECT 3", None).len(), 3);
+    }
+
+    #[test]
+    fn begin_dialog_is_not_a_block() {
+        let ms = Some(Engine::Mssql);
+        let t = "BEGIN DIALOG @h FROM SERVICE a TO SERVICE 'b';\nSELECT 1\n\nSELECT 2";
+        assert_eq!(stmts(t, ms).len(), 3);
+        let t = "BEGIN CONVERSATION TIMER (@h) TIMEOUT = 5;\nSELECT 1";
+        assert_eq!(stmts(t, ms).len(), 2);
+    }
+
+    #[test]
+    fn declare_keeps_the_batch_together() {
+        let ms = Some(Engine::Mssql);
+        let t = "SELECT 0;\nDECLARE @x int = 5\n\nSELECT @x;\n\nSELECT @x + 1\nGO\nSELECT 2";
+        let batch = "DECLARE @x int = 5\n\nSELECT @x;\n\nSELECT @x + 1";
+        assert_eq!(stmts(t, ms), ["SELECT 0", batch, "SELECT 2"]);
+        assert_eq!(&t[at(t, ms, t.find("@x;").unwrap()).unwrap()], batch);
+        // Not for other engines.
+        let t = "DECLARE c CURSOR FOR SELECT 1;\nSELECT 2";
+        assert_eq!(stmts(t, Some(Engine::Postgres)).len(), 2);
+    }
+
+    #[test]
+    fn go_lines_follow_the_service_rule() {
+        let ms = Some(Engine::Mssql);
+        // `GO 0` is not a separator for the service, so not here either.
+        assert_eq!(stmts("SELECT 1\nGO 0\nSELECT 2", ms).len(), 1);
+        assert_eq!(stmts("SELECT 1\nGO 2 -- twice\nSELECT 2", ms).len(), 2);
+        assert_eq!(stmts("SELECT 1\nGO2\nSELECT 2", ms).len(), 2);
+        assert_eq!(stmts("SELECT 1\nGOTO x\nSELECT 2", ms).len(), 1);
     }
 
     #[test]

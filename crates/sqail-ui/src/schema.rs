@@ -1205,13 +1205,28 @@ fn routine_node(
     } else {
         "ƒ"
     };
-    let resp = ui.selectable_label(false, format!("{icon} {}", r.name));
-    let name = r.name.clone();
     let kind = if r.kind == sqail_client::proto::RoutineKind::Procedure {
         ObjectKind::Procedure
+    } else if r.table_valued {
+        ObjectKind::TableFunction
     } else {
         ObjectKind::Function
     };
+    let resp = ui
+        .horizontal(|ui| {
+            let resp = ui.selectable_label(false, format!("{icon} {}", r.name));
+            if kind == ObjectKind::TableFunction {
+                ui.label(RichText::new("table").weak().small());
+            }
+            resp
+        })
+        .inner;
+    let resp = if kind == ObjectKind::TableFunction {
+        resp.on_hover_text("Table-valued function: query it with SELECT * FROM name()")
+    } else {
+        resp
+    };
+    let name = r.name.clone();
     let item = DropItem {
         engine,
         schema: schema.into(),

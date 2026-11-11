@@ -181,6 +181,7 @@ fn catalog(h: &mut Harness<'_, SqailApp>, n: usize, few: usize) {
                 schema: Some(s.clone()),
                 name: format!("{s}_fn"),
                 kind: RoutineKind::Function,
+                table_valued: i == 3,
             }]),
         );
     }
@@ -298,6 +299,8 @@ fn filter_reveals_matches() {
     h.state_mut().schema.filter = "s3_fn".into();
     h.run_steps(6);
     h.get_by_label("ƒ s3_fn");
+    // A table-valued function says so.
+    h.get_by_label("table");
     assert!(h.query_by_label("s1").is_none());
 
     // A loaded column matches: its table is listed and opened.

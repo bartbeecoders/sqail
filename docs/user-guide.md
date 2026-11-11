@@ -367,7 +367,9 @@ remember their state.
   blank line (or below the text) a table or view becomes a formatted
   `SELECT` of all its columns. A procedure becomes `EXEC name` on SQL
   Server or `CALL name()` on Postgres, and a function becomes
-  `SELECT name();`. Names that need it are quoted, here and wherever sqail
+  `SELECT name();`. A function that returns a table (a SQL Server
+  table-valued function, a PostgreSQL set-returning function) is marked
+  *table* in the tree and becomes `SELECT * FROM name();`. Names that need it are quoted, here and wherever sqail
   writes SQL for you (completion, the table designer): mixed case, special
   characters, and every word the engine reserves, such as `"user"` or
   `"position"` on PostgreSQL.

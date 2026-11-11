@@ -1623,6 +1623,10 @@
               "string",
               "null"
             ]
+          },
+          "table_valued": {
+            "description": "A function that returns a table, used in `FROM`: a SQL Server inline\nor multi-statement table-valued function, a PostgreSQL set-returning\nfunction. Absent (false) from older services.",
+            "type": "boolean"
           }
         },
         "required": [

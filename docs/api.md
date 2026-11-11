@@ -188,8 +188,10 @@ open transaction.
 `label`, `object`, `cost`, `rows` and, when analysed, `actual_rows` and
 `actual_ms`, plus engine-specific `props`. `raw` holds the engine's own plan
 (Postgres JSON, SQL Server showplan XML, SQLite rows). With `analyze: true`,
-Postgres and SQL Server execute the statement inside a transaction that is
-always rolled back.
+Postgres and SQL Server execute the statement and always roll it back: in a
+transaction of its own or, on a session with a transaction open, to a
+savepoint, so the rest of that transaction stays. A Postgres transaction that
+already failed (or a SQL Server one that can no longer commit) gets 400.
 
 ## Schema
 

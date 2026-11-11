@@ -127,9 +127,10 @@ the attestation is what catches a swapped one.
   check, not a permission. A function or procedure the role may call can
   still change the setting or write. Real enforcement needs a database role
   without write rights; use one wherever read-only matters.
-* **SQL Server cancel** uses `KILL`, which needs `ALTER ANY CONNECTION`.
-  Without it the service drops the connection, and the server finishes the
-  batch in the background.
+* **SQL Server cancel** sends a TDS Attention. Only when the server does not
+  acknowledge it within 3 s, or when a request is abandoned, does the service
+  use `KILL`, which needs `ALTER ANY CONNECTION`. Without it the service drops
+  the connection, and the server finishes the batch in the background.
 * **Database driver logs at debug level** echo SQL text, which can contain
   literals. The default filter keeps them at warn; do not raise it in
   production.

@@ -333,6 +333,10 @@ pub struct SavedTab {
     pub cursor: usize,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pinned: bool,
+    /// How `path` is written (encoding, BOM, line endings); used when the
+    /// file cannot be read back on restore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<crate::textfile::FileFormat>,
 }
 
 impl Workspace {
@@ -375,6 +379,8 @@ pub struct TabSnapshot {
     pub cursor: usize,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub pinned: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<crate::textfile::FileFormat>,
 }
 
 fn serialize_text<S: serde::Serializer>(text: &Arc<str>, s: S) -> Result<S::Ok, S::Error> {
@@ -420,6 +426,10 @@ mod tests {
                 connection: None,
                 cursor: 3,
                 pinned: true,
+                format: Some(crate::textfile::FileFormat {
+                    bom: true,
+                    ..Default::default()
+                }),
             }],
             active: 0,
         };
@@ -431,6 +441,7 @@ mod tests {
         assert_eq!(ws.tabs[0].text, "SELECT 2");
         assert_eq!(ws.tabs[0].cursor, 3);
         assert!(ws.tabs[0].pinned);
+        assert!(ws.tabs[0].format.is_some_and(|f| f.bom));
     }
 
     #[test]

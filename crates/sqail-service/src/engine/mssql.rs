@@ -10,15 +10,16 @@
 //! Cancelling sends a TDS Attention, as SSMS does: it aborts the running
 //! batch and leaves the session (its transaction, unless XACT_ABORT is on,
 //! #temp tables and SET options) as it was; later `GO` batches do not run.
-//! Only when the server does not acknowledge it in time does the canceller
-//! fall back to `KILL <spid>` from a side connection (needs ALTER ANY
-//! CONNECTION); the caller drops the connection if that does not stop it
-//! either. A batch that is a single query is also stopped with an Attention
-//! once it passes `max_rows`; other batches skip converting the rows past it.
+//! Only when the server does not acknowledge it, and the connection stops
+//! receiving anything, does the canceller fall back to `KILL <spid>` from a
+//! side connection (needs ALTER ANY CONNECTION); the caller drops the
+//! connection if that does not stop it either. A batch that is a single
+//! query is also stopped with an Attention once it passes `max_rows`; other
+//! batches skip converting the rows past it.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures::TryStreamExt;
@@ -36,6 +37,7 @@ use super::split::{check_single_statement, single_query, split_go};
 use super::value::{bytes, float, float32, int, text};
 use super::{
     Cancel, Canceller, Conn, DbError, Driver, EventSink, ExecRequest, Result, ResultWriter,
+    WIND_DOWN_LIMIT,
 };
 
 type Client = tiberius::Client<Compat<TcpStream>>;
@@ -250,9 +252,14 @@ impl Drop for MssqlConn {
     }
 }
 
-/// How long the server gets to acknowledge an Attention before the
-/// canceller falls back to KILL. Shorter than the callers' grace periods
-/// (5 s and more), so that the KILL can still stop the query in time.
+/// How long the connection may go without receiving anything before the
+/// canceller decides the server ignores the Attention and falls back to
+/// KILL. While packets keep arriving (the rows the server sent before the
+/// Attention reached it, read on the way to the acknowledgement) it waits
+/// on, up to [`WIND_DOWN_LIMIT`]: a slow link or a busy service can take
+/// longer than this to read them, and a KILL would end the session the
+/// Attention keeps. Shorter than the callers' grace periods (5 s and
+/// more), so that the KILL can still stop the query in time.
 const ATTENTION_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Clone)]
@@ -321,23 +328,34 @@ impl MssqlCancel {
 impl Cancel for MssqlCancel {
     /// Requests an Attention, which the running `execute` sends on its next
     /// read, so it needs that future polled: the callers wait for it after
-    /// cancelling. If the query has not stopped after [`ATTENTION_TIMEOUT`],
-    /// KILL it. A request made while no `execute` runs stops the next one
-    /// before its first batch (the caller may cancel before the query's
-    /// future was first polled); no caller cancels after a query finished.
+    /// cancelling. If the query has not stopped and the connection received
+    /// nothing for [`ATTENTION_TIMEOUT`], KILL it. A request made while no
+    /// `execute` runs stops the next one before its first batch (the caller
+    /// may cancel before the query's future was first polled); no caller
+    /// cancels after a query finished.
     async fn cancel(&self) -> bool {
         let finished = self.runs.finished.load(Ordering::Acquire);
+        let mut seen = self.attention.packets_read();
         self.attention.request();
         let this = self.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(ATTENTION_TIMEOUT).await;
-            if this.runs.still_running(finished) {
-                tracing::info!(
-                    spid = this.spid,
-                    "SQL Server did not acknowledge the Attention; trying KILL"
-                );
-                this.kill(Some(finished)).await;
+            let start = Instant::now();
+            loop {
+                tokio::time::sleep(ATTENTION_TIMEOUT).await;
+                if !this.runs.still_running(finished) {
+                    return;
+                }
+                let now = this.attention.packets_read();
+                if now == seen || start.elapsed() >= WIND_DOWN_LIMIT {
+                    break;
+                }
+                seen = now;
             }
+            tracing::info!(
+                spid = this.spid,
+                "SQL Server did not acknowledge the Attention; trying KILL"
+            );
+            this.kill(Some(finished)).await;
         });
         true
     }
@@ -346,6 +364,10 @@ impl Cancel for MssqlCancel {
     /// out: KILL before it is closed.
     async fn cancel_abandoned(&self) -> bool {
         self.kill(None).await
+    }
+
+    fn progress(&self) -> Option<u64> {
+        Some(self.attention.packets_read())
     }
 }
 
@@ -756,7 +778,7 @@ fn db_err(e: tiberius::error::Error) -> DbError {
             code: Some(t.code().to_string()),
             message: ms_message(&e),
         },
-        tiberius::error::Error::Io { .. } => DbError::Connect(e.to_string()),
+        tiberius::error::Error::Io { .. } => DbError::Lost(e.to_string()),
         _ => DbError::Database {
             code: None,
             message: e.to_string(),

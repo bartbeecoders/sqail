@@ -290,6 +290,69 @@ pub fn single_query(sql: &str) -> bool {
     })
 }
 
+/// A `COPY` that streams its data through the client connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyStdio {
+    /// `COPY … FROM STDIN`: the client must send the rows.
+    FromStdin,
+    /// `COPY … TO STDOUT`, in text or CSV format.
+    ToStdout,
+    /// `COPY … TO STDOUT` in binary format.
+    ToStdoutBinary,
+}
+
+/// Whether the statement `toks` is a `COPY` through the client connection.
+/// `FROM STDIN` / `TO STDOUT` count outside parentheses only (a query's
+/// `FROM stdin` is a table).
+fn copy_statement(toks: &[Tok]) -> Option<CopyStdio> {
+    if toks.first().and_then(word) != Some("copy") {
+        return None;
+    }
+    let mut depth = 0u32;
+    for (i, t) in toks.iter().enumerate() {
+        match t {
+            Tok::Open => depth += 1,
+            Tok::Close => depth = depth.saturating_sub(1),
+            Tok::Word(w) if depth == 0 => {
+                match (w.as_str(), toks.get(i + 1).and_then(word)) {
+                    ("from", Some("stdin")) => return Some(CopyStdio::FromStdin),
+                    ("to", Some("stdout")) => {
+                        // `(FORMAT binary)`, or the old `BINARY` / `WITH BINARY`.
+                        let binary = toks[i + 2..].iter().any(|t| word(t) == Some("binary"));
+                        return Some(if binary {
+                            CopyStdio::ToStdoutBinary
+                        } else {
+                            CopyStdio::ToStdout
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The `COPY … FROM STDIN` / `TO STDOUT` statements in `sql`, however the
+/// server lexes strings, the one that needs the most first (`FROM STDIN`,
+/// then binary, then `TO STDOUT`).
+pub fn copy_stdio(sql: &str) -> Option<CopyStdio> {
+    [false, true]
+        .into_iter()
+        .flat_map(|backslash| {
+            lex(sql, backslash)
+                .split(|t| *t == Tok::Semi)
+                .filter_map(copy_statement)
+                .collect::<Vec<_>>()
+        })
+        .min_by_key(|c| match c {
+            CopyStdio::FromStdin => 0,
+            CopyStdio::ToStdoutBinary => 1,
+            CopyStdio::ToStdout => 2,
+        })
+}
+
 /// One statement of a script.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Statement<'a> {
@@ -582,6 +645,45 @@ mod tests {
         ] {
             assert!(refused(sql), "{sql}");
         }
+    }
+
+    #[test]
+    fn copy_through_the_connection_is_found() {
+        use CopyStdio::*;
+        let cases: &[(&str, Option<CopyStdio>)] = &[
+            ("copy t from stdin", Some(FromStdin)),
+            (
+                "COPY public.t (a, b) FROM stdin;\n1\t2\n\\.\n",
+                Some(FromStdin),
+            ),
+            (
+                "select 1; copy t from stdin with (format csv)",
+                Some(FromStdin),
+            ),
+            ("copy (select 1) to stdout", Some(ToStdout)),
+            ("COPY t TO STDOUT WITH (FORMAT csv, HEADER)", Some(ToStdout)),
+            ("copy t to stdout (format binary)", Some(ToStdoutBinary)),
+            ("copy t to stdout with binary", Some(ToStdoutBinary)),
+            // The worst one wins.
+            ("copy t to stdout; copy u from stdin", Some(FromStdin)),
+            ("copy t to '/tmp/x'", None),
+            ("copy t from '/tmp/x'", None),
+            ("copy t from program 'cat x'", None),
+            ("copy (select * from stdin) to '/tmp/x'", None),
+            ("select * from stdin", None),
+            ("select 'copy t from stdin'", None),
+            ("select $$copy t to stdout$$", None),
+            ("-- copy t from stdin\nselect 1", None),
+            ("do $$ begin copy t to stdout; end $$", None),
+        ];
+        for (sql, want) in cases {
+            assert_eq!(copy_stdio(sql), *want, "{sql}");
+        }
+        // Hidden from one lexing only: still found.
+        assert_eq!(
+            copy_stdio(r"select 'a\'; copy t from stdin; -- '"),
+            Some(FromStdin)
+        );
     }
 
     #[test]

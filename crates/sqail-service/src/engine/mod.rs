@@ -25,8 +25,164 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 
 pub type Result<T, E = DbError> = std::result::Result<T, E>;
 
-/// Rows per `rows` event.
+/// Most rows per `rows` event.
 pub const ROW_BATCH: usize = 500;
+/// A `rows` event is sent once its rows' JSON reaches this size, so that
+/// one NDJSON line stays bounded however wide the rows are. A query's
+/// response channel holds up to 32 events, so this also bounds what the
+/// service buffers for a slow client (about 32 MiB).
+pub const BATCH_BYTES: usize = 1024 * 1024;
+/// Largest JSON size of one row. Longer values are cut to fit, with a
+/// warning, so that a single huge cell cannot make a line the client
+/// refuses (its `MAX_LINE`, 256 MiB). A line is at most about
+/// `BATCH_BYTES + MAX_ROW_BYTES`.
+pub const MAX_ROW_BYTES: usize = 64 * 1024 * 1024;
+
+/// The rows of one result set waiting to be sent: flushed at [`ROW_BATCH`]
+/// rows or [`BATCH_BYTES`] of JSON, whichever comes first.
+pub(crate) struct RowBatch {
+    rows: Vec<Vec<serde_json::Value>>,
+    bytes: usize,
+    cut_warned: bool,
+}
+
+impl RowBatch {
+    pub(crate) fn new() -> Self {
+        Self {
+            rows: Vec::with_capacity(ROW_BATCH),
+            bytes: 0,
+            cut_warned: false,
+        }
+    }
+
+    /// Add a row, cutting values that make it longer than [`MAX_ROW_BYTES`].
+    /// Returns a warning to send when this is the result set's first row
+    /// with a cut value.
+    pub(crate) fn push(&mut self, mut row: Vec<serde_json::Value>) -> Option<String> {
+        let (bytes, cut) = cap_row(&mut row, MAX_ROW_BYTES);
+        self.bytes += bytes;
+        self.rows.push(row);
+        if cut && !self.cut_warned {
+            self.cut_warned = true;
+            return Some(format!(
+                "Some values in this result were cut (ending in …): a row may take at \
+                 most {} MiB in a result. Select a part of them (substring) to see the rest.",
+                MAX_ROW_BYTES / (1024 * 1024)
+            ));
+        }
+        None
+    }
+
+    pub(crate) fn is_full(&self) -> bool {
+        self.rows.len() >= ROW_BATCH || self.bytes >= BATCH_BYTES
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    pub(crate) fn take(&mut self) -> Vec<Vec<serde_json::Value>> {
+        self.bytes = 0;
+        std::mem::replace(&mut self.rows, Vec::with_capacity(ROW_BATCH))
+    }
+}
+
+/// Bytes `s` takes as a JSON string, quotes included.
+fn json_str_len(s: &str) -> usize {
+    2 + s.bytes().map(escaped_len).sum::<usize>()
+}
+
+fn escaped_len(b: u8) -> usize {
+    match b {
+        b'"' | b'\\' | b'\n' | b'\r' | b'\t' | 0x08 | 0x0c => 2,
+        0..0x20 => 6,
+        _ => 1,
+    }
+}
+
+/// Bytes `v` takes as JSON (an upper bound for numbers).
+fn json_len(v: &serde_json::Value) -> usize {
+    use serde_json::Value;
+    match v {
+        Value::Null => 4,
+        Value::Bool(b) => {
+            if *b {
+                4
+            } else {
+                5
+            }
+        }
+        Value::Number(_) => 24,
+        Value::String(s) => json_str_len(s),
+        // Brackets, and a `,` between values.
+        Value::Array(a) => 1 + a.iter().map(|v| json_len(v) + 1).sum::<usize>().max(1),
+        Value::Object(o) => {
+            1 + o
+                .iter()
+                .map(|(k, v)| json_str_len(k) + json_len(v) + 2)
+                .sum::<usize>()
+                .max(1)
+        }
+    }
+}
+
+/// Cut values so that `row` takes at most about `max` bytes as JSON: a
+/// string keeps the prefix that fits, followed by `…`; a JSON array or
+/// object becomes the start of its JSON text. Returns the row's JSON size
+/// and whether anything was cut.
+fn cap_row(row: &mut [serde_json::Value], max: usize) -> (usize, bool) {
+    use serde_json::Value;
+    // `[` and `]`, and a `,` after each value but the last.
+    let mut used = 1;
+    let mut cut = false;
+    for v in row.iter_mut() {
+        let len = json_len(v) + 1;
+        if used + len <= max {
+            used += len;
+            continue;
+        }
+        let budget = max.saturating_sub(used + 1);
+        let text = match std::mem::take(v) {
+            Value::String(s) => s,
+            other @ (Value::Array(_) | Value::Object(_)) => other.to_string(),
+            // Scalars are a few bytes: keep them.
+            other => {
+                *v = other;
+                used += len;
+                continue;
+            }
+        };
+        let s = cut_to_json_len(text, budget);
+        used += json_str_len(&s) + 1;
+        *v = Value::String(s);
+        cut = true;
+    }
+    (used, cut)
+}
+
+/// The longest prefix of `s` (on a char boundary) that, with a trailing
+/// `…`, takes at most `budget` bytes as a JSON string.
+fn cut_to_json_len(mut s: String, budget: usize) -> String {
+    const MARK: &str = "…";
+    let room = budget.saturating_sub(2 + MARK.len());
+    let mut used = 0;
+    // Bytes of a multi-byte char are all >= 0x80, so they take one byte
+    // each; back off to a char boundary afterwards.
+    let mut end = s.len();
+    for (i, b) in s.bytes().enumerate() {
+        used += escaped_len(b);
+        if used > room {
+            end = i;
+            break;
+        }
+    }
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
+    s.push_str(MARK);
+    s
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
@@ -38,6 +194,14 @@ pub enum DbError {
     },
     #[error("cannot connect: {0}")]
     Connect(String),
+    /// An established connection died (server restart, idle kill, ...).
+    #[error("connection to the database was lost: {0}")]
+    Lost(String),
+    /// The connection turned out to be dead before the query was sent to
+    /// the server, so nothing ran: a pooled query is retried once on a
+    /// fresh connection.
+    #[error("connection to the database was lost before the query was sent; nothing was run")]
+    Stale,
     #[error("query cancelled")]
     Cancelled,
     #[error("query timed out")]
@@ -66,6 +230,7 @@ impl DbError {
         match self {
             DbError::Database { .. } => "db_error",
             DbError::Connect(_) => "connect_failed",
+            DbError::Lost(_) | DbError::Stale => "connection_lost",
             DbError::Cancelled => "cancelled",
             DbError::Timeout => "timeout",
             DbError::ClientGone => "client_gone",
@@ -74,6 +239,14 @@ impl DbError {
             DbError::Internal(_) => "internal",
             DbError::Reported => "db_error",
         }
+    }
+
+    /// Whether the connection is unusable after this error.
+    pub fn is_connection_gone(&self) -> bool {
+        matches!(
+            self,
+            DbError::Connect(_) | DbError::Lost(_) | DbError::Stale
+        )
     }
 
     pub fn to_event(&self) -> QueryEvent {
@@ -140,7 +313,7 @@ struct OpenResult {
     index: u32,
     count: u64,
     truncated: bool,
-    batch: Vec<Vec<serde_json::Value>>,
+    batch: RowBatch,
 }
 
 impl<'a> ResultWriter<'a> {
@@ -162,7 +335,7 @@ impl<'a> ResultWriter<'a> {
             index,
             count: 0,
             truncated: false,
-            batch: Vec::with_capacity(ROW_BATCH),
+            batch: RowBatch::new(),
         });
         self.sink
             .send(QueryEvent::ResultStart { index, columns })
@@ -178,22 +351,25 @@ impl<'a> ResultWriter<'a> {
             return Ok(());
         }
         cur.count += 1;
-        cur.batch.push(row);
-        if cur.batch.len() >= ROW_BATCH {
-            let rows = std::mem::replace(&mut cur.batch, Vec::with_capacity(ROW_BATCH));
-            let index = cur.index;
+        let warning = cur.batch.push(row);
+        let index = cur.index;
+        let full = cur.batch.is_full().then(|| cur.batch.take());
+        if let Some(text) = warning {
+            self.message("warning", text).await?;
+        }
+        if let Some(rows) = full {
             self.sink.send(QueryEvent::Rows { index, rows }).await?;
         }
         Ok(())
     }
 
     pub async fn end(&mut self) -> Result<()> {
-        if let Some(cur) = self.current.take() {
+        if let Some(mut cur) = self.current.take() {
             if !cur.batch.is_empty() {
                 self.sink
                     .send(QueryEvent::Rows {
                         index: cur.index,
-                        rows: cur.batch,
+                        rows: cur.batch.take(),
                     })
                     .await?;
             }
@@ -280,6 +456,43 @@ pub trait Cancel: Send + Sync {
     async fn cancel_abandoned(&self) -> bool {
         self.cancel().await
     }
+
+    /// A count that grows while a cancelled query is still winding down
+    /// (its connection still receiving what the server sent before the
+    /// cancel reached it), or `None` when the driver cannot tell. Callers
+    /// keep waiting past their grace period while it grows
+    /// ([`wind_down`]).
+    fn progress(&self) -> Option<u64> {
+        None
+    }
+}
+
+/// The longest a cancelled query that keeps making progress gets to stop.
+pub const WIND_DOWN_LIMIT: Duration = Duration::from_secs(60);
+
+/// Wait for `work`, a query that was just cancelled, to stop: `grace` at a
+/// time for as long as `canceller` reports progress, at most
+/// [`WIND_DOWN_LIMIT`]. Its output, or `None` when it did not stop. A slow
+/// link or a busy service can take longer than one grace period to read
+/// what the server had already sent, and giving up then would cost a
+/// session the connection the cancel was meant to keep.
+pub async fn wind_down<F: Future + Unpin>(
+    canceller: &dyn Cancel,
+    grace: Duration,
+    work: &mut F,
+) -> Option<F::Output> {
+    let start = Instant::now();
+    let mut seen = canceller.progress();
+    loop {
+        if let Ok(out) = tokio::time::timeout(grace, &mut *work).await {
+            return Some(out);
+        }
+        let now = canceller.progress();
+        if now.is_none() || now == seen || start.elapsed() >= WIND_DOWN_LIMIT {
+            return None;
+        }
+        seen = now;
+    }
 }
 
 pub type Canceller = Arc<dyn Cancel>;
@@ -294,6 +507,11 @@ pub trait Conn: Send {
     async fn in_transaction(&mut self) -> Result<bool>;
     /// Cheap round trip to check the connection is still usable.
     async fn ping(&mut self) -> Result<()>;
+    /// Whether the driver already knows the connection is dead (the server
+    /// closed it), without a round trip.
+    fn is_closed(&self) -> bool {
+        false
+    }
     /// Human-readable server version.
     async fn server_version(&mut self) -> Result<String>;
     /// Undo session state that user SQL may have changed (settings, role,
@@ -320,7 +538,7 @@ pub async fn with_deadline<T>(
     if !canceller.cancel().await {
         return (Err(DbError::Timeout), true);
     }
-    let stopped = tokio::time::timeout(grace, &mut work).await.is_ok();
+    let stopped = wind_down(&*canceller, grace, &mut work).await.is_some();
     (Err(DbError::Timeout), !stopped)
 }
 
@@ -417,6 +635,9 @@ pub struct Pool {
 
 /// Idle connections older than this are pinged before reuse.
 const REVALIDATE_AFTER: Duration = Duration::from_secs(30);
+/// How long that ping may take (a connection a firewall dropped silently
+/// would otherwise hang until TCP gives up).
+const PING_TIMEOUT: Duration = Duration::from_secs(5);
 /// Idle connections older than this are closed.
 const MAX_IDLE: Duration = Duration::from_secs(300);
 
@@ -448,10 +669,17 @@ impl Pool {
                 break;
             };
             let age = since.elapsed();
-            if age > MAX_IDLE {
+            // Closed by the server meanwhile (restart, pg_terminate_backend,
+            // idle timeout): replace it rather than fail the next query.
+            if age > MAX_IDLE || conn.is_closed() {
                 continue;
             }
-            if age > REVALIDATE_AFTER && conn.ping().await.is_err() {
+            if age > REVALIDATE_AFTER
+                && !matches!(
+                    tokio::time::timeout(PING_TIMEOUT, conn.ping()).await,
+                    Ok(Ok(()))
+                )
+            {
                 continue;
             }
             return Ok(Pooled::new(conn, self.clone(), permit));
@@ -501,6 +729,14 @@ impl Pooled {
         self.conn
             .as_deref_mut()
             .expect("conn present until released")
+    }
+
+    /// Replace the connection with a fresh one, keeping the pool slot: for
+    /// a connection found dead before anything was sent on it.
+    pub async fn reconnect(&mut self) -> Result<()> {
+        self.conn = Some(self.pool.driver.connect().await?);
+        self.used = false;
+        Ok(())
     }
 
     /// Return the connection as it is. Only for connections that ran nothing
@@ -568,6 +804,8 @@ mod tests {
         resets: AtomicUsize,
         cancels: AtomicUsize,
         closed: AtomicUsize,
+        /// What `is_closed` says (the server closed the connections).
+        dead: std::sync::atomic::AtomicBool,
     }
 
     struct FakeDriver {
@@ -609,6 +847,9 @@ mod tests {
         }
         async fn ping(&mut self) -> Result<()> {
             Ok(())
+        }
+        fn is_closed(&self) -> bool {
+            self.counts.dead.load(Ordering::SeqCst)
         }
         async fn server_version(&mut self) -> Result<String> {
             Ok("fake".into())
@@ -686,6 +927,39 @@ mod tests {
         assert_eq!(n(&counts.closed), 2);
     }
 
+    /// A pooled connection the server closed while it was idle is replaced
+    /// instead of failing the next query.
+    #[tokio::test]
+    async fn connections_closed_while_idle_are_replaced() {
+        let (p, counts) = pool(true);
+        let mut c = p.get().await.unwrap();
+        c.conn();
+        c.release();
+        counts.dead.store(true, Ordering::SeqCst);
+        let mut c = p.get().await.unwrap();
+        assert_eq!(n(&counts.connects), 2);
+        assert_eq!(n(&counts.closed), 1);
+        counts.dead.store(false, Ordering::SeqCst);
+        // And a checked-out connection found dead is swapped in place.
+        c.conn();
+        c.reconnect().await.unwrap();
+        assert_eq!(n(&counts.connects), 3);
+        assert_eq!(n(&counts.closed), 2);
+        c.release();
+        assert_eq!(idle(&p), 1);
+    }
+
+    #[test]
+    fn lost_connections_say_so() {
+        assert_eq!(DbError::Stale.code(), "connection_lost");
+        assert!(
+            DbError::Lost("x".into())
+                .to_string()
+                .starts_with("connection to the database was lost")
+        );
+        assert!(DbError::Stale.is_connection_gone() && !DbError::Timeout.is_connection_gone());
+    }
+
     #[tokio::test]
     async fn unused_connections_go_back_on_drop() {
         let (p, counts) = pool(true);
@@ -719,6 +993,122 @@ mod tests {
         c.release();
     }
 
+    #[test]
+    fn json_len_matches_serde() {
+        use serde_json::json;
+        for v in [
+            json!(null),
+            json!(true),
+            json!("plain"),
+            json!("quote \" back \\ nl \n tab \t ctl \u{1} é ☃"),
+            json!(["a", null, false]),
+            json!({"k": "v", "n": null}),
+        ] {
+            assert_eq!(
+                json_len(&v),
+                serde_json::to_string(&v).unwrap().len(),
+                "{v}"
+            );
+        }
+        assert!(
+            json_len(&json!(-1.5e300)) >= serde_json::to_string(&json!(-1.5e300)).unwrap().len()
+        );
+    }
+
+    /// Wide rows are sent in batches of about `BATCH_BYTES`, so that one
+    /// NDJSON line stays far below what the typed client accepts.
+    #[tokio::test]
+    async fn row_batches_are_capped_by_size() {
+        let sink = EventSink::Collect(Mutex::new(Vec::new()));
+        let mut w = ResultWriter::new(&sink, u64::MAX);
+        w.start(Vec::new()).await.unwrap();
+        let cell = "x".repeat(600_000);
+        for i in 0..500 {
+            w.row(vec![serde_json::json!(i), serde_json::json!(cell)])
+                .await
+                .unwrap();
+        }
+        w.end().await.unwrap();
+        let EventSink::Collect(buf) = sink else {
+            unreachable!()
+        };
+        let mut rows = 0;
+        let mut lines = 0;
+        for ev in buf.into_inner().unwrap() {
+            if let QueryEvent::Rows { rows: r, .. } = &ev {
+                let line = serde_json::to_vec(&ev).unwrap().len();
+                assert!(line < BATCH_BYTES + 1_000_000, "{line}");
+                rows += r.len();
+                lines += 1;
+            }
+            assert!(!matches!(ev, QueryEvent::Message { .. }));
+        }
+        assert_eq!(rows, 500);
+        assert!(lines > 50, "{lines}");
+    }
+
+    #[test]
+    fn the_largest_line_fits_the_client() {
+        // A batch flushes once it reaches BATCH_BYTES, so its last row
+        // starts below it; that row takes at most MAX_ROW_BYTES (plus the
+        // event's own few bytes).
+        const { assert!(BATCH_BYTES + MAX_ROW_BYTES + 4096 < sqail_client::MAX_LINE) };
+    }
+
+    /// A single value too large for a line is cut, with one warning per
+    /// result set, instead of producing a line the client would refuse.
+    #[tokio::test]
+    async fn huge_values_are_cut_with_a_warning() {
+        let sink = EventSink::Collect(Mutex::new(Vec::new()));
+        let mut w = ResultWriter::new(&sink, u64::MAX);
+        w.start(Vec::new()).await.unwrap();
+        let huge = "é".repeat(MAX_ROW_BYTES / 2 + 10);
+        for _ in 0..2 {
+            w.row(vec![serde_json::json!(1), serde_json::json!(huge)])
+                .await
+                .unwrap();
+        }
+        w.row(vec![serde_json::json!("small")]).await.unwrap();
+        w.end().await.unwrap();
+        let EventSink::Collect(buf) = sink else {
+            unreachable!()
+        };
+        let events = buf.into_inner().unwrap();
+        let warnings = events
+            .iter()
+            .filter(|e| matches!(e, QueryEvent::Message { severity, .. } if severity == "warning"))
+            .count();
+        assert_eq!(warnings, 1);
+        let rows: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                QueryEvent::Rows { rows, .. } => Some(rows.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(rows.len(), 3);
+        for row in &rows[..2] {
+            let len = serde_json::to_string(row).unwrap().len();
+            assert!(len <= MAX_ROW_BYTES && len > MAX_ROW_BYTES - 64, "{len}");
+            let s = row[1].as_str().unwrap();
+            assert!(s.ends_with('…') && s.starts_with("éé"));
+        }
+        assert_eq!(rows[2], vec![serde_json::json!("small")]);
+    }
+
+    #[test]
+    fn cutting_respects_escapes() {
+        let mut row = vec![serde_json::json!("\u{1}".repeat(100))];
+        let (len, cut) = cap_row(&mut row, 64);
+        assert!(cut);
+        assert_eq!(len, serde_json::to_string(&row).unwrap().len());
+        assert!(len <= 64, "{len}");
+        let mut row = vec![serde_json::json!({"a": "b".repeat(100)})];
+        assert!(cap_row(&mut row, 40).1);
+        assert!(row[0].as_str().unwrap().starts_with("{\"a\":\"bbb"));
+    }
+
     #[tokio::test]
     async fn deadlines_cancel_and_report_whether_the_query_stopped() {
         let (p, counts) = pool(true);
@@ -747,5 +1137,40 @@ mod tests {
         assert!(!broken);
         assert_eq!(n(&counts.cancels), 2);
         c.release();
+    }
+
+    /// A canceller whose progress is a shared counter.
+    struct Progressing(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl Cancel for Progressing {
+        async fn cancel(&self) -> bool {
+            true
+        }
+        fn progress(&self) -> Option<u64> {
+            Some(n(&self.0) as u64)
+        }
+    }
+
+    #[tokio::test]
+    async fn winding_down_waits_while_the_query_makes_progress() {
+        let ms = Duration::from_millis(20);
+        let packets = Arc::new(AtomicUsize::new(0));
+        let canceller = Progressing(packets.clone());
+        // Stops after six grace periods, receiving all the while: waited for.
+        let ticking = async {
+            for _ in 0..30 {
+                tokio::time::sleep(ms / 5).await;
+                packets.fetch_add(1, Ordering::Relaxed);
+            }
+            7
+        };
+        tokio::pin!(ticking);
+        assert_eq!(wind_down(&canceller, ms, &mut ticking).await, Some(7));
+        // Nothing arrives: given up on after one grace period.
+        let mut quiet = std::pin::pin!(std::future::pending::<()>());
+        let t = Instant::now();
+        assert_eq!(wind_down(&canceller, ms, &mut quiet).await, None);
+        assert!(t.elapsed() < ms * 5, "{:?}", t.elapsed());
     }
 }

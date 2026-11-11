@@ -3,9 +3,9 @@
 //! background runtime.
 
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
 use futures::StreamExt;
@@ -722,28 +722,281 @@ pub struct CsvPreview {
     pub headers: Vec<String>,
     pub rows: Vec<Vec<String>>,
     pub delimiter: u8,
+    pub encoding: Encoding,
 }
 
-/// Guess the delimiter from the first line: the most frequent of , ; tab |.
-pub fn sniff_delimiter(first_line: &str) -> u8 {
-    b",;\t|"
-        .iter()
-        .copied()
-        .max_by_key(|&d| first_line.bytes().filter(|&b| b == d).count())
-        .unwrap_or(b',')
+/// The delimiters the import offers.
+pub const DELIMITERS: [u8; 4] = *b",;\t|";
+
+pub fn delimiter_label(d: u8) -> String {
+    match d {
+        b',' => "comma (,)".into(),
+        b';' => "semicolon (;)".into(),
+        b'\t' => "tab".into(),
+        b'|' => "pipe (|)".into(),
+        d => (d as char).to_string(),
+    }
 }
 
-pub fn preview_csv(path: &Path, has_header: bool) -> Result<CsvPreview> {
+/// Guess the delimiter from the first lines of `sample`: the one of
+/// , ; tab | that splits every line into the same number of fields, the
+/// most fields winning; without such a one, the most frequent in the first
+/// line; without any, a comma (a single-column file).
+pub fn sniff_delimiter(sample: &str) -> u8 {
+    let lines: Vec<&str> = sample
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .take(10)
+        .collect();
+    let score = |d: u8| {
+        let counts: Vec<usize> = lines
+            .iter()
+            .map(|l| l.bytes().filter(|&b| b == d).count())
+            .collect();
+        let first = counts.first().copied().unwrap_or(0);
+        let consistent = first > 0 && counts.iter().all(|&c| c == first);
+        (consistent, first)
+    };
+    let mut best = (b',', (false, 0));
+    for d in DELIMITERS {
+        let sc = score(d);
+        if sc > best.1 {
+            best = (d, sc);
+        }
+    }
+    best.0
+}
+
+/// Text encodings the import reads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Encoding {
+    #[default]
+    Utf8,
+    Utf16Le,
+    Utf16Be,
+    /// Windows' Western European ("ANSI") code page.
+    Windows1252,
+}
+
+impl Encoding {
+    pub const ALL: [Encoding; 4] = [
+        Encoding::Utf8,
+        Encoding::Utf16Le,
+        Encoding::Utf16Be,
+        Encoding::Windows1252,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Encoding::Utf8 => "UTF-8",
+            Encoding::Utf16Le => "UTF-16 LE",
+            Encoding::Utf16Be => "UTF-16 BE",
+            Encoding::Windows1252 => "Windows-1252",
+        }
+    }
+
+    /// The encoding of a file starting with `head`: from its byte order
+    /// mark, else UTF-16 when every other byte is zero, else UTF-8 when it
+    /// is valid UTF-8, else Windows-1252.
+    pub fn detect(head: &[u8]) -> Encoding {
+        match head {
+            [0xEF, 0xBB, 0xBF, ..] => return Encoding::Utf8,
+            [0xFF, 0xFE, ..] => return Encoding::Utf16Le,
+            [0xFE, 0xFF, ..] => return Encoding::Utf16Be,
+            _ => {}
+        }
+        let pairs = head.len() / 2;
+        if pairs >= 2 {
+            let zeros = |odd: bool| {
+                head.as_chunks::<2>()
+                    .0
+                    .iter()
+                    .filter(|p| p[usize::from(odd)] == 0)
+                    .count()
+            };
+            if zeros(true) * 10 >= pairs * 9 && zeros(false) == 0 {
+                return Encoding::Utf16Le;
+            }
+            if zeros(false) * 10 >= pairs * 9 && zeros(true) == 0 {
+                return Encoding::Utf16Be;
+            }
+        }
+        match std::str::from_utf8(head) {
+            Ok(_) => Encoding::Utf8,
+            // Cut in the middle of a character at the end of the sample.
+            Err(e) if e.error_len().is_none() => Encoding::Utf8,
+            Err(_) => Encoding::Windows1252,
+        }
+    }
+}
+
+/// Windows-1252 bytes 0x80..=0x9F; the rest are the same as Latin-1.
+const CP1252_HIGH: [char; 32] = [
+    '\u{20AC}', '\u{81}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}', '\u{2021}',
+    '\u{02C6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{8D}', '\u{017D}', '\u{8F}',
+    '\u{90}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}', '\u{2013}', '\u{2014}',
+    '\u{02DC}', '\u{2122}', '\u{0161}', '\u{203A}', '\u{0153}', '\u{9D}', '\u{017E}', '\u{0178}',
+];
+
+/// Reads text in `encoding` as UTF-8, a chunk at a time, so a large file is
+/// never held in memory. A byte order mark is dropped. UTF-8 passes through
+/// (the CSV reader checks it).
+///
+/// A small self-contained decoder; the .sql file open/save code may grow its
+/// own, and the two can be unified later.
+struct Decode<R> {
+    inner: R,
+    encoding: Encoding,
+    /// Decoded bytes not yet handed out, from `pos`.
+    out: Vec<u8>,
+    pos: usize,
+    /// Undecoded bytes left over (half a UTF-16 unit or surrogate pair).
+    rest: Vec<u8>,
+    start: bool,
+}
+
+impl<R: Read> Decode<R> {
+    fn new(inner: R, encoding: Encoding) -> Self {
+        Self {
+            inner,
+            encoding,
+            out: Vec::new(),
+            pos: 0,
+            rest: Vec::new(),
+            start: true,
+        }
+    }
+
+    /// Decode the next chunk into `out`; false at the end of the input.
+    fn fill(&mut self) -> std::io::Result<bool> {
+        let mut buf = [0u8; 16 * 1024];
+        let n = self.inner.read(&mut buf)?;
+        let mut bytes = std::mem::take(&mut self.rest);
+        bytes.extend_from_slice(&buf[..n]);
+        if self.start && (bytes.len() >= 2 || n == 0) {
+            self.start = false;
+            let bom: &[u8] = match self.encoding {
+                Encoding::Utf16Le => &[0xFF, 0xFE],
+                Encoding::Utf16Be => &[0xFE, 0xFF],
+                Encoding::Utf8 | Encoding::Windows1252 => &[],
+            };
+            if !bom.is_empty() && bytes.starts_with(bom) {
+                bytes.drain(..2);
+            }
+        } else if self.start {
+            self.rest = bytes;
+            return Ok(true);
+        }
+        self.out.clear();
+        self.pos = 0;
+        let bad =
+            |what: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, what.to_string());
+        match self.encoding {
+            Encoding::Utf8 => self.out = bytes,
+            Encoding::Windows1252 => {
+                let mut text = String::with_capacity(bytes.len());
+                for b in bytes {
+                    text.push(match b {
+                        0x80..=0x9F => CP1252_HIGH[usize::from(b - 0x80)],
+                        b => char::from(b),
+                    });
+                }
+                self.out = text.into_bytes();
+            }
+            Encoding::Utf16Le | Encoding::Utf16Be => {
+                let le = self.encoding == Encoding::Utf16Le;
+                let mut units: Vec<u16> = bytes
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|p| {
+                        if le {
+                            u16::from_le_bytes([p[0], p[1]])
+                        } else {
+                            u16::from_be_bytes([p[0], p[1]])
+                        }
+                    })
+                    .collect();
+                let mut keep = bytes.len() % 2;
+                // A high surrogate at the end waits for its pair.
+                if n > 0 && units.last().is_some_and(|u| (0xD800..0xDC00).contains(u)) {
+                    units.pop();
+                    keep += 2;
+                }
+                if n == 0 && keep > 0 {
+                    return Err(bad("the file ends in the middle of a UTF-16 character"));
+                }
+                self.rest = bytes[bytes.len() - keep..].to_vec();
+                let text: String = char::decode_utf16(units)
+                    .collect::<Result<_, _>>()
+                    .map_err(|_| bad("not valid UTF-16 text"))?;
+                self.out = text.into_bytes();
+            }
+        }
+        Ok(n > 0 || !self.out.is_empty())
+    }
+}
+
+impl<R: Read> Read for Decode<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        while self.pos >= self.out.len() {
+            if !self.fill()? {
+                return Ok(0);
+            }
+        }
+        let n = buf.len().min(self.out.len() - self.pos);
+        buf[..n].copy_from_slice(&self.out[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
+
+/// A CSV reader error, with the file's line number when known.
+fn csv_error(e: csv::Error) -> anyhow::Error {
+    let line = e.position().map(|p| p.line());
+    let e = match e.kind() {
+        csv::ErrorKind::Utf8 { .. } => anyhow::anyhow!(
+            "the text is not valid UTF-8; pick the file's encoding (e.g. Windows-1252)"
+        ),
+        _ => anyhow::Error::new(e),
+    };
+    match line {
+        Some(l) => e.context(format!("CSV line {l}")),
+        None => e,
+    }
+}
+
+/// Preview `path` for the import dialog. `delimiter` and `encoding` are the
+/// user's choice; `None` detects them.
+pub fn preview_csv(
+    path: &Path,
+    has_header: bool,
+    delimiter: Option<u8>,
+    encoding: Option<Encoding>,
+) -> Result<CsvPreview> {
     let text = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    let first = String::from_utf8_lossy(&text[..text.len().min(4096)]);
-    let delimiter = sniff_delimiter(first.lines().next().unwrap_or(""));
+    let encoding = encoding.unwrap_or_else(|| Encoding::detect(&text[..text.len().min(8192)]));
+    let delimiter = match delimiter {
+        Some(d) => d,
+        None => {
+            let mut head = Vec::new();
+            Decode::new(&text[..text.len().min(8192)], encoding)
+                .read_to_end(&mut head)
+                .ok();
+            sniff_delimiter(&String::from_utf8_lossy(&head))
+        }
+    };
     let mut r = csv::ReaderBuilder::new()
         .delimiter(delimiter)
         .has_headers(has_header)
         .flexible(true)
-        .from_reader(&text[..]);
+        .from_reader(Decode::new(&text[..], encoding));
     let headers = if has_header {
-        r.headers()?.iter().map(str::to_string).collect()
+        r.headers()
+            .map_err(csv_error)?
+            .iter()
+            .map(str::to_string)
+            .collect()
     } else {
         Vec::new()
     };
@@ -751,7 +1004,8 @@ pub fn preview_csv(path: &Path, has_header: bool) -> Result<CsvPreview> {
         .records()
         .take(8)
         .map(|rec| rec.map(|r| r.iter().map(str::to_string).collect()))
-        .collect::<Result<_, _>>()?;
+        .collect::<Result<_, _>>()
+        .map_err(csv_error)?;
     let width = rows
         .iter()
         .map(Vec::len)
@@ -767,6 +1021,7 @@ pub fn preview_csv(path: &Path, has_header: bool) -> Result<CsvPreview> {
         headers,
         rows,
         delimiter,
+        encoding,
     })
 }
 
@@ -791,6 +1046,7 @@ pub struct ImportSpec {
     pub mapping: Vec<Option<usize>>,
     pub has_header: bool,
     pub delimiter: u8,
+    pub encoding: Encoding,
     pub empty_is_null: bool,
 }
 
@@ -880,11 +1136,14 @@ async fn exec(client: &Client, session: Uuid, sql: String, params: Vec<Param>) -
     Ok(())
 }
 
-/// Import a CSV file in one transaction. Returns the number of rows.
+/// Import a CSV file in one transaction. Returns the number of rows. Every
+/// row must have as many fields as the header (or the first row). Setting
+/// `cancel` stops the import and rolls it back.
 pub async fn import_csv(
     client: &Client,
     path: &Path,
     spec: &ImportSpec,
+    cancel: &AtomicBool,
     mut progress: impl FnMut(u64),
 ) -> Result<u64> {
     let sources: Vec<usize> = spec.mapping.iter().flatten().copied().collect();
@@ -910,7 +1169,13 @@ pub async fn import_csv(
         .delimiter(spec.delimiter)
         .has_headers(spec.has_header)
         .flexible(true)
-        .from_reader(std::io::BufReader::new(file));
+        .from_reader(Decode::new(std::io::BufReader::new(file), spec.encoding));
+    let cancelled = || {
+        if cancel.load(Ordering::Relaxed) {
+            bail!("import cancelled");
+        }
+        Ok(())
+    };
 
     let session = client.open_session(spec.connection).await?.id;
     let begin = if spec.engine == Engine::Mssql {
@@ -923,10 +1188,33 @@ pub async fn import_csv(
         let mut done = 0u64;
         let mut batch: Vec<Param> = Vec::with_capacity(batch_rows * per_row);
         let mut in_batch = 0usize;
-        let mut line = if spec.has_header { 1u64 } else { 0 };
-        for rec in reader.records() {
-            line += 1;
-            let rec = rec.with_context(|| format!("CSV line {line}"))?;
+        let mut line = 0u64;
+        let mut width = if spec.has_header {
+            Some(reader.headers().map_err(csv_error)?.len())
+        } else {
+            None
+        };
+        let mut rec = csv::StringRecord::new();
+        loop {
+            cancelled()?;
+            if !reader.read_record(&mut rec).map_err(csv_error)? {
+                break;
+            }
+            // The physical line the record starts on (quoted fields can
+            // hold line breaks).
+            line = rec.position().map_or(line + 1, |p| p.line());
+            let expected = *width.get_or_insert(rec.len());
+            if rec.len() != expected {
+                let what = if spec.has_header {
+                    "the header"
+                } else {
+                    "the first row"
+                };
+                bail!(
+                    "CSV line {line} has {} fields, {what} has {expected}",
+                    rec.len()
+                );
+            }
             for (i, &src) in sources.iter().enumerate() {
                 let v = rec.get(src).unwrap_or("");
                 batch.push(if v.is_empty() && spec.empty_is_null {
@@ -942,6 +1230,7 @@ pub async fn import_csv(
             }
             in_batch += 1;
             if in_batch == batch_rows {
+                cancelled()?;
                 exec(
                     client,
                     session,
@@ -956,12 +1245,14 @@ pub async fn import_csv(
             }
         }
         if in_batch > 0 {
+            cancelled()?;
             exec(client, session, insert_sql(spec, in_batch), batch)
                 .await
                 .with_context(|| format!("rows ending at CSV line {line}"))?;
             done += in_batch as u64;
             progress(done);
         }
+        cancelled()?;
         exec(client, session, "COMMIT".into(), vec![]).await?;
         Ok::<u64, anyhow::Error>(done)
     }
@@ -1076,6 +1367,63 @@ mod tests {
         assert_eq!(sniff_delimiter("a;b;c"), b';');
         assert_eq!(sniff_delimiter("a\tb"), b'\t');
         assert_eq!(sniff_delimiter("a,b"), b',');
+        assert_eq!(sniff_delimiter("a|b\n1|2"), b'|');
+        // A single column has no delimiter: a comma does no harm.
+        assert_eq!(sniff_delimiter("name\nAda\nLinus"), b',');
+        assert_eq!(sniff_delimiter(""), b',');
+        // The delimiter that splits every line alike wins over one that only
+        // appears in the header.
+        assert_eq!(sniff_delimiter("id;name,full\n1;x\n2;y"), b';');
+        assert_eq!(sniff_delimiter("a,b;c\n1,2;3"), b',');
+    }
+
+    fn decode(bytes: &[u8], enc: Encoding) -> std::io::Result<String> {
+        let mut out = String::new();
+        // A tiny inner buffer exercises characters split across reads.
+        struct Slow<'a>(&'a [u8]);
+        impl Read for Slow<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let n = buf.len().min(self.0.len()).min(3);
+                buf[..n].copy_from_slice(&self.0[..n]);
+                self.0 = &self.0[n..];
+                Ok(n)
+            }
+        }
+        Decode::new(Slow(bytes), enc).read_to_string(&mut out)?;
+        Ok(out)
+    }
+
+    #[test]
+    fn encodings_are_detected_and_decoded() {
+        let text = "naïve,€ 5,😀\n";
+        let mut le = vec![0xFF, 0xFE];
+        let mut be = vec![0xFE, 0xFF];
+        for u in text.encode_utf16() {
+            le.extend(u.to_le_bytes());
+            be.extend(u.to_be_bytes());
+        }
+        assert_eq!(Encoding::detect(&le), Encoding::Utf16Le);
+        assert_eq!(Encoding::detect(&be), Encoding::Utf16Be);
+        assert_eq!(decode(&le, Encoding::Utf16Le).unwrap(), text);
+        assert_eq!(decode(&be, Encoding::Utf16Be).unwrap(), text);
+        // Without a BOM.
+        let plain: Vec<u8> = "id,n\n1,a\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert_eq!(Encoding::detect(&plain), Encoding::Utf16Le);
+        assert_eq!(decode(&plain, Encoding::Utf16Le).unwrap(), "id,n\n1,a\n");
+        let cp1252 = b"na\xEFve,\x80 5,\x93q\x94\n";
+        assert_eq!(Encoding::detect(cp1252), Encoding::Windows1252);
+        assert_eq!(
+            decode(cp1252, Encoding::Windows1252).unwrap(),
+            "naïve,€ 5,\u{201C}q\u{201D}\n"
+        );
+        let utf8 = "\u{feff}naïve\n".as_bytes();
+        assert_eq!(Encoding::detect(utf8), Encoding::Utf8);
+        assert_eq!(Encoding::detect(b"plain ascii"), Encoding::Utf8);
+        // A truncated UTF-16 file is an error, not silently cut.
+        assert!(decode(&le[..le.len() - 1], Encoding::Utf16Le).is_err());
     }
 
     #[test]
@@ -1106,6 +1454,7 @@ mod tests {
             mapping: vec![Some(0), Some(1), None],
             has_header: true,
             delimiter: b',',
+            encoding: Encoding::Utf8,
             empty_is_null: true,
         };
         assert_eq!(

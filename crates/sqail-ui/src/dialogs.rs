@@ -1726,11 +1726,15 @@ pub struct ImportForm {
     table: String,
     path: std::path::PathBuf,
     preview: crate::transfer::CsvPreview,
+    /// The file can't be read with the chosen delimiter or encoding.
+    preview_error: Option<String>,
     has_header: bool,
     empty_is_null: bool,
     columns: Option<Result<Vec<sqail_client::proto::ColumnInfo>, String>>,
     mapping: Vec<Option<usize>>,
     pub busy: bool,
+    /// Set by Cancel: the running import stops and rolls back.
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub progress: u64,
     pub result: Option<Result<u64, String>>,
 }
@@ -1751,11 +1755,13 @@ impl ImportForm {
             table,
             path,
             preview,
+            preview_error: None,
             has_header: true,
             empty_is_null: true,
             columns: None,
             mapping: Vec::new(),
             busy: false,
+            cancel: Default::default(),
             progress: 0,
             result: None,
         }
@@ -1784,17 +1790,47 @@ fn import(ctx: &egui::Context, app: &mut SqailApp) {
                 .monospace()
                 .weak(),
         );
-        ui.horizontal(|ui| {
-            reheader = ui
-                .checkbox(&mut form.has_header, "First row is a header")
-                .changed();
-            ui.checkbox(&mut form.empty_is_null, "Empty fields are NULL");
-            let d = match form.preview.delimiter {
-                b'\t' => "tab".to_string(),
-                b => (b as char).to_string(),
-            };
-            ui.label(RichText::new(format!("delimiter: {d}")).weak());
+        ui.add_enabled_ui(!form.busy, |ui| {
+            ui.horizontal(|ui| {
+                reheader |= ui
+                    .checkbox(&mut form.has_header, "First row is a header")
+                    .changed();
+                ui.checkbox(&mut form.empty_is_null, "Empty fields are NULL");
+            });
+            ui.horizontal(|ui| {
+                let label = ui.label("Delimiter");
+                egui::ComboBox::from_id_salt("import_delimiter")
+                    .selected_text(crate::transfer::delimiter_label(form.preview.delimiter))
+                    .show_ui(ui, |ui| {
+                        for d in crate::transfer::DELIMITERS {
+                            reheader |= ui
+                                .selectable_value(
+                                    &mut form.preview.delimiter,
+                                    d,
+                                    crate::transfer::delimiter_label(d),
+                                )
+                                .changed();
+                        }
+                    })
+                    .response
+                    .labelled_by(label.id);
+                let label = ui.label("Encoding");
+                egui::ComboBox::from_id_salt("import_encoding")
+                    .selected_text(form.preview.encoding.label())
+                    .show_ui(ui, |ui| {
+                        for e in crate::transfer::Encoding::ALL {
+                            reheader |= ui
+                                .selectable_value(&mut form.preview.encoding, e, e.label())
+                                .changed();
+                        }
+                    })
+                    .response
+                    .labelled_by(label.id);
+            });
         });
+        if let Some(e) = &form.preview_error {
+            ui.colored_label(Color32::from_rgb(0xd6, 0x45, 0x45), e);
+        }
         ui.separator();
         match &form.columns {
             None => {
@@ -1858,7 +1894,11 @@ fn import(ctx: &egui::Context, app: &mut SqailApp) {
         if form.busy {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(format!("Imported {} rows…", form.progress));
+                if form.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    ui.label("Cancelling, rolling back…");
+                } else {
+                    ui.label(format!("Imported {} rows…", form.progress));
+                }
             });
         }
         match &form.result {
@@ -1878,6 +1918,7 @@ fn import(ctx: &egui::Context, app: &mut SqailApp) {
         }
         ui.horizontal(|ui| {
             let ready = !form.busy
+                && form.preview_error.is_none()
                 && form.result.as_ref().is_none_or(|r| r.is_err())
                 && matches!(form.columns, Some(Ok(_)))
                 && form.mapping.iter().any(Option::is_some);
@@ -1887,10 +1928,17 @@ fn import(ctx: &egui::Context, app: &mut SqailApp) {
             {
                 start = true;
             }
-            if ui
-                .add_enabled(!form.busy, egui::Button::new("Close"))
-                .clicked()
-            {
+            if form.busy {
+                let cancelling = form.cancel.load(std::sync::atomic::Ordering::Relaxed);
+                if ui
+                    .add_enabled(!cancelling, egui::Button::new("Cancel"))
+                    .on_hover_text("Stop the import; nothing is imported")
+                    .clicked()
+                {
+                    form.cancel
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            } else if ui.button("Close").clicked() {
                 close = true;
             }
         });
@@ -1898,10 +1946,22 @@ fn import(ctx: &egui::Context, app: &mut SqailApp) {
     if resp.should_close() && !form.busy {
         close = true;
     }
-    if reheader && let Ok(p) = crate::transfer::preview_csv(&form.path, form.has_header) {
-        form.preview = p;
-        if let Some(Ok(cols)) = &form.columns {
-            form.mapping = crate::transfer::auto_map(&form.preview.headers, cols);
+    if reheader {
+        let (delimiter, encoding) = (form.preview.delimiter, form.preview.encoding);
+        match crate::transfer::preview_csv(
+            &form.path,
+            form.has_header,
+            Some(delimiter),
+            Some(encoding),
+        ) {
+            Ok(p) => {
+                form.preview = p;
+                form.preview_error = None;
+                if let Some(Ok(cols)) = &form.columns {
+                    form.mapping = crate::transfer::auto_map(&form.preview.headers, cols);
+                }
+            }
+            Err(e) => form.preview_error = Some(format!("{e:#}")),
         }
     }
     if start
@@ -1919,11 +1979,14 @@ fn import(ctx: &egui::Context, app: &mut SqailApp) {
             mapping: form.mapping.clone(),
             has_header: form.has_header,
             delimiter: form.preview.delimiter,
+            encoding: form.preview.encoding,
             empty_is_null: form.empty_is_null,
         };
         let path = form.path.clone();
+        form.cancel = Default::default();
+        let cancel = form.cancel.clone();
         app.worker.spawn(move |sink| async move {
-            let res = crate::transfer::import_csv(&client, &path, &spec, |n| {
+            let res = crate::transfer::import_csv(&client, &path, &spec, &cancel, |n| {
                 sink.send(Msg::ImportProgress(n))
             })
             .await;

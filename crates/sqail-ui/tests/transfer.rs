@@ -123,7 +123,7 @@ fn round_trip(
     let columns =
         s.rt.block_on(s.client.columns(conn, schema, target))
             .unwrap();
-    let preview = transfer::preview_csv(&csv, true).unwrap();
+    let preview = transfer::preview_csv(&csv, true, None, None).unwrap();
     let spec = ImportSpec {
         connection: conn,
         engine,
@@ -133,6 +133,7 @@ fn round_trip(
         columns,
         has_header: true,
         delimiter: preview.delimiter,
+        encoding: preview.encoding,
         empty_is_null: true,
     };
     assert!(
@@ -141,8 +142,14 @@ fn round_trip(
         spec.mapping
     );
     let imported =
-        s.rt.block_on(transfer::import_csv(&s.client, &csv, &spec, |_| {}))
-            .unwrap();
+        s.rt.block_on(transfer::import_csv(
+            &s.client,
+            &csv,
+            &spec,
+            &Default::default(),
+            |_| {},
+        ))
+        .unwrap();
     assert_eq!(imported, exported);
     let source_rows = s.rows(conn, &compare.replace("{t}", source));
     let target_rows = s.rows(conn, &compare.replace("{t}", target));
@@ -190,7 +197,7 @@ line'), (3, 'Grace', NULL, '');
     let columns =
         s.rt.block_on(s.client.columns(conn, Some("main"), "dst"))
             .unwrap();
-    let preview = transfer::preview_csv(&csv, true).unwrap();
+    let preview = transfer::preview_csv(&csv, true, None, None).unwrap();
     let spec = ImportSpec {
         connection: conn,
         engine: Engine::Sqlite,
@@ -200,11 +207,18 @@ line'), (3, 'Grace', NULL, '');
         columns,
         has_header: true,
         delimiter: b',',
+        encoding: transfer::Encoding::Utf8,
         empty_is_null: true,
     };
     let err =
-        s.rt.block_on(transfer::import_csv(&s.client, &csv, &spec, |_| {}))
-            .unwrap_err();
+        s.rt.block_on(transfer::import_csv(
+            &s.client,
+            &csv,
+            &spec,
+            &Default::default(),
+            |_| {},
+        ))
+        .unwrap_err();
     assert!(format!("{err:#}").contains("UNIQUE"), "{err:#}");
     assert_eq!(
         s.rows(conn, "SELECT count(*) FROM dst"),
@@ -248,11 +262,18 @@ line'), (3, 'Grace', NULL, '');
         columns,
         has_header: true,
         delimiter: b',',
+        encoding: transfer::Encoding::Utf8,
         empty_is_null: true,
     };
     let err =
-        s.rt.block_on(transfer::import_csv(&s.client, &csv, &spec, |_| {}))
-            .unwrap_err();
+        s.rt.block_on(transfer::import_csv(
+            &s.client,
+            &csv,
+            &spec,
+            &Default::default(),
+            |_| {},
+        ))
+        .unwrap_err();
     let err = format!("{err:#}");
     assert!(
         err.contains("CSV line 3, column b: 'hello' is not a binary value"),
@@ -262,6 +283,113 @@ line'), (3, 'Grace', NULL, '');
         s.rows(conn, "SELECT count(*) FROM bdst"),
         vec![vec![serde_json::json!(4)]]
     );
+}
+
+/// Import options and failures: rows with too few fields are refused with
+/// their physical line, other encodings and delimiters import, and Cancel
+/// rolls back.
+#[test]
+fn csv_import_checks_rows_encodings_and_cancel() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let s = svc();
+    let conn = s.connect(
+        "lite",
+        ConnectionParams::Sqlite(SqliteParams {
+            path: s.dir.path().join("imp.db").to_string_lossy().into(),
+            create: true,
+        }),
+        None,
+    );
+    s.rows(
+        conn,
+        "CREATE TABLE p (id INTEGER PRIMARY KEY, name TEXT, note TEXT)",
+    );
+    let columns =
+        s.rt.block_on(s.client.columns(conn, Some("main"), "p"))
+            .unwrap();
+    let import = |name: &str, bytes: &[u8], cancel: &AtomicBool, after: &dyn Fn(u64)| {
+        let csv = s.dir.path().join(name);
+        std::fs::write(&csv, bytes).unwrap();
+        let preview = transfer::preview_csv(&csv, true, None, None).unwrap();
+        let spec = ImportSpec {
+            connection: conn,
+            engine: Engine::Sqlite,
+            schema: Some("main".into()),
+            table: "p".into(),
+            mapping: transfer::auto_map(&preview.headers, &columns),
+            columns: columns.clone(),
+            has_header: true,
+            delimiter: preview.delimiter,
+            encoding: preview.encoding,
+            empty_is_null: true,
+        };
+        s.rt.block_on(transfer::import_csv(&s.client, &csv, &spec, cancel, after))
+            .map_err(|e| format!("{e:#}"))
+    };
+    let go = AtomicBool::new(false);
+    let count = || s.rows(conn, "SELECT count(*) FROM p")[0][0].clone();
+
+    // Line 4 is short; line 2's quoted note spans two lines, so it is the
+    // fourth line of the file, not the third record.
+    let err = import(
+        "short.csv",
+        b"id,name,note\n1,a,\"two\nlines\"\n2,b\n3,c,x\n",
+        &go,
+        &|_| {},
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("CSV line 4 has 2 fields, the header has 3"),
+        "{err}"
+    );
+    assert_eq!(count(), serde_json::json!(0));
+
+    // Windows-1252 with semicolons (and a comma in a value).
+    let n = import(
+        "ansi.csv",
+        b"id;name;note\n1;Ren\xE9e;\x80 5, more\n",
+        &go,
+        &|_| {},
+    )
+    .unwrap();
+    assert_eq!(n, 1);
+    // UTF-16 with a BOM, tab-separated.
+    let mut utf16 = vec![0xFF, 0xFE];
+    utf16.extend(
+        "id\tname\tnote\n2\t日本\t😀\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes),
+    );
+    assert_eq!(import("u16.csv", &utf16, &go, &|_| {}).unwrap(), 1);
+    assert_eq!(
+        s.rows(conn, "SELECT id, name, note FROM p ORDER BY id"),
+        vec![
+            vec![
+                serde_json::json!(1),
+                serde_json::json!("Renée"),
+                serde_json::json!("€ 5, more")
+            ],
+            vec![
+                serde_json::json!(2),
+                serde_json::json!("日本"),
+                serde_json::json!("😀")
+            ],
+        ]
+    );
+
+    // Cancelled after the first batch: nothing stays.
+    let mut big = String::from("id,name,note\n");
+    for i in 100..3100 {
+        big.push_str(&format!("{i},n{i},\n"));
+    }
+    let cancel = AtomicBool::new(false);
+    let err = import("big.csv", big.as_bytes(), &cancel, &|n| {
+        assert!(n < 3000, "the import ran to the end");
+        cancel.store(true, Ordering::Relaxed);
+    })
+    .unwrap_err();
+    assert!(err.contains("cancelled"), "{err}");
+    assert_eq!(count(), serde_json::json!(2));
 }
 
 /// "Export whole result" re-runs only the statement behind the result, on

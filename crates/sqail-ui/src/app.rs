@@ -1170,7 +1170,7 @@ impl SqailApp {
         let Some(engine) = self.engine_of(Some(conn)) else {
             return;
         };
-        match crate::transfer::preview_csv(&path, true) {
+        match crate::transfer::preview_csv(&path, true, None, None) {
             Ok(preview) => {
                 self.dialog = Dialog::Import(Box::new(crate::dialogs::ImportForm::new(
                     conn,

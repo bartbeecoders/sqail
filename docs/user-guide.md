@@ -363,7 +363,13 @@ remember their state.
   *Design table…*, *Import CSV…*, *Script CREATE*, *Drop table…* or *Copy
   name*. *Import CSV* reads binary columns as `0x` + hex, the way CSV
   export writes them, and stops (changing nothing) at a value that isn't
-  valid hex. Right-click a routine for *Script definition* or *Copy name*.
+  valid hex. The import guesses the delimiter (comma, semicolon, tab or
+  pipe) and the encoding (UTF-8, UTF-16 or Windows-1252, from the byte
+  order mark or the bytes); both can be changed in the dialog. A row with
+  more or fewer fields than the header is an error naming its line in the
+  file, and *Cancel* stops a running import. The import runs in one
+  transaction, so an error or *Cancel* leaves the table unchanged.
+  Right-click a routine for *Script definition* or *Copy name*.
   *Script CREATE* on a table writes columns with their identity, computed
   or generated definition, defaults, collations, keys, unique, check and
   foreign-key constraints (with their `ON DELETE`/`ON UPDATE` actions) and

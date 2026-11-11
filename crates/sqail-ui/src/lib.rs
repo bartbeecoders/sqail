@@ -23,6 +23,7 @@ pub mod settings;
 pub mod settings_ui;
 pub mod sidebar;
 pub mod sql;
+pub mod textfile;
 pub mod theme;
 pub mod transfer;
 pub mod worker;

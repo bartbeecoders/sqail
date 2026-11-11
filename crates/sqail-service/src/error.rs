@@ -80,7 +80,7 @@ impl From<DbError> for ApiError {
             | DbError::Invalid(_)
             | DbError::Unsupported(_)
             | DbError::Reported => StatusCode::BAD_REQUEST,
-            DbError::Connect(_) => StatusCode::BAD_GATEWAY,
+            DbError::Connect(_) | DbError::Lost(_) | DbError::Stale => StatusCode::BAD_GATEWAY,
             DbError::Cancelled | DbError::ClientGone => StatusCode::CONFLICT,
             DbError::Timeout => StatusCode::GATEWAY_TIMEOUT,
             DbError::Internal(_) => return Self::internal(e),

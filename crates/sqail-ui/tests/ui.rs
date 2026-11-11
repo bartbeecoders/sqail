@@ -64,6 +64,23 @@ fn run_with(
     });
 }
 
+/// Wait until autosave (written on the worker) has put `text` in the
+/// workspace file in `dir`.
+fn wait_workspace(dir: &std::path::Path, text: &str) -> String {
+    let start = Instant::now();
+    loop {
+        let saved = std::fs::read_to_string(dir.join("workspace.json")).unwrap_or_default();
+        if saved.contains(text) {
+            return saved;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "workspace.json never got {text:?}: {saved}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// A running service with an SQLite connection "people db" (table `people`),
 /// and a UI config dir pointing at it.
 struct Env {
@@ -174,8 +191,8 @@ fn workspace_history_and_snippets_survive_a_restart() {
         // Autosave runs about once a second; no clean shutdown afterwards.
         std::thread::sleep(Duration::from_millis(1100));
         h.run_steps(3);
+        wait_workspace(&e.ui_dir, "unsaved draft");
     }
-    assert!(e.ui_dir.join("workspace.json").exists());
     // A custom keybinding takes effect on the next start.
     std::fs::write(
         e.ui_dir.join("keybindings.toml"),
@@ -248,8 +265,7 @@ fn a_damaged_workspace_is_kept_and_reported() {
         damaged,
         "the damaged file is kept"
     );
-    let saved = std::fs::read_to_string(e.ui_dir.join("workspace.json")).unwrap();
-    assert!(saved.contains("new work"), "{saved}");
+    wait_workspace(&e.ui_dir, "new work");
     drop(h);
 
     // The next start is clean and keeps the earlier .bad file.
@@ -419,6 +435,423 @@ fn tabs_close_with_the_close_button() {
     h.get_by_label("Save").click();
     wait(&mut h, "saved and closed", |a| a.tabs.len() == 1);
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "SELECT 2");
+}
+
+/// Files keep their encoding, byte-order mark and line endings: the editor
+/// sees `\n` and no BOM, and saving writes the file back the way it was
+/// (#143).
+#[test]
+fn files_keep_their_encoding_bom_and_line_endings() {
+    let e = env();
+    let mut h = app([1280.0, 800.0]);
+    let open = |h: &mut Harness<'_, SqailApp>, path: &std::path::Path| {
+        h.state_mut().open_path(path.to_path_buf());
+        wait(h, "file opened", |a| {
+            a.tabs[a.active].path.as_deref() == Some(path)
+        });
+        h.state().active
+    };
+    // Empty the file first, so the wait sees the save land even when the
+    // tab was clean already.
+    let save = |h: &mut Harness<'_, SqailApp>, idx: usize| {
+        let path = h.state().tabs[idx].path.clone().unwrap();
+        std::fs::write(&path, b"").unwrap();
+        h.state_mut().save_tab(idx, false);
+        wait(h, "file saved", |a| {
+            !a.tabs[idx].is_dirty() && std::fs::metadata(&path).is_ok_and(|m| m.len() > 0)
+        });
+    };
+
+    // UTF-8 with BOM and CRLF (as SSMS writes it).
+    let ssms = e.dir.path().join("ssms.sql");
+    std::fs::write(&ssms, b"\xEF\xBB\xBFSELECT 1\r\nSELECT 2\r\n").unwrap();
+    let idx = open(&mut h, &ssms);
+    assert_eq!(h.state().tabs[idx].text, "SELECT 1\nSELECT 2\n");
+    assert!(!h.state().tabs[idx].is_dirty());
+    save(&mut h, idx);
+    assert_eq!(
+        std::fs::read(&ssms).unwrap(),
+        b"\xEF\xBB\xBFSELECT 1\r\nSELECT 2\r\n",
+        "an untouched file is written back byte for byte"
+    );
+    h.state_mut().tabs[idx].text = "SELECT 1X\nSELECT 2\nSELECT 3".into();
+    save(&mut h, idx);
+    assert_eq!(
+        std::fs::read(&ssms).unwrap(),
+        b"\xEF\xBB\xBFSELECT 1X\r\nSELECT 2\r\nSELECT 3"
+    );
+
+    // UTF-16 LE with BOM opens instead of failing.
+    let wide = e.dir.path().join("wide.sql");
+    let mut bytes = vec![0xFF, 0xFE];
+    "SELECT N'é'\r\n"
+        .encode_utf16()
+        .for_each(|u| bytes.extend_from_slice(&u.to_le_bytes()));
+    std::fs::write(&wide, &bytes).unwrap();
+    let idx = open(&mut h, &wide);
+    assert_eq!(h.state().tabs[idx].text, "SELECT N'é'\n");
+    save(&mut h, idx);
+    assert_eq!(std::fs::read(&wide).unwrap(), bytes);
+
+    // The workspace remembers the format; a restored tab is clean and saves
+    // the same way.
+    let restored = sqail_ui::editor::Tab::restore(99, &h.state().tabs[idx].snapshot());
+    assert!(!restored.is_dirty());
+    assert_eq!(restored.format, h.state().tabs[idx].format);
+
+    // Not UTF-8 and no BOM: Windows-1252. A character it cannot hold makes
+    // the save fall back to UTF-8, with a notice.
+    let ansi = e.dir.path().join("ansi.sql");
+    std::fs::write(&ansi, b"SELECT 'caf\xE9'\n").unwrap();
+    let idx = open(&mut h, &ansi);
+    assert_eq!(h.state().tabs[idx].text, "SELECT 'café'\n");
+    save(&mut h, idx);
+    assert_eq!(std::fs::read(&ansi).unwrap(), b"SELECT 'caf\xE9'\n");
+    h.state_mut().tabs[idx].text = "SELECT 'café ✓'\n".into();
+    save(&mut h, idx);
+    assert_eq!(std::fs::read_to_string(&ansi).unwrap(), "SELECT 'café ✓'\n");
+    h.run_steps(2);
+    h.get_by_label_contains("saved as UTF-8");
+}
+
+/// Only the text that was written is marked saved, and the unsaved-changes
+/// prompt acts on its own tab even when tabs before it close meanwhile (#156).
+#[test]
+fn saving_and_close_prompts_follow_the_right_text_and_tab() {
+    let e = env();
+    let mut h = app([1280.0, 800.0]);
+    // A save finishes after the user typed on: the tab stays dirty.
+    let file = e.dir.path().join("race.sql");
+    let id = h.state().tabs[0].id;
+    h.state_mut().tabs[0].text = "SELECT 1 -- more".into();
+    std::fs::write(&file, "SELECT 1").unwrap();
+    h.state().worker.sink().send(sqail_ui::app::Msg::FileSaved {
+        tab: id,
+        result: Ok((file.clone(), "SELECT 1".into())),
+        close: false,
+    });
+    h.run_steps(2);
+    assert_eq!(h.state().tabs[0].title, "race.sql");
+    assert!(
+        h.state().tabs[0].is_dirty(),
+        "the typed text is not in the file"
+    );
+
+    // Tabs A, B, C (all dirty); the prompt for C is open when A closes.
+    for name in ["B", "C"] {
+        let i = h.state_mut().new_tab(None);
+        h.state_mut().tabs[i].text = format!("SELECT '{name}'");
+    }
+    h.run_steps(2);
+    let c = h.state().tabs[2].id;
+    h.state_mut().request_close_tab(2);
+    h.run_steps(2);
+    assert!(matches!(h.state().dialog, sqail_ui::dialogs::Dialog::ConfirmClose(x) if x == c));
+    h.state_mut().close_tab(0);
+    h.run_steps(2);
+    h.get_by_label("Discard").click();
+    h.run_steps(2);
+    let texts: Vec<_> = h.state().tabs.iter().map(|t| t.text.clone()).collect();
+    assert_eq!(
+        texts,
+        ["SELECT 'B'"],
+        "C was discarded, not the tab after it"
+    );
+
+    // A prompt whose tab is gone just closes.
+    h.state_mut().request_close_tab(0);
+    h.run_steps(2);
+    let b = h.state().tabs[0].id;
+    h.state_mut().new_tab(None);
+    h.state_mut().close_tab(0);
+    h.run_steps(2);
+    assert!(h.state().tab_index(b).is_none());
+    assert!(matches!(h.state().dialog, sqail_ui::dialogs::Dialog::None));
+}
+
+/// A revoked token, found by any request after startup, shows in the status
+/// bar and leads back to the token prompt (#157).
+#[test]
+fn a_revoked_token_leads_back_to_the_token_prompt() {
+    let e = env();
+    let mut h = app([1280.0, 800.0]);
+    let out = outside(&e.server);
+    e.rt.block_on(async {
+        for t in out.tokens().await.unwrap() {
+            out.revoke_token(t.id).await.unwrap();
+        }
+    });
+    h.state_mut().tabs[0].text = "SELECT 1".into();
+    h.step();
+    run_with(&mut h, "rejected query", |h| h.key_press(Key::F5));
+    wait(&mut h, "token prompt", |a| {
+        matches!(a.dialog, sqail_ui::dialogs::Dialog::Welcome(_))
+    });
+    assert!(matches!(h.state().service.status, ServiceStatus::Failed(_)));
+    h.get_by_label_contains("no longer accepts the token");
+    shot(&mut h, "13-token-revoked");
+}
+
+/// When the service goes away the status bar says so (with Reconnect), and
+/// says Connected again once it answers (#157).
+#[test]
+fn losing_the_service_shows_in_the_status_bar() {
+    let Env {
+        rt,
+        dir: _dir,
+        server,
+        ui_dir: _,
+    } = env();
+    let mut h = app([1280.0, 800.0]);
+    server.shutdown();
+    rt.block_on(server.wait()).unwrap();
+    h.state_mut().tabs[0].text = "SELECT 1".into();
+    h.step();
+    run_with(&mut h, "query without a service", |h| h.key_press(Key::F5));
+    assert!(h.state().tabs[0].run.as_ref().unwrap().failed);
+    wait(&mut h, "status failed", |a| {
+        matches!(a.service.status, ServiceStatus::Failed(_))
+    });
+    h.get_by_label("Reconnect");
+    shot(&mut h, "14-service-lost");
+}
+
+/// A tab is bound to a connection by itself only when it is the only one:
+/// deleting the tab's connection leaves it unbound when several remain (#157).
+#[test]
+fn tabs_are_not_bound_to_the_first_of_several_connections() {
+    let e = env();
+    let mut h = app([1280.0, 800.0]);
+    let only = h.state().tabs[0].connection;
+    assert!(only.is_some(), "the only connection is chosen");
+    let out = outside(&e.server);
+    e.rt.block_on(async {
+        for name in ["production", "staging"] {
+            out.create_connection(&ConnectionInput {
+                name: name.into(),
+                params: ConnectionParams::Sqlite(SqliteParams {
+                    path: e
+                        .dir
+                        .path()
+                        .join(format!("{name}.db"))
+                        .to_string_lossy()
+                        .into(),
+                    create: true,
+                }),
+                password: None,
+                ssl_client_key: None,
+                read_only: false,
+                color: None,
+                environment: None,
+                folder: None,
+            })
+            .await
+            .unwrap();
+        }
+        // The tab's connection goes away; two others remain.
+        out.delete_connection(only.unwrap()).await.unwrap();
+    });
+    h.state_mut().refresh_connections();
+    wait(&mut h, "new list", |a| {
+        a.service.connections.len() == 2 && a.service.connections.iter().all(|c| Some(c.id) != only)
+    });
+    assert_eq!(
+        h.state().tabs[0].connection,
+        None,
+        "not bound to production"
+    );
+}
+
+/// Storing a new service's token and reading it back on connect happen on
+/// the worker, with the UI thread's config dir (#158).
+#[test]
+fn adopting_a_service_stores_its_token_in_the_background() {
+    let e = env();
+    let mut h = app([1280.0, 800.0]);
+    let mut profile = h.state().service.profile.clone().unwrap();
+    profile.name = "again".into();
+    let token = e.server.bootstrap_token.clone().unwrap();
+    std::fs::remove_file(e.ui_dir.join("tokens.toml")).unwrap();
+    let before = h.state().service.generation;
+    h.state_mut().adopt_service(profile, &token);
+    wait(&mut h, "connected again", |a| {
+        a.service.generation > before
+            && a.service.status == ServiceStatus::Connected
+            && a.service.token.as_deref() == Some(token.as_str())
+    });
+    assert!(
+        std::fs::read_to_string(e.ui_dir.join("tokens.toml"))
+            .unwrap()
+            .contains(&token)
+    );
+    assert!(
+        h.state()
+            .settings
+            .services
+            .iter()
+            .any(|s| s.name == "again")
+    );
+}
+
+/// The history list only lays out the rows in view, and its filter is not
+/// recomputed every frame (#158).
+#[test]
+fn history_list_is_virtualised() {
+    let _e = env();
+    let mut h = app([1280.0, 800.0]);
+    for i in 0..3000 {
+        h.state_mut().history.push(sqail_ui::local::HistoryEntry {
+            at: 0,
+            connection: None,
+            connection_name: "people db".into(),
+            sql: format!("SELECT {i} AS n_{}", i % 7),
+            duration_ms: 1,
+            rows: 1,
+            outcome: sqail_ui::local::Outcome::Ok,
+        });
+    }
+    h.state_mut().sidebar = sqail_ui::sidebar::View::History;
+    h.state_mut().settings.sidebar_open = true;
+    h.run_steps(3);
+    let shown = h.query_all_by_label_contains("SELECT ").count();
+    assert!(shown > 5 && shown < 100, "{shown} rows laid out");
+    h.get_by_label("SELECT 2999 AS n_3");
+    h.state_mut().history_filter = "n_3".into();
+    h.run_steps(3);
+    h.get_by_label("SELECT 2999 AS n_3");
+    assert!(h.query_by_label("SELECT 2998 AS n_2").is_none());
+    shot(&mut h, "15-history-virtualised");
+}
+
+/// A real click at a point (not on a widget).
+fn click_at(h: &mut Harness<'_, SqailApp>, pos: egui::Pos2) {
+    h.hover_at(pos);
+    h.step();
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+        h.step();
+    }
+    h.run_steps(2);
+}
+
+/// Editor shortcuts stay off while typing elsewhere, Esc goes to the find
+/// bar before it cancels a query, and AltGr (Ctrl+Alt) types instead of
+/// running a Ctrl shortcut (#159).
+#[test]
+fn shortcuts_respect_the_focus() {
+    let _e = env();
+    let mut h = app([1280.0, 800.0]);
+    h.state_mut().new_tab(None);
+    h.state_mut().tabs[1].text = "SELECT 1".into();
+    h.run_steps(2);
+
+    // Ctrl+W in the find field does not close the tab behind it.
+    h.key_press_modifiers(Modifiers::COMMAND, Key::F);
+    h.run_steps(3);
+    assert!(h.state().tabs[1].find.open);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::W);
+    h.run_steps(2);
+    assert_eq!(h.state().tabs.len(), 2, "typing in the find bar");
+    assert!(h.state().tabs[1].find.open);
+
+    // Esc with a query running closes the find bar first (the run is a
+    // stand-in: it has no query id, so a cancel would not reach a service).
+    h.state_mut().tabs[1].run = Some(sqail_ui::results::Run::new(999, "SELECT 1".into()));
+    assert!(h.state().tabs[1].run.as_ref().unwrap().running);
+    h.run_steps(2);
+    h.key_press(Key::Escape);
+    h.run_steps(3);
+    assert!(!h.state().tabs[1].find.open, "Esc closed the find bar");
+    h.state_mut().tabs[1].run = None;
+    h.run_steps(2);
+
+    // AltGr+E (Ctrl+Alt+E on Windows) is not Ctrl+E (Explain).
+    h.key_press_modifiers(Modifiers::COMMAND | Modifiers::ALT, Key::E);
+    h.run_steps(2);
+    assert!(h.state().tabs[1].run.is_none(), "AltGr+E did not explain");
+    // In the editor, Ctrl+W does close the tab.
+    let editor = h.state().tabs[1].editor_id();
+    h.ctx.memory_mut(|m| m.request_focus(editor));
+    h.run_steps(2);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::W);
+    h.run_steps(3);
+    assert!(
+        h.state().tabs.len() == 1
+            || matches!(h.state().dialog, sqail_ui::dialogs::Dialog::ConfirmClose(_)),
+        "Ctrl+W in the editor closes the tab"
+    );
+}
+
+/// The connection form ignores clicks beside it and asks before throwing
+/// away typed input; History → Clear asks first (#159).
+#[test]
+fn dialogs_do_not_lose_input() {
+    use sqail_ui::dialogs::Dialog;
+    let _e = env();
+    let mut h = app([1280.0, 800.0]);
+    h.state_mut().dialog = Dialog::Connection(Box::new(sqail_ui::dialogs::ConnForm::new_default()));
+    h.run_steps(3);
+    h.get_by_label("Name").focus();
+    h.step();
+    h.get_by_label("Name").type_text("half done");
+    h.run_steps(2);
+    // A click on the backdrop keeps the form.
+    click_at(&mut h, egui::pos2(5.0, 400.0));
+    assert!(
+        matches!(h.state().dialog, Dialog::Connection(_)),
+        "backdrop click"
+    );
+    // Cancel on a changed form asks; Keep editing keeps it.
+    h.get_by_label("Cancel").click();
+    h.run_steps(3);
+    h.get_by_label("Discard your changes to this connection?");
+    shot(&mut h, "16-discard-connection");
+    h.get_by_label("Keep editing").click();
+    h.run_steps(3);
+    assert!(matches!(h.state().dialog, Dialog::Connection(_)));
+    assert!(h.query_by_label("Keep editing").is_none());
+    // Esc asks too; Discard closes.
+    h.key_press(Key::Escape);
+    h.run_steps(3);
+    h.get_by_label("Discard").click();
+    h.run_steps(3);
+    assert!(matches!(h.state().dialog, Dialog::None));
+    // An unchanged form closes right away.
+    h.state_mut().dialog = Dialog::Connection(Box::new(sqail_ui::dialogs::ConnForm::new_default()));
+    h.run_steps(3);
+    h.get_by_label("Cancel").click();
+    h.run_steps(3);
+    assert!(matches!(h.state().dialog, Dialog::None));
+
+    // History → Clear asks first.
+    h.state_mut().history.push(sqail_ui::local::HistoryEntry {
+        at: 0,
+        connection: None,
+        connection_name: "people db".into(),
+        sql: "SELECT 'keep me'".into(),
+        duration_ms: 1,
+        rows: 1,
+        outcome: sqail_ui::local::Outcome::Ok,
+    });
+    h.state_mut().sidebar = sqail_ui::sidebar::View::History;
+    h.run_steps(3);
+    h.get_by_label("Clear").click();
+    h.run_steps(3);
+    assert!(matches!(h.state().dialog, Dialog::ConfirmClearHistory));
+    h.get_by_label("Cancel").click();
+    h.run_steps(3);
+    assert_eq!(h.state().history.entries.len(), 1);
+    h.get_by_label("Clear").click();
+    h.run_steps(3);
+    h.get_by_label("Clear history").click();
+    h.run_steps(3);
+    assert!(h.state().history.entries.is_empty());
+    assert!(matches!(h.state().dialog, Dialog::None));
 }
 
 /// A profile of an engine newer than this build is listed as unsupported, and
@@ -1335,6 +1768,14 @@ fn editor_runs_queries_end_to_end() {
         h.state().tabs[0].text,
         "SELECT\n  id,\n  name\nFROM\n  people\nWHERE\n  score > 1"
     );
+    // One Ctrl+Z takes back the format, and only the format (#145).
+    h.step();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.step();
+    assert_eq!(
+        h.state().tabs[0].text,
+        "select id,name from people where score>1"
+    );
 
     // --- query plan ----------------------------------------------------------
     h.state_mut().tabs[0].text = "SELECT * FROM people p WHERE p.id = 1".into();
@@ -1369,7 +1810,7 @@ fn editor_runs_queries_end_to_end() {
     h.run_steps(3);
     assert!(matches!(
         h.state().dialog,
-        sqail_ui::dialogs::Dialog::ConfirmCloseTransaction(Some(0))
+        sqail_ui::dialogs::Dialog::ConfirmCloseTransaction(Some(id)) if id == h.state().tabs[0].id
     ));
     h.get_by_label("Cancel").click();
     h.run_steps(3);
@@ -1980,7 +2421,8 @@ fn switching_connection_closes_the_old_session() {
     h.run_steps(3);
     assert!(matches!(
         h.state().dialog,
-        sqail_ui::dialogs::Dialog::ConfirmSwitchTransaction(0, Some(c)) if c == other
+        sqail_ui::dialogs::Dialog::ConfirmSwitchTransaction(id, Some(c))
+            if id == h.state().tabs[0].id && c == other
     ));
     shot(&mut h, "12-switch-transaction");
     h.get_by_label("Cancel").click();

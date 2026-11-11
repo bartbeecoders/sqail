@@ -14,6 +14,8 @@ pub enum ObjectKind {
     View,
     Procedure,
     Function,
+    /// A function that returns a table: queried in `FROM`.
+    TableFunction,
 }
 
 /// A schema object being dragged.
@@ -94,6 +96,8 @@ pub fn text_for(item: &DropItem, spot: Spot, columns: Option<&[String]>, style: 
         (ObjectKind::Procedure, Spot::Line) => format!("{};", call(&name)),
         (ObjectKind::Function, Spot::Inline { .. }) => format!("{name}()"),
         (ObjectKind::Function, Spot::Line) => format!("SELECT {name}();"),
+        (ObjectKind::TableFunction, Spot::Inline { .. }) => format!("{name}()"),
+        (ObjectKind::TableFunction, Spot::Line) => format!("SELECT * FROM {name}();"),
     }
 }
 
@@ -180,6 +184,22 @@ mod tests {
         assert_eq!(
             text_for(&f, Spot::Line, None, &STYLE),
             "SELECT sales.\"Orders\"();"
+        );
+    }
+
+    #[test]
+    fn table_functions_are_selected_from() {
+        let f = item(Engine::Mssql, ObjectKind::TableFunction);
+        assert_eq!(
+            text_for(&f, Spot::Line, None, &STYLE),
+            "SELECT * FROM [dbo].[Orders]();"
+        );
+        let inline = Spot::Inline { after_call: false };
+        assert_eq!(text_for(&f, inline, None, &STYLE), "[dbo].[Orders]()");
+        let f = item(Engine::Postgres, ObjectKind::TableFunction);
+        assert_eq!(
+            text_for(&f, Spot::Line, None, &STYLE),
+            "SELECT * FROM sales.\"Orders\"();"
         );
     }
 }

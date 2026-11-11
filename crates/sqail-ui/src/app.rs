@@ -972,6 +972,7 @@ impl SqailApp {
                             t.in_transaction = in_tx == Some(true);
                         }
                         self.record_history(tab);
+                        crate::schema::after_run(self, tab);
                     }
                 }
             }
@@ -1131,10 +1132,18 @@ impl SqailApp {
                 result,
             } => match result {
                 Ok(()) => {
+                    let kind = match &self.dialog {
+                        Dialog::DropTable(d) => d.kind.clone(),
+                        _ => crate::dialogs::DropKind::Table,
+                    };
                     self.dialog = Dialog::None;
-                    self.notify(format!("Dropped table {table}."), false);
-                    self.schema.invalidate_table(conn, &schema, &table);
-                    crate::designer::forget_table(self, conn, &schema, &table);
+                    self.notify(format!("Dropped {} {table}.", kind.noun()), false);
+                    if kind.is_routine() {
+                        self.schema.invalidate_schema(conn, &schema);
+                    } else {
+                        self.schema.invalidate_table(conn, &schema, &table);
+                        crate::designer::forget_table(self, conn, &schema, &table);
+                    }
                 }
                 Err(e) => {
                     if let Dialog::DropTable(d) = &mut self.dialog {

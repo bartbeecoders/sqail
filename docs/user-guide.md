@@ -350,7 +350,18 @@ remember their state.
   *Design table…*, *Import CSV…*, *Script CREATE*, *Drop table…* or *Copy
   name*. *Import CSV* reads binary columns as `0x` + hex, the way CSV
   export writes them, and stops (changing nothing) at a value that isn't
-  valid hex. Right-click a routine for *Script definition* or *Copy name*.
+  valid hex. Right-click a routine for *Script definition*, *Copy name* (schema-qualified,
+  quoted where needed) or *Drop function…* / *Drop procedure…*; views
+  have *Drop view…*. Each drop asks first, like *Drop table…*.
+  Materialized views, PostgreSQL foreign tables and partitioned tables are
+  marked as such; partitions are listed under their parent table
+  (*Partitions*), not with the tables. *Design table…* is offered only for
+  plain tables. PostgreSQL overloads are listed with their argument types,
+  and *Script definition* and *Drop* act on that one overload. Sequences,
+  user-defined types and SQL Server synonyms have groups of their own under
+  the schema, and triggers are listed under their table (*Triggers*).
+  Switching the database of a SQL Server connection from the tree is not
+  supported yet: make a connection per database.
   *Script CREATE* on a table writes columns with their identity, computed
   or generated definition, defaults, collations, keys, unique, check and
   foreign-key constraints (with their `ON DELETE`/`ON UPDATE` actions) and
@@ -367,10 +378,26 @@ remember their state.
   blank line (or below the text) a table or view becomes a formatted
   `SELECT` of all its columns. A procedure becomes `EXEC name` on SQL
   Server or `CALL name()` on Postgres, and a function becomes
-  `SELECT name();`. Names that need it are quoted, here and wherever sqail
+  `SELECT name();`. A function that returns a table (a SQL Server
+  table-valued function, a PostgreSQL set-returning function) is marked
+  *table* in the tree and becomes `SELECT * FROM name();`. Names that need it are quoted, here and wherever sqail
   writes SQL for you (completion, the table designer): mixed case, special
   characters, and every word the engine reserves, such as `"user"` or
   `"position"` on PostgreSQL.
+  The filter box above the tree matches table, view and routine names, and
+  column names of tables whose columns are already loaded. While it is
+  set, every schema, group and table with a match opens (also one you
+  closed before), and schemas without a match are hidden. On PostgreSQL
+  and SQL Server the first filter loads every schema's tables and routines
+  in one request each. Long lists only draw the rows on screen, so a
+  schema with thousands of tables scrolls smoothly.
+  The tree is cached. When SQL run in a query tab changes the schema
+  (`CREATE`, `ALTER`, `DROP`, `SELECT … INTO`, `sp_rename`, …), the
+  connection's tree is reloaded; in a manual-commit tab that happens when
+  the transaction ends. DDL hidden in a string (`EXEC('…')`) or a
+  procedure is not noticed: right-click a schema, its *Tables*, *Views* or
+  *Routines*, or a table for *Refresh*, or a connection for *Refresh
+  schema*.
 * **History:** every query you ran, with its connection, duration and row
   count. Filter it, open an entry in a new tab, or clear it. The last 5 000
   entries are kept.

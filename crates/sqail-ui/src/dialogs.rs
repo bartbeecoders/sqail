@@ -2032,11 +2032,47 @@ fn apply_edits(ctx: &egui::Context, app: &mut SqailApp) {
 
 // ------------------------------------------------------------- drop table --
 
+/// What a [`DropTable`] dialog drops.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DropKind {
+    Table,
+    ForeignTable,
+    View,
+    MaterializedView,
+    /// PostgreSQL `arguments` pick one overload.
+    Function {
+        arguments: Option<String>,
+    },
+    Procedure {
+        arguments: Option<String>,
+    },
+}
+
+impl DropKind {
+    pub fn noun(&self) -> &'static str {
+        match self {
+            DropKind::Table => "table",
+            DropKind::ForeignTable => "foreign table",
+            DropKind::View => "view",
+            DropKind::MaterializedView => "materialized view",
+            DropKind::Function { .. } => "function",
+            DropKind::Procedure { .. } => "procedure",
+        }
+    }
+
+    pub fn is_routine(&self) -> bool {
+        matches!(self, DropKind::Function { .. } | DropKind::Procedure { .. })
+    }
+}
+
+/// Confirm dropping a table, view or routine.
 pub struct DropTable {
     pub connection: Uuid,
     pub engine: sqail_client::proto::Engine,
     pub schema: String,
+    /// The table's (view's, routine's) name.
     pub table: String,
+    pub kind: DropKind,
     /// Postgres: also drop views and foreign keys that depend on the table.
     pub cascade: bool,
     pub busy: bool,
@@ -2050,19 +2086,60 @@ impl DropTable {
         schema: String,
         table: String,
     ) -> Self {
+        Self::object(connection, engine, schema, table, DropKind::Table)
+    }
+
+    pub fn object(
+        connection: Uuid,
+        engine: sqail_client::proto::Engine,
+        schema: String,
+        name: String,
+        kind: DropKind,
+    ) -> Self {
         Self {
             connection,
             engine,
             schema,
-            table,
+            table: name,
+            kind,
             cascade: false,
             busy: false,
             error: None,
         }
     }
 
-    fn sql(&self) -> String {
-        crate::designer::model::drop_table(self.engine, &self.schema, &self.table, self.cascade)
+    pub fn sql(&self) -> String {
+        use sqail_client::proto::Engine;
+        let pg = self.engine == Engine::Postgres;
+        let keyword = match &self.kind {
+            DropKind::Table => {
+                return crate::designer::model::drop_table(
+                    self.engine,
+                    &self.schema,
+                    &self.table,
+                    self.cascade,
+                );
+            }
+            DropKind::ForeignTable => "FOREIGN TABLE",
+            DropKind::View => "VIEW",
+            DropKind::MaterializedView => "MATERIALIZED VIEW",
+            DropKind::Function { .. } => "FUNCTION",
+            DropKind::Procedure { .. } => "PROCEDURE",
+        };
+        let mut sql = format!(
+            "DROP {keyword} {}",
+            crate::sql::qualified_name(self.engine, Some(&self.schema), &self.table)
+        );
+        if let DropKind::Function { arguments: Some(a) }
+        | DropKind::Procedure { arguments: Some(a) } = &self.kind
+            && pg
+        {
+            sql.push_str(&format!("({a})"));
+        }
+        if self.cascade && pg {
+            sql.push_str(" CASCADE");
+        }
+        sql
     }
 }
 
@@ -2074,13 +2151,19 @@ fn drop_table(ctx: &egui::Context, app: &mut SqailApp) {
     let mut close = false;
     let resp = Modal::new(Id::new("drop_table")).show(ctx, |ui| {
         ui.set_width(480.0);
-        ui.heading(format!("Drop table {}?", d.table));
-        ui.label("The table and all its rows are deleted. This cannot be undone.");
+        ui.heading(format!("Drop {} {}?", d.kind.noun(), d.table));
+        if d.kind == DropKind::Table {
+            ui.label("The table and all its rows are deleted. This cannot be undone.");
+        } else {
+            ui.label("This cannot be undone.");
+        }
         if d.engine == sqail_client::proto::Engine::Postgres {
-            ui.checkbox(
-                &mut d.cascade,
-                "Also drop the views and foreign keys that depend on it (CASCADE)",
-            );
+            let what = if d.kind == DropKind::Table {
+                "Also drop the views and foreign keys that depend on it (CASCADE)"
+            } else {
+                "Also drop the objects that depend on it (CASCADE)"
+            };
+            ui.checkbox(&mut d.cascade, what);
         }
         ui.add_space(4.0);
         ui.label(RichText::new(format!("{};", d.sql())).monospace());

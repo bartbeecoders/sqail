@@ -99,6 +99,7 @@ pub fn router(state: AppState) -> Router {
         .routes(routes!(schema::foreign_keys))
         .routes(routes!(schema::privileges))
         .routes(routes!(schema::routines))
+        .routes(routes!(schema::objects))
         .routes(routes!(schema::ddl))
         .routes(routes!(audit::list))
         .routes(routes!(admin::status))

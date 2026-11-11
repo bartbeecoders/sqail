@@ -550,6 +550,27 @@ impl Client {
             .await
     }
 
+    /// [`Self::ddl`] of one PostgreSQL overload, picked by its identity
+    /// arguments ([`RoutineInfo::arguments`]).
+    pub async fn routine_ddl(
+        &self,
+        id: Uuid,
+        schema: Option<&str>,
+        name: &str,
+        arguments: &str,
+    ) -> Result<Ddl> {
+        let path = Self::schema_path(id, "ddl", schema, Some(name));
+        self.get(&format!("{path}&arguments={}", encode(arguments)))
+            .await
+    }
+
+    /// Sequences, user-defined types, synonyms and triggers. Services older
+    /// than this client answer 404.
+    pub async fn objects(&self, id: Uuid, schema: Option<&str>) -> Result<Vec<SchemaObject>> {
+        self.get(&Self::schema_path(id, "schema/objects", schema, None))
+            .await
+    }
+
     // ------------------------------------------------------ admin bits --
 
     pub async fn tokens(&self) -> Result<Vec<TokenInfo>> {

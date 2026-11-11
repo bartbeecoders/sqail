@@ -4,7 +4,8 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use serde::Deserialize;
 use sqail_proto::{
-    ColumnInfo, Ddl, ForeignKeyInfo, IndexInfo, NamedItem, RoutineInfo, TableInfo, TablePrivileges,
+    ColumnInfo, Ddl, ForeignKeyInfo, IndexInfo, NamedItem, RoutineInfo, SchemaObject, TableInfo,
+    TablePrivileges,
 };
 use utoipa::IntoParams;
 use uuid::Uuid;
@@ -28,6 +29,17 @@ pub struct ObjectRef {
     schema: Option<String>,
     /// Table, view or routine name.
     name: String,
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct DdlRef {
+    /// Defaults to the connection's current schema.
+    schema: Option<String>,
+    /// Table, view or routine name.
+    name: String,
+    /// PostgreSQL: one overload's identity arguments (as `routines` lists
+    /// them); without it every overload is scripted.
+    arguments: Option<String>,
 }
 
 async fn conn(state: &AppState, p: &Principal, id: Uuid) -> ApiResult<Pooled> {
@@ -207,14 +219,28 @@ pub async fn routines(
 
 /// Best-effort CREATE script for a table, view or routine.
 #[utoipa::path(get, path = "/v1/connections/{id}/ddl", tag = "schema",
-    params(("id" = Uuid, Path), ObjectRef), responses((status = 200, body = Ddl)))]
+    params(("id" = Uuid, Path), DdlRef), responses((status = 200, body = Ddl)))]
 pub async fn ddl(
     State(s): State<AppState>,
     p: Principal,
     Path(id): Path<Uuid>,
-    Query(q): Query<ObjectRef>,
+    Query(q): Query<DdlRef>,
 ) -> ApiResult<Json<Ddl>> {
     catalog!(s, p, id, |c| {
-        introspect::ddl(c, q.schema.as_deref(), &q.name)
+        introspect::ddl(c, q.schema.as_deref(), &q.name, q.arguments.as_deref())
+    })
+}
+
+/// Sequences, user-defined types, synonyms and triggers.
+#[utoipa::path(get, path = "/v1/connections/{id}/schema/objects", tag = "schema",
+    params(("id" = Uuid, Path), SchemaFilter), responses((status = 200, body = Vec<SchemaObject>)))]
+pub async fn objects(
+    State(s): State<AppState>,
+    p: Principal,
+    Path(id): Path<Uuid>,
+    Query(q): Query<SchemaFilter>,
+) -> ApiResult<Json<Vec<SchemaObject>>> {
+    catalog!(s, p, id, |c| {
+        introspect::objects(c, q.schema.as_deref())
     })
 }

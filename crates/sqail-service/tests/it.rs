@@ -834,6 +834,74 @@ async fn max_rows_truncates() {
     )));
 }
 
+/// Bodies up to `limits.body_limit_bytes` (8 MiB) are accepted, not just
+/// axum's default 2 MiB, and a larger one is a 413 problem document whether
+/// it announces its length or not.
+#[tokio::test]
+async fn body_limit_is_the_configured_one() {
+    let h = harness().await;
+    let c = h.sqlite_temp(false).await;
+    let path = format!("/v1/connections/{c}/query");
+    let body = |len: usize| json!({ "sql": format!("SELECT 1 AS x -- {}", "y".repeat(len)) });
+    let ev = h.query_on(&path, body(5_000_000), None).await;
+    assert_eq!(rows(&ev, 0), vec![vec![json!(1)]]);
+
+    let check = |res: reqwest::Response| async move {
+        assert_eq!(res.status(), 413);
+        assert_eq!(
+            res.headers()["content-type"],
+            "application/problem+json",
+            "{:?}",
+            res.headers()
+        );
+        let p: Value = res.json().await.unwrap();
+        assert_eq!(p["code"], "payload_too_large", "{p}");
+        assert!(p["detail"].as_str().unwrap().contains("8388608"), "{p}");
+    };
+    check(h.post(&path, &body(9_000_000), &h.admin).await).await;
+    // Without content-length (chunked), the extractor notices instead.
+    let bytes = serde_json::to_vec(&body(9_000_000)).unwrap();
+    let chunks: Vec<Result<Vec<u8>, std::io::Error>> =
+        bytes.chunks(1 << 20).map(|c| Ok(c.to_vec())).collect();
+    let res = h
+        .http
+        .post(h.url(&path))
+        .bearer_auth(&h.admin)
+        .header("content-type", "application/json")
+        .body(reqwest::Body::wrap_stream(futures::stream::iter(chunks)))
+        .send()
+        .await
+        .unwrap();
+    check(res).await;
+}
+
+/// Wide rows come in batches bounded in bytes, not only in rows (500 rows
+/// of 600 kB were one 300 MB line).
+#[tokio::test]
+async fn wide_rows_are_batched_by_size() {
+    let h = harness().await;
+    let c = h.sqlite_temp(false).await;
+    let res = h
+        .post(
+            &format!("/v1/connections/{c}/query"),
+            &json!({"sql": "WITH RECURSIVE g(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM g LIMIT 500) \
+                            SELECT n, hex(zeroblob(300000)) AS x FROM g"}),
+            &h.admin,
+        )
+        .await;
+    assert_eq!(res.status(), 200);
+    let text = res.text().await.unwrap();
+    let longest = text.lines().map(str::len).max().unwrap();
+    assert!(longest < 2 * 1024 * 1024, "{longest}");
+    let ev: Vec<QueryEvent> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let r = rows(&ev, 0);
+    assert_eq!(r.len(), 500);
+    assert_eq!(r[499][1].as_str().unwrap().len(), 600_000);
+}
+
 #[tokio::test]
 async fn errors_are_events_and_scripts_stop() {
     let h = harness().await;
@@ -2065,7 +2133,11 @@ fn connection_lost(ev: &[QueryEvent]) -> bool {
 
 /// Cancelling on SQL Server sends an Attention, which aborts the batch only:
 /// the session keeps its connection, transaction and #temp tables, whether
-/// or not the login may KILL (#148).
+/// or not the login may KILL (#148). The checks are behaviour, not timing
+/// (#215): a KILL fallback (`sa` may KILL) or a dropped connection
+/// (`sqail` may not) would end the session, so the same spid with its
+/// transaction and #temp table shows that the Attention stopped the query,
+/// however long draining the rows already sent took on a busy machine.
 #[tokio::test]
 #[ignore = "needs podman test databases (scripts/db.sh up)"]
 async fn mssql_cancel_keeps_the_session() {
@@ -2105,8 +2177,8 @@ async fn mssql_cancel_keeps_the_session() {
         assert_eq!(error(&ev).unwrap().0, "cancelled", "{user}: {ev:?}");
         assert_eq!(done(&ev).1, Some(true), "{user}: {ev:?}");
         assert!(!connection_lost(&ev), "{user}: {ev:?}");
-        // well before the KILL fallback (3 s)
-        assert!(took < Duration::from_millis(2500), "{user}: took {took:?}");
+        // stopped, not run to its end
+        assert!(took < Duration::from_secs(20), "{user}: took {took:?}");
         still_there("after waitfor").await;
 
         // a large result mid-stream: two statements, so that max_rows does
@@ -2124,7 +2196,9 @@ async fn mssql_cancel_keeps_the_session() {
         assert!(done(&ev).0, "{user}: {:?}", ev.last());
         assert!(!rows(&ev, 1).is_empty(), "{user}: cancelled mid-stream");
         assert!(!connection_lost(&ev), "{user}");
-        assert!(took < Duration::from_secs(4), "{user}: took {took:?}");
+        // stopped (the query would run for hours); reading the rows the
+        // server sent before the Attention reached it may take a while
+        assert!(took < Duration::from_secs(30), "{user}: took {took:?}");
         still_there("after a large result").await;
 
         // the timeout cancels the same way
@@ -2537,6 +2611,77 @@ async fn postgres_scripts_commit_each_statement() {
     assert_eq!(count(&ev), json!(3), "{ev:?}");
 }
 
+/// `COPY … FROM STDIN` (pasted pg_dump output) is refused before anything
+/// runs, leaving a session's transaction and temp tables; `COPY … TO
+/// STDOUT` is a one-column result.
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn postgres_copy_stdin_and_stdout() {
+    let h = harness().await;
+    let c = profile(&h, &postgres(), false).await;
+    let s: SessionInfo = h
+        .post("/v1/sessions", &json!({"connection_id": c}), &h.admin)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let path = format!("/v1/sessions/{}/query", s.id);
+    let run = |sql: &str| h.query_on(&path, json!({ "sql": sql }), None);
+    let ev = run("BEGIN; CREATE TEMP TABLE copy187 (a int, b text); \
+                  INSERT INTO copy187 VALUES (1, 'x'), (2, 'y,z')")
+    .await;
+    assert_eq!(done(&ev).1, Some(true), "{ev:?}");
+
+    // As pg_dump writes it, after a statement that must not run either.
+    let ev = run("INSERT INTO copy187 VALUES (3, 'no');\n\
+                  COPY copy187 (a, b) FROM stdin;\n4\tw\n\\.\n")
+    .await;
+    let (code, message) = error(&ev).expect("refused");
+    assert_eq!(code, "unsupported");
+    assert!(
+        message.contains("FROM STDIN") && message.contains("Import CSV"),
+        "{message}"
+    );
+    assert_eq!(done(&ev).1, Some(true), "the transaction survives: {ev:?}");
+    assert!(!connection_lost(&ev), "{ev:?}");
+
+    let ev = run("copy copy187 to stdout (format binary)").await;
+    assert_eq!(error(&ev).unwrap().0, "unsupported");
+
+    let ev = run(
+        "SELECT count(*) FROM copy187; COPY (SELECT * FROM copy187 ORDER BY a) TO STDOUT; \
+                  copy copy187 to stdout with (format csv, header); SELECT 'after'",
+    )
+    .await;
+    assert_eq!(error(&ev), None, "{ev:?}");
+    assert_eq!(rows(&ev, 0), vec![vec![json!(2)]]);
+    assert_eq!(column_types(&ev, 1), vec![("copy".into(), "text".into())]);
+    assert_eq!(
+        rows(&ev, 1),
+        vec![vec![json!("1\tx")], vec![json!("2\ty,z")]]
+    );
+    assert_eq!(
+        rows(&ev, 2),
+        vec![
+            vec![json!("a,b")],
+            vec![json!("1,x")],
+            vec![json!("2,\"y,z\"")]
+        ]
+    );
+    assert_eq!(rows(&ev, 3), vec![vec![json!("after")]]);
+    assert_eq!(done(&ev).1, Some(true));
+
+    // A COPY error leaves a usable session, as any other error does.
+    let ev = run("ROLLBACK; COPY no_such_table_187 TO STDOUT").await;
+    assert!(
+        error(&ev).unwrap().1.contains("no_such_table_187"),
+        "{ev:?}"
+    );
+    let ev = run("COPY (SELECT 1) TO STDOUT").await;
+    assert_eq!(rows(&ev, 0), vec![vec![json!("1")]]);
+    assert_eq!(done(&ev).1, Some(false));
+}
+
 #[tokio::test]
 #[ignore = "needs podman test databases (scripts/db.sh up)"]
 async fn postgres_types_and_notices() {
@@ -2594,6 +2739,159 @@ fn one(ev: &[QueryEvent]) -> Value {
 async fn columns_of(h: &Harness, c: Uuid, qs: &str) -> Vec<ColumnInfo> {
     h.get_json(&format!("/v1/connections/{c}/schema/columns?{qs}"))
         .await
+}
+
+/// The 502 detail of a pooled query on profile `c`.
+async fn connect_failure(h: &Harness, c: Uuid) -> String {
+    let res = h
+        .post(
+            &format!("/v1/connections/{c}/query"),
+            &json!({"sql": "select 1"}),
+            &h.admin,
+        )
+        .await;
+    assert_eq!(res.status(), 502);
+    let p: Value = res.json().await.unwrap();
+    assert_eq!(p["code"], "connect_failed", "{p}");
+    p["detail"].as_str().unwrap().to_string()
+}
+
+async fn pg_at(h: &Harness, host: &str, port: u16, ssl_mode: &str) -> Uuid {
+    h.create_connection(json!({
+        "name": format!("pg {host}:{port} {ssl_mode}"),
+        "params": {"engine": "postgres", "host": host, "port": port, "database": "sqail_test",
+                   "user": "sqail", "ssl_mode": ssl_mode},
+        "password": "sqail_dev_pw",
+    }))
+    .await
+}
+
+/// PostgreSQL connect errors say where and why, not only "error connecting
+/// to server" (#188).
+#[tokio::test]
+async fn postgres_connect_errors_name_the_cause() {
+    let h = harness().await;
+    let c = pg_at(&h, "127.0.0.1", 1, "disable").await;
+    let detail = connect_failure(&h, c).await;
+    assert!(
+        detail.starts_with("cannot connect: 127.0.0.1:1: error connecting to server: ")
+            && detail.to_lowercase().contains("refused"),
+        "{detail}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn postgres_connect_errors_name_the_cause_live() {
+    let h = harness().await;
+    let c = pg_at(&h, "no-such-host.invalid", 5432, "disable").await;
+    let detail = connect_failure(&h, c).await;
+    assert!(
+        detail
+            .starts_with("cannot connect: no-such-host.invalid:5432: error connecting to server: "),
+        "{detail}"
+    );
+    #[cfg(target_os = "linux")]
+    assert!(detail.contains("lookup"), "{detail}");
+    // The test server has no SSL.
+    let c = pg_at(&h, "127.0.0.1", 55432, "require").await;
+    let detail = connect_failure(&h, c).await;
+    assert!(
+        detail.contains("server does not support TLS") && detail.contains("does not accept SSL"),
+        "{detail}"
+    );
+    // Wrong password: the server's own message, with where.
+    let c = h
+        .create_connection(json!({
+            "name": "pg bad password",
+            "params": postgres().profile,
+            "password": "wrong",
+        }))
+        .await;
+    let detail = connect_failure(&h, c).await;
+    assert!(
+        detail
+            .starts_with("cannot connect: 127.0.0.1:55432: FATAL: password authentication failed"),
+        "{detail}"
+    );
+}
+
+/// A pooled connection the server closed while idle (restart, idle kill,
+/// pg_terminate_backend) is replaced without failing the next query; a
+/// session's connection lost mid-statement is reported as lost (#188).
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn postgres_dead_connections_are_replaced_or_reported() {
+    let h = single_connection_harness(30).await;
+    let c = profile(&h, &postgres(), false).await;
+    let pid = one(&h.query(c, "select pg_backend_pid()").await);
+    let killer: SessionInfo = h
+        .post("/v1/sessions", &json!({"connection_id": c}), &h.admin)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let kill_path = format!("/v1/sessions/{}/query", killer.id);
+    let kill = |pid: Value| {
+        h.query_on(
+            &kill_path,
+            json!({"sql": format!("select pg_terminate_backend({pid})")}),
+            None,
+        )
+    };
+    assert_eq!(one(&kill(pid.clone()).await), json!(true));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let ev = h.query(c, "select pg_backend_pid()").await;
+    assert_ne!(one(&ev), pid, "a fresh connection");
+    // The catalog routes share the pool.
+    let pid = one(&h.query(c, "select pg_backend_pid()").await);
+    assert_eq!(one(&kill(pid).await), json!(true));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _: Vec<NamedItem> = h
+        .get_json(&format!("/v1/connections/{c}/schema/schemas"))
+        .await;
+
+    // A session whose connection the server ends during a statement.
+    let s: SessionInfo = h
+        .post("/v1/sessions", &json!({"connection_id": c}), &h.admin)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let path = format!("/v1/sessions/{}/query", s.id);
+    let ev = h
+        .query_on(
+            &path,
+            json!({"sql": "select pg_terminate_backend(pg_backend_pid())"}),
+            None,
+        )
+        .await;
+    let (code, message) = error(&ev).expect("lost");
+    assert_eq!(code, "connection_lost");
+    assert!(
+        message.starts_with("connection to the database was lost: FATAL: terminating connection"),
+        "{message}"
+    );
+    assert!(connection_lost(&ev), "{ev:?}");
+
+    // A session whose connection died while idle: nothing is sent.
+    let s: SessionInfo = h
+        .post("/v1/sessions", &json!({"connection_id": c}), &h.admin)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let path = format!("/v1/sessions/{}/query", s.id);
+    let pid = one(&h
+        .query_on(&path, json!({"sql": "select pg_backend_pid()"}), None)
+        .await);
+    assert_eq!(one(&kill(pid).await), json!(true));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let ev = h.query_on(&path, json!({"sql": "select 1"}), None).await;
+    let (code, message) = error(&ev).expect("lost");
+    assert_eq!(code, "connection_lost");
+    assert!(message.contains("nothing was run"), "{message}");
+    assert!(connection_lost(&ev), "{ev:?}");
 }
 
 #[tokio::test]

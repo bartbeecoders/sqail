@@ -74,6 +74,55 @@ pub struct EditorEnv<'a> {
     pub format: &'a Style,
 }
 
+/// One undo step: the cursor and the text.
+type Snap = (CCursorRange, String);
+
+/// Undo points kept per tab.
+const MAX_UNDOS: usize = 100;
+/// Typing that pauses this long (seconds) starts a new undo step.
+const UNDO_PAUSE: f64 = 1.0;
+
+/// The editor's own undo history. egui's undoer only makes a point after the
+/// text has been still for a second (or every 30 s of typing), and knows
+/// nothing of edits the app makes, so one Ctrl+Z could take back a Format
+/// together with the typing before it. Here every app edit is a step of its
+/// own, and typing makes a step per word, per line, per pause, and when the
+/// cursor moves elsewhere.
+#[derive(Default)]
+struct History {
+    undo: Vec<Snap>,
+    redo: Vec<Snap>,
+    /// The state at the last undo point (set on the first frame).
+    base: Option<Snap>,
+    /// The text changed since `base` by typing; checked for pauses.
+    typed: bool,
+    /// When the text last changed by typing (input time).
+    last_change: f64,
+    /// The last typing removed text rather than inserting it.
+    deleting: bool,
+}
+
+impl History {
+    /// Make `(cursor, text)` an undo point, if the text changed since the
+    /// last one.
+    fn point(&mut self, cursor: CCursorRange, text: &str) {
+        self.typed = false;
+        match &mut self.base {
+            Some((c, t)) if t == text => *c = cursor,
+            Some(_) => {
+                if let Some(prev) = self.base.replace((cursor, text.to_owned())) {
+                    self.undo.push(prev);
+                }
+                if self.undo.len() > MAX_UNDOS {
+                    self.undo.remove(0);
+                }
+                self.redo.clear();
+            }
+            None => self.base = Some((cursor, text.to_owned())),
+        }
+    }
+}
+
 /// Cursor byte offset, text length, and the bracket pair found for them.
 type BracketCache = Option<(usize, usize, Option<(usize, usize)>)>;
 
@@ -83,6 +132,8 @@ pub struct Tab {
     pub path: Option<PathBuf>,
     pub text: String,
     saved: String,
+    /// How the file is written on save: encoding, BOM, line endings.
+    pub format: crate::textfile::FileFormat,
     pub connection: Option<Uuid>,
     /// (connection, session) — a dedicated server connection for this tab.
     pub session: Option<(Uuid, Uuid)>,
@@ -113,6 +164,9 @@ pub struct Tab {
     /// A background export is running on the tab's session; runs wait.
     pub session_busy: bool,
     cursor_screen: Option<egui::Pos2>,
+    history: History,
+    /// egui's own undoer was cut down (its history is not used).
+    egui_undo_trimmed: bool,
 }
 
 impl Tab {
@@ -123,6 +177,7 @@ impl Tab {
             path: None,
             text: String::new(),
             saved: String::new(),
+            format: Default::default(),
             connection,
             session: None,
             run: None,
@@ -141,6 +196,8 @@ impl Tab {
             pinned: false,
             session_busy: false,
             cursor_screen: None,
+            history: History::default(),
+            egui_undo_trimmed: false,
         }
     }
 
@@ -150,10 +207,13 @@ impl Tab {
         t.text = saved.text.clone();
         t.pinned = saved.pinned;
         // Dirty relative to the file on disk (or to nothing for scratch tabs).
-        t.saved = match &saved.path {
-            Some(p) => std::fs::read_to_string(p).unwrap_or_default(),
-            None => String::new(),
-        };
+        match saved.path.as_deref().map(crate::textfile::read) {
+            Some(Ok((text, format))) => {
+                t.saved = text;
+                t.format = format;
+            }
+            _ => t.format = saved.format.unwrap_or_default(),
+        }
         let at = saved.cursor.min(t.text.chars().count());
         t.cursor = CCursorRange::one(CCursor::new(at));
         t.pending_select = Some(t.cursor);
@@ -168,6 +228,7 @@ impl Tab {
             connection: self.connection,
             cursor: self.cursor.primary.index.0,
             pinned: self.pinned,
+            format: self.path.as_ref().map(|_| self.format),
         }
     }
 
@@ -183,6 +244,7 @@ impl Tab {
 
     /// Insert `s` at the cursor (replacing a selection) and move after it.
     pub fn insert_at_cursor(&mut self, s: &str) {
+        self.undo_point();
         let (a, b) = (self.cursor.primary.index.0, self.cursor.secondary.index.0);
         let (start, end) = (
             char_to_byte(&self.text, a.min(b)),
@@ -192,12 +254,14 @@ impl Tab {
         let at = byte_to_char(&self.text, start + s.len());
         self.cursor = CCursorRange::one(CCursor::new(at));
         self.pending_select = Some(self.cursor);
+        self.undo_point();
     }
 
     /// Put a dropped statement on the (blank) line at char index `at`, or on
     /// a new line after the text, keeping a blank line to its neighbours so
     /// it runs as a statement of its own.
     pub fn drop_statement(&mut self, at: usize, s: &str) {
+        self.undo_point();
         let byte = char_to_byte(&self.text, at.min(self.text.chars().count()));
         let mut start = self.text[..byte].rfind('\n').map_or(0, |i| i + 1);
         let mut end = self.text[byte..]
@@ -230,6 +294,7 @@ impl Tab {
         self.text.replace_range(start..end, &rep);
         self.cursor = CCursorRange::one(CCursor::new(byte_to_char(&self.text, caret)));
         self.pending_select = Some(self.cursor);
+        self.undo_point();
     }
 
     /// Insert dropped text at char index `at`, padded with spaces so it
@@ -269,16 +334,19 @@ impl Tab {
     }
 
     pub fn set_file(&mut self, path: PathBuf, text: String) {
+        self.history = History::default();
         self.title = file_title(&path);
         self.path = Some(path);
         self.saved = text.clone();
         self.text = text;
     }
 
-    pub fn mark_saved(&mut self, path: PathBuf) {
+    /// `written` is the text that went to the file, which is not
+    /// `self.text` when the user typed on while the save was in progress.
+    pub fn mark_saved(&mut self, path: PathBuf, written: String) {
         self.title = file_title(&path);
         self.path = Some(path);
-        self.saved = self.text.clone();
+        self.saved = written;
     }
 
     /// The selection if there is one, else the statement at the cursor.
@@ -295,6 +363,47 @@ impl Tab {
         statements::at(&self.text, engine, at)
             .map(|r| self.text[r].to_string())
             .unwrap_or_default()
+    }
+
+    /// Make the current text an undo step of its own. Call before and after
+    /// every edit the app makes to `text`, so the edit is exactly one step
+    /// and doesn't swallow the typing before it.
+    pub fn undo_point(&mut self) {
+        self.history.point(self.cursor, &self.text);
+    }
+
+    /// Ctrl+Z: back to the previous undo point.
+    pub fn undo(&mut self) {
+        self.undo_point();
+        let Some(prev) = self.history.undo.pop() else {
+            return;
+        };
+        if let Some(cur) = self.history.base.replace(prev.clone()) {
+            self.history.redo.push(cur);
+        }
+        self.restore_snap(prev);
+    }
+
+    /// Ctrl+Y / Ctrl+Shift+Z: forward again after an undo.
+    pub fn redo(&mut self) {
+        // Typing after an undo drops the redo steps.
+        self.undo_point();
+        let Some(next) = self.history.redo.pop() else {
+            return;
+        };
+        if let Some(cur) = self.history.base.replace(next.clone()) {
+            self.history.undo.push(cur);
+        }
+        self.restore_snap(next);
+    }
+
+    fn restore_snap(&mut self, (cursor, text): Snap) {
+        self.text = text;
+        let n = self.text.chars().count();
+        let clamp = |c: CCursor| CCursor::new(c.index.0.min(n));
+        self.cursor = CCursorRange::two(clamp(cursor.secondary), clamp(cursor.primary));
+        self.pending_select = Some(self.cursor);
+        self.completion = None;
     }
 
     /// 1-based cursor position, as of the last frame.
@@ -330,10 +439,12 @@ fn accept(tab: &mut Tab, i: usize) {
     {
         return;
     }
+    tab.undo_point();
     tab.text.replace_range(r.clone(), &item.insert);
     let at = byte_to_char(&tab.text, r.start + item.insert.len());
     tab.cursor = CCursorRange::one(CCursor::new(at));
     tab.pending_select = Some(tab.cursor);
+    tab.undo_point();
 }
 
 /// A line-wise edit of the selection: Tab, Shift+Tab, Ctrl+/.
@@ -491,6 +602,7 @@ fn line_keys(ui: &mut egui::Ui, tab: &mut Tab, indent: usize) {
         })
     });
     let Some(edit) = edit else { return };
+    tab.undo_point();
     let (primary, secondary) = edit_lines(&mut tab.text, (a, b), edit, indent);
     // `two` takes the secondary end first.
     tab.cursor = CCursorRange::two(
@@ -498,6 +610,66 @@ fn line_keys(ui: &mut egui::Ui, tab: &mut Tab, indent: usize) {
         CCursor::new(byte_to_char(&tab.text, primary)),
     );
     tab.pending_select = Some(tab.cursor);
+    tab.undo_point();
+}
+
+/// Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z go to the tab's own [`History`], and
+/// typing gets its undo points: before whitespace typed after a word, before
+/// a paste or cut, when typing turns into deleting (or back), and after a
+/// pause.
+fn undo_keys(ui: &mut egui::Ui, tab: &mut Tab) {
+    let (undo, redo) = ui.input_mut(|i| {
+        let redo = i.consume_shortcut(&KeyboardShortcut::new(
+            Modifiers::COMMAND | Modifiers::SHIFT,
+            Key::Z,
+        )) || i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Y));
+        let undo = i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Z));
+        (undo, redo)
+    });
+    if undo {
+        tab.undo();
+    } else if redo {
+        tab.redo();
+    }
+    let at = char_to_byte(&tab.text, tab.cursor.primary.index.0);
+    let after_word = tab.text[..at]
+        .chars()
+        .next_back()
+        .is_some_and(|c| !c.is_whitespace());
+    let (now, mut point, mut deleting) = (ui.input(|i| i.time), false, None);
+    ui.input(|i| {
+        for e in &i.events {
+            match e {
+                egui::Event::Text(t) => {
+                    point |= after_word && t.starts_with(char::is_whitespace);
+                    deleting = Some(false);
+                }
+                egui::Event::Key {
+                    key: Key::Enter,
+                    pressed: true,
+                    ..
+                } => {
+                    point |= after_word;
+                    deleting = Some(false);
+                }
+                egui::Event::Key {
+                    key: Key::Backspace | Key::Delete,
+                    pressed: true,
+                    ..
+                } => deleting = Some(true),
+                egui::Event::Paste(_) | egui::Event::Cut => point = true,
+                _ => {}
+            }
+        }
+    });
+    let h = &tab.history;
+    let switched = deleting.is_some_and(|d| d != h.deleting);
+    if h.typed && (point || switched || now - h.last_change >= UNDO_PAUSE) {
+        tab.undo_point();
+    }
+    if let Some(d) = deleting {
+        tab.history.deleting = d;
+    }
 }
 
 /// Should typing just now open completions? After `.` or two word chars.
@@ -572,6 +744,10 @@ pub fn wheel_zoom(ui: &mut egui::Ui) -> f32 {
 
 pub fn editor_ui(ui: &mut egui::Ui, tab: &mut Tab, env: &EditorEnv<'_>) {
     let (engine, dark, font_size) = (env.engine, env.dark, env.font_size);
+    if tab.history.base.is_none() {
+        // The text as it is before any typing: the first undo point.
+        tab.undo_point();
+    }
     if tab.find.open {
         find_bar(ui, tab);
     }
@@ -613,6 +789,7 @@ pub fn editor_ui(ui: &mut egui::Ui, tab: &mut Tab, env: &EditorEnv<'_>) {
             }
         }
         line_keys(ui, tab, env.format.indent.into());
+        undo_keys(ui, tab);
     }
 
     let font = FontId::monospace(font_size);
@@ -707,6 +884,29 @@ pub fn editor_ui(ui: &mut egui::Ui, tab: &mut Tab, env: &EditorEnv<'_>) {
             let before = tab.cursor;
             if let Some(range) = output.cursor_range {
                 tab.cursor = range;
+            }
+            if output.response.response.changed() {
+                tab.history.typed = true;
+                tab.history.last_change = ui.input(|i| i.time);
+                // A paste or cut is a step of its own.
+                if ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_) | egui::Event::Cut))) {
+                    tab.undo_point();
+                }
+            } else if before != tab.cursor && tab.history.typed {
+                // Typing somewhere else starts a new step.
+                tab.undo_point();
+            }
+            if !tab.egui_undo_trimmed {
+                // Ctrl+Z never reaches egui's undoer; don't let it keep 100
+                // copies of the text.
+                if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), editor_id) {
+                    state.set_undoer(egui::util::undoer::Undoer::with_settings(egui::util::undoer::Settings {
+                        max_undos: 1,
+                        ..Default::default()
+                    }));
+                    state.store(ui.ctx(), editor_id);
+                    tab.egui_undo_trimmed = true;
+                }
             }
             // No wrapping, so galley rows are lines.
             tab.lines = output.galley.rows.len().max(1);
@@ -1039,9 +1239,11 @@ fn find_bar(ui: &mut egui::Ui, tab: &mut Tab) {
     if replace_all {
         let (out, n) = find::replace_all(&tab.text, &query, &tab.find.replace, case);
         if n > 0 {
+            tab.undo_point();
             tab.text = out;
             let end = byte_to_char(&tab.text, tab.text.len()).min(tab.cursor.primary.index.0);
             tab.cursor = CCursorRange::one(CCursor::new(end));
+            tab.undo_point();
         }
         tab.find.hit = None;
         tab.find.status = format!("Replaced {n}");
@@ -1051,10 +1253,12 @@ fn find_bar(ui: &mut egui::Ui, tab: &mut Tab) {
     let (sel_start, sel_end) = tab.selection_bytes();
     if replace_one {
         if find::is_match(&tab.text, &(sel_start..sel_end), &query, case) {
+            tab.undo_point();
             tab.text
                 .replace_range(sel_start..sel_end, &tab.find.replace);
             let after = sel_start + tab.find.replace.len();
             tab.cursor = CCursorRange::one(CCursor::new(byte_to_char(&tab.text, after)));
+            tab.undo_point();
         }
         step = Some(false);
     }
@@ -1119,9 +1323,13 @@ mod tests {
         );
         t.text = "SELECT 1".into();
         assert!(t.is_dirty());
-        t.mark_saved("/tmp/x.sql".into());
+        t.mark_saved("/tmp/x.sql".into(), "SELECT 1".into());
         assert!(!t.is_dirty());
         assert_eq!(t.title, "x.sql");
+        // Typed while the save was in progress: not in the file, still dirty.
+        t.text = "SELECT 1 -- more".into();
+        t.mark_saved("/tmp/x.sql".into(), "SELECT 1".into());
+        assert!(t.is_dirty());
     }
 
     #[test]

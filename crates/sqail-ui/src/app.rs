@@ -41,14 +41,34 @@ const RAIL_WIDTH: f32 = 28.0;
 pub enum Msg {
     Connected {
         url: String,
+        generation: u64,
+        /// The stored token and where it came from; `None` when there is none.
+        token: Option<(String, secrets::Store)>,
         result: Result<(Client, ServiceInfo), sqail_client::Error>,
     },
+    /// The token of a new service was stored (or not).
+    TokenSaved {
+        profile: ServiceProfile,
+        result: Result<secrets::Store, String>,
+    },
     Connections(Result<Vec<Connection>, String>),
+    /// What a request of the current client showed about the service, sent
+    /// when it changes (service gone, token rejected, answering again).
+    ServiceReach {
+        generation: u64,
+        reach: sqail_client::Reach,
+    },
     Probed(Result<(String, sqail_client::proto::Health), String>),
     Provisioned(Result<Provisioned, String>),
-    ConnTested(Result<TestResult, String>),
-    /// A PEM chosen for the connection form. `None` when the dialog is cancelled.
+    /// A connection test of the form with this nonce.
+    ConnTested {
+        form: u64,
+        result: Result<TestResult, String>,
+    },
+    /// A PEM chosen for the connection form with this nonce. `None` when the
+    /// file dialog is cancelled.
     ConnCertPicked {
+        form: u64,
         kind: crate::dialogs::PgCertKind,
         result: Option<Result<(String, String), String>>,
     },
@@ -96,10 +116,11 @@ pub enum Msg {
         text: String,
         run: bool,
     },
-    FileOpened(Result<(PathBuf, String), String>),
+    FileOpened(Result<(PathBuf, String, crate::textfile::FileFormat), String>),
     FileSaved {
         tab: u64,
-        result: Result<PathBuf, String>,
+        /// The path and the text written to it.
+        result: Result<(PathBuf, String), String>,
         /// Saved from the “Unsaved changes” prompt: close the tab now.
         close: bool,
     },
@@ -168,6 +189,11 @@ pub struct Service {
     pub status: ServiceStatus,
     pub connections: Vec<Connection>,
     pub token_store: Option<secrets::Store>,
+    /// The token the client uses, loaded once per connect (off the UI
+    /// thread) for those that need it again (the AI assistant).
+    pub token: Option<String>,
+    /// Counts connects, so reports from an older client are ignored.
+    pub generation: u64,
 }
 
 impl Service {
@@ -193,8 +219,13 @@ pub struct SqailApp {
     pub snippets: crate::local::Snippets,
     pub sidebar: crate::sidebar::View,
     pub history_filter: String,
+    /// The filtered history list, kept between frames.
+    pub history_view: crate::sidebar::HistoryView,
     pub snippet_filter: String,
-    saved_workspace: Option<crate::local::Workspace>,
+    /// What autosave last handed to the writer, and how many it handed.
+    saved_workspace: crate::local::WorkspaceSnapshot,
+    workspace_seq: u64,
+    workspace_writer: crate::local::WorkspaceWriter,
     workspace_checked: Instant,
     pub keymap: crate::commands::Keymap,
     /// Set once the user confirmed quitting despite open transactions.
@@ -205,6 +236,10 @@ pub struct SqailApp {
     /// With the Omarchy theme: when its colours were last read, and checked.
     omarchy_seen: Option<std::time::SystemTime>,
     theme_checked: Instant,
+    /// The keyboard focus at the end of the last frame, and whether it was
+    /// a text field. egui drops a text field's focus on Esc before the frame
+    /// runs, so shortcuts look at this instead.
+    focus_seen: (Option<egui::Id>, bool),
 }
 
 impl SqailApp {
@@ -225,6 +260,8 @@ impl SqailApp {
                 status: ServiceStatus::Unconfigured,
                 connections: Vec::new(),
                 token_store: None,
+                token: None,
+                generation: 0,
             },
             tabs: Vec::new(),
             active: 0,
@@ -238,8 +275,11 @@ impl SqailApp {
             snippets,
             sidebar: Default::default(),
             history_filter: String::new(),
+            history_view: Default::default(),
             snippet_filter: String::new(),
-            saved_workspace: None,
+            saved_workspace: Default::default(),
+            workspace_seq: 0,
+            workspace_writer: Default::default(),
             workspace_checked: Instant::now(),
             keymap: crate::commands::Keymap::load(),
             allow_close: false,
@@ -248,6 +288,7 @@ impl SqailApp {
             designers: Default::default(),
             omarchy_seen: theme::omarchy_stamp(),
             theme_checked: Instant::now(),
+            focus_seen: (None, false),
             settings,
         };
         let workspace_error = app.restore_workspace();
@@ -301,18 +342,17 @@ impl SqailApp {
 
     // ------------------------------------------------------------ service --
 
-    /// Connect to a configured service using its stored token.
+    /// Connect to a configured service using its stored token. The token is
+    /// read on the worker: the OS credential store may block (unlock prompt).
     pub fn connect(&mut self, profile: ServiceProfile) {
-        let Some((token, store)) = secrets::load_token(&profile.url) else {
-            self.service.profile = Some(profile.clone());
-            self.service.status = ServiceStatus::Failed("no token stored for this service".into());
-            self.dialog = Dialog::Welcome(WelcomeForm::for_url(&profile.url));
-            return;
-        };
         self.service.profile = Some(profile.clone());
-        self.service.token_store = Some(store);
+        self.service.token_store = None;
+        self.service.token = None;
         self.service.client = None;
         self.service.status = ServiceStatus::Connecting;
+        self.service.generation += 1;
+        let generation = self.service.generation;
+        let sink = self.worker.sink();
         let trust = match &profile.fingerprint {
             Some(fp) => Trust::Pinned(fp.clone()),
             None => Trust::System,
@@ -320,7 +360,23 @@ impl SqailApp {
         let autostart = profile.local && self.settings.autostart_local;
         let (cert, key) = (profile.client_cert.clone(), profile.client_key.clone());
         let url = profile.url.clone();
+        let dir = crate::settings::config_dir();
         self.worker.run(async move {
+            let lookup = url.clone();
+            let loaded = tokio::task::spawn_blocking(move || secrets::load_token_in(&dir, &lookup))
+                .await
+                .ok()
+                .flatten();
+            let Some((token, store)) = loaded else {
+                return Msg::Connected {
+                    url,
+                    generation,
+                    token: None,
+                    result: Err(sqail_client::Error::Config(
+                        "no token stored for this service".into(),
+                    )),
+                };
+            };
             if autostart && let Err(e) = local_service::ensure_running(&url).await {
                 tracing::warn!(error = %e, "could not start the local service");
             }
@@ -331,15 +387,21 @@ impl SqailApp {
                 };
                 let client = Client::new(&Target {
                     url: url.clone(),
-                    token,
+                    token: token.clone(),
                     trust,
                     identity,
-                })?;
+                })?
+                .observe(reach_reporter(sink, generation));
                 let info = client.info().await?;
                 Ok((client, info))
             }
             .await;
-            Msg::Connected { url, result }
+            Msg::Connected {
+                url,
+                generation,
+                token: Some((token, store)),
+                result,
+            }
         });
     }
 
@@ -352,33 +414,101 @@ impl SqailApp {
         });
     }
 
-    /// Store a new service (token → credential store) and connect to it.
+    /// Store a new service (token → credential store, on the worker) and
+    /// connect to it.
     pub fn adopt_service(&mut self, profile: ServiceProfile, token: &str) {
-        match secrets::save_token(&profile.url, token) {
+        if let Dialog::Welcome(form) = &mut self.dialog {
+            form.busy = true;
+            form.error = None;
+        }
+        let dir = crate::settings::config_dir();
+        let token = token.to_string();
+        self.worker.run(async move {
+            let url = profile.url.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                secrets::save_token_in(&dir, &url, &token).map_err(|e| e.to_string())
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+            Msg::TokenSaved { profile, result }
+        });
+    }
+
+    fn token_saved(&mut self, profile: ServiceProfile, result: Result<secrets::Store, String>) {
+        match result {
             Ok(store) => {
                 if store == secrets::Store::File {
                     self.notify("No OS credential store found: the token is saved in tokens.toml (owner-only).", false);
                 }
+                self.settings.upsert_service(profile.clone());
+                self.settings.save();
+                self.dialog = Dialog::None;
+                self.connect(profile);
             }
             Err(e) => {
-                self.notify(format!("Could not store the token: {e}"), true);
-                return;
+                let e = format!("Could not store the token: {e}");
+                match &mut self.dialog {
+                    Dialog::Welcome(form) => {
+                        form.busy = false;
+                        form.error = Some(e);
+                    }
+                    _ => self.notify(e, true),
+                }
             }
         }
-        self.settings.upsert_service(profile.clone());
-        self.settings.save();
-        self.dialog = Dialog::None;
-        self.connect(profile);
+    }
+
+    /// A request found the service gone, the token rejected, or the service
+    /// answering again: keep the status bar honest.
+    fn service_reach(&mut self, generation: u64, reach: sqail_client::Reach) {
+        use sqail_client::Reach;
+        // Reports of an older client, or before this one connected.
+        if generation != self.service.generation || self.service.client.is_none() {
+            return;
+        }
+        match reach {
+            Reach::Answered => {
+                if matches!(self.service.status, ServiceStatus::Failed(_)) {
+                    self.service.status = ServiceStatus::Connected;
+                    self.refresh_connections();
+                }
+            }
+            Reach::Unreachable(e) => self.service.status = ServiceStatus::Failed(e),
+            Reach::Unauthorized(e) => {
+                self.service.status = ServiceStatus::Failed(e.clone());
+                let url = self.service.profile.as_ref().map(|p| p.url.clone());
+                match (&self.dialog, url) {
+                    // Back to the token prompt, unless the user is busy in a
+                    // dialog: then the status bar and a notice say it.
+                    (Dialog::None, Some(url)) => {
+                        let mut form = WelcomeForm::for_url(&url);
+                        form.error = Some(format!(
+                            "The service no longer accepts the token ({e}). Enter a new one."
+                        ));
+                        self.dialog = Dialog::Welcome(form);
+                    }
+                    _ => self.notify(
+                        format!("The service no longer accepts the token: {e}"),
+                        true,
+                    ),
+                }
+            }
+        }
     }
 
     pub fn forget_service(&mut self) {
         if let Some(p) = self.service.profile.take() {
-            secrets::delete_token(&p.url);
+            let (dir, url) = (crate::settings::config_dir(), p.url.clone());
+            self.worker.detach(async move {
+                let _ =
+                    tokio::task::spawn_blocking(move || secrets::delete_token_in(&dir, &url)).await;
+            });
             self.settings.services.retain(|s| s.url != p.url);
             self.settings.active_service = None;
             self.settings.save();
         }
         self.service.client = None;
+        self.service.token = None;
         self.service.info = None;
         self.service.connections.clear();
         self.service.status = ServiceStatus::Unconfigured;
@@ -408,11 +538,12 @@ impl SqailApp {
         let active = self.tabs[self.active].id;
         self.tabs.sort_by_key(|t| !t.pinned);
         self.active = self.tab_index(active).unwrap_or(0);
-        self.saved_workspace = Some(ws);
+        self.saved_workspace = self.workspace_snapshot().0;
         None
     }
 
-    fn tab_index(&self, id: u64) -> Option<usize> {
+    /// Where the tab with id `id` is now (tabs move and close).
+    pub fn tab_index(&self, id: u64) -> Option<usize> {
         self.tabs.iter().position(|t| t.id == id)
     }
 
@@ -437,16 +568,69 @@ impl SqailApp {
         }
     }
 
+    /// The open tabs, sharing the text of every tab that did not change
+    /// since the last snapshot; and whether anything changed.
+    fn workspace_snapshot(&self) -> (crate::local::WorkspaceSnapshot, bool) {
+        use std::sync::Arc;
+        let last = &self.saved_workspace;
+        let mut changed = last.tabs.len() != self.tabs.len() || last.active != self.active;
+        let tabs = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let prev = last.tabs.get(i);
+                // A memcmp, and a copy only of the tab that changed.
+                let text = match prev {
+                    Some(p) if *p.text == *t.text => p.text.clone(),
+                    _ => Arc::from(t.text.as_str()),
+                };
+                let snap = crate::local::TabSnapshot {
+                    title: t.title.clone(),
+                    path: t.path.clone(),
+                    text,
+                    connection: t.connection,
+                    cursor: t.cursor.primary.index.0,
+                    pinned: t.pinned,
+                    format: t.path.as_ref().map(|_| t.format),
+                };
+                // Same text `Arc`s compare by pointer.
+                changed |= prev != Some(&snap);
+                snap
+            })
+            .collect();
+        let ws = crate::local::WorkspaceSnapshot {
+            tabs,
+            active: self.active,
+        };
+        (ws, changed)
+    }
+
     /// Persist open tabs when they changed (checked about once a second).
+    /// The file is serialised and written on the worker; only when quitting
+    /// (`force`) is it written here.
     fn autosave_workspace(&mut self, force: bool) {
         if !force && self.workspace_checked.elapsed() < Duration::from_secs(1) {
             return;
         }
         self.workspace_checked = Instant::now();
-        let ws = self.workspace();
-        if self.saved_workspace.as_ref() != Some(&ws) {
-            ws.save();
-            self.saved_workspace = Some(ws);
+        let (ws, changed) = self.workspace_snapshot();
+        if !changed && !(force && self.workspace_seq > 0) {
+            return;
+        }
+        self.saved_workspace = ws.clone();
+        self.workspace_seq += 1;
+        let (seq, writer, path) = (
+            self.workspace_seq,
+            self.workspace_writer.clone(),
+            crate::local::Workspace::path(),
+        );
+        if force {
+            writer.write(&path, &ws, seq);
+        } else {
+            self.worker.detach(async move {
+                let _ = tokio::task::spawn_blocking(move || writer.write(&path, &ws, seq)).await;
+            });
         }
     }
 
@@ -552,10 +736,11 @@ impl SqailApp {
     }
 
     pub fn request_close_tab(&mut self, idx: usize) {
+        let id = self.tabs[idx].id;
         if self.tabs[idx].in_transaction {
-            self.dialog = Dialog::ConfirmCloseTransaction(Some(idx));
+            self.dialog = Dialog::ConfirmCloseTransaction(Some(id));
         } else if self.tabs[idx].is_dirty() && self.settings.confirm_close_tab {
-            self.dialog = Dialog::ConfirmClose(idx);
+            self.dialog = Dialog::ConfirmClose(id);
         } else {
             self.close_tab(idx);
         }
@@ -588,7 +773,7 @@ impl SqailApp {
             return;
         }
         if tab.in_transaction {
-            self.dialog = Dialog::ConfirmSwitchTransaction(idx, connection);
+            self.dialog = Dialog::ConfirmSwitchTransaction(tab.id, connection);
             return;
         }
         tab.connection = connection;
@@ -750,18 +935,9 @@ impl SqailApp {
                     }
                 }
                 match client.query(On::Session(sid), &req).await {
-                    Ok(mut stream) => {
-                        while let Some(ev) = stream.events.next().await {
-                            match ev {
-                                Ok(event) => sink.send(Msg::Query {
-                                    tab: tab_id,
-                                    run: run_id,
-                                    event,
-                                }),
-                                Err(e) => return sink.send(fail(e.to_string())),
-                            }
-                        }
-                        return;
+                    Ok(stream) => {
+                        return forward_events(stream.events, tab_id, run_id, |m| sink.send(m))
+                            .await;
                     }
                     Err(e) if is_session_gone(&e) => {
                         if attempt > 0 || in_tx {
@@ -805,13 +981,28 @@ impl SqailApp {
 
     fn handle(&mut self, msg: Msg) {
         match msg {
-            Msg::Connected { url, result } => {
-                if self.service.profile.as_ref().map(|p| &p.url) != Some(&url) {
+            Msg::Connected {
+                url,
+                generation,
+                token,
+                result,
+            } => {
+                if generation != self.service.generation
+                    || self.service.profile.as_ref().map(|p| &p.url) != Some(&url)
+                {
                     return; // a newer connect superseded this one
                 }
+                let Some((token, store)) = token else {
+                    self.service.status =
+                        ServiceStatus::Failed("no token stored for this service".into());
+                    self.dialog = Dialog::Welcome(WelcomeForm::for_url(&url));
+                    return;
+                };
+                self.service.token_store = Some(store);
                 match result {
                     Ok((client, info)) => {
                         self.service.client = Some(client);
+                        self.service.token = Some(token);
                         self.service.info = Some(info);
                         self.service.status = ServiceStatus::Connected;
                         self.refresh_connections();
@@ -840,10 +1031,14 @@ impl SqailApp {
                         tab.in_transaction = false;
                     }
                 }
-                if self.tabs.iter().all(|t| t.connection.is_none())
-                    && let (Some(first), Some(tab)) = (list.first(), self.tabs.get_mut(self.active))
+                // Only when there is no choice to make: with several, binding
+                // the first one could run SQL on a database nobody picked.
+                if let [only] = list.as_slice()
+                    && only.engine.is_known()
+                    && self.tabs.iter().all(|t| t.connection.is_none())
+                    && let Some(tab) = self.tabs.get_mut(self.active)
                 {
-                    tab.connection = Some(first.id);
+                    tab.connection = Some(only.id);
                 }
                 self.schema.retain(&list);
                 self.service.connections = list;
@@ -851,6 +1046,8 @@ impl SqailApp {
             Msg::Connections(Err(e)) => {
                 self.notify(format!("Could not load connections: {e}"), true)
             }
+            Msg::ServiceReach { generation, reach } => self.service_reach(generation, reach),
+            Msg::TokenSaved { profile, result } => self.token_saved(profile, result),
             Msg::Probed(r) => {
                 if let Dialog::Welcome(form) = &mut self.dialog {
                     form.on_probed(r);
@@ -875,13 +1072,22 @@ impl SqailApp {
                     }
                 }
             },
-            Msg::ConnTested(r) => {
-                if let Dialog::Connection(form) = &mut self.dialog {
-                    form.on_tested(r);
+            Msg::ConnTested { form, result } => {
+                // Not for a form that was closed and opened again meanwhile.
+                if let Dialog::Connection(f) = &mut self.dialog
+                    && f.nonce == form
+                {
+                    f.on_tested(result);
                 }
             }
-            Msg::ConnCertPicked { kind, result } => {
-                if let Dialog::Connection(form) = &mut self.dialog {
+            Msg::ConnCertPicked {
+                form: nonce,
+                kind,
+                result,
+            } => {
+                if let Dialog::Connection(form) = &mut self.dialog
+                    && form.nonce == nonce
+                {
                     match result {
                         None => {}
                         Some(Ok((name, pem))) => form.set_cert(kind, name, pem),
@@ -1022,7 +1228,7 @@ impl SqailApp {
                     self.run_sql(idx, text);
                 }
             }
-            Msg::FileOpened(Ok((path, text))) => {
+            Msg::FileOpened(Ok((path, text, format))) => {
                 let conn = self.tabs.get(self.active).and_then(|t| t.connection);
                 // Reuse an untouched empty tab.
                 let idx = match self.tabs.get(self.active) {
@@ -1033,12 +1239,13 @@ impl SqailApp {
                 };
                 let tab = &mut self.tabs[idx];
                 tab.set_file(path, text);
+                tab.format = format;
             }
             Msg::FileOpened(Err(e)) => self.notify(format!("Open failed: {e}"), true),
             Msg::FileSaved { tab, result, close } => match result {
-                Ok(path) => {
+                Ok((path, written)) => {
                     if let Some(t) = self.tab_mut(tab) {
-                        t.mark_saved(path);
+                        t.mark_saved(path, written);
                     }
                     if close && let Some(idx) = self.tabs.iter().position(|t| t.id == tab) {
                         self.close_tab(idx);
@@ -1515,13 +1722,17 @@ impl SqailApp {
                     error: false,
                 };
             };
-            let path = file.path().to_path_buf();
-            Msg::FileOpened(
-                std::fs::read_to_string(&path)
-                    .map(|t| (path, t))
-                    .map_err(|e| e.to_string()),
-            )
+            Self::read_file(file.path().to_path_buf())
         });
+    }
+
+    /// Open `path` in a tab (read off the UI thread).
+    pub fn open_path(&mut self, path: PathBuf) {
+        self.worker.run(async move { Self::read_file(path) });
+    }
+
+    fn read_file(path: PathBuf) -> Msg {
+        Msg::FileOpened(crate::textfile::read(&path).map(|(t, f)| (path, t, f)))
     }
 
     pub fn save_tab(&mut self, idx: usize, save_as: bool) {
@@ -1535,8 +1746,19 @@ impl SqailApp {
     }
 
     fn save_tab_then(&mut self, idx: usize, save_as: bool, close: bool) {
+        let tab = &mut self.tabs[idx];
+        if !crate::textfile::can_encode(&tab.text, &tab.format) {
+            let from = tab.format.encoding.label();
+            tab.format.encoding = crate::textfile::Encoding::Utf8;
+            tab.format.bom = false;
+            let title = tab.title.clone();
+            self.notify(
+                format!("{title} has characters that {from} cannot hold, so it is saved as UTF-8"),
+                false,
+            );
+        }
         let tab = &self.tabs[idx];
-        let (id, text) = (tab.id, tab.text.clone());
+        let (id, text, format) = (tab.id, tab.text.clone(), tab.format);
         let known = tab.path.clone().filter(|_| !save_as);
         let suggested = format!("{}.sql", tab.title.trim_end_matches(".sql"));
         self.worker.run(async move {
@@ -1557,8 +1779,9 @@ impl SqailApp {
                     }
                 },
             };
-            let result = std::fs::write(&path, text)
-                .map(|_| path)
+            // The tab text as it was before encoding is what counts as saved.
+            let result = std::fs::write(&path, crate::textfile::encode(&text, &format))
+                .map(|_| (path, text))
                 .map_err(|e| e.to_string());
             Msg::FileSaved {
                 tab: id,
@@ -1575,24 +1798,34 @@ impl SqailApp {
         if !matches!(self.dialog, Dialog::None) || self.palette.is_some() {
             return;
         }
-        let running = self
-            .tabs
-            .get(self.active)
-            .is_some_and(|t| t.run.as_ref().is_some_and(|r| r.running));
-        // Typing in the assistant: editor shortcuts (Ctrl+Enter, …) stay off.
-        let assistant_typing = ctx.memory(|m| m.has_focus(crate::assistant::panel::input_id()));
+        let tab = self.tabs.get(self.active);
+        let running = tab.is_some_and(|t| t.run.as_ref().is_some_and(|r| r.running));
+        // Where the keyboard focus is (as of the last frame).
+        let (focused, text_field) = self.focus_seen;
+        let in_editor = focused.is_some() && focused == tab.map(|t| t.editor_id());
+        let in_find =
+            focused.is_some() && focused == tab.map(|t| crate::editor::find_field_id(t.id));
+        // Typing anywhere but the SQL editor (find bar, filters, a grid cell,
+        // a designer or viewer window, the assistant): editor commands
+        // (Ctrl+W, Ctrl+Enter, Ctrl+S, …) stay off.
+        let typing_elsewhere = !in_editor && text_field;
+        let completing = in_editor && tab.is_some_and(|t| t.completion.is_some());
         let bindings = self.keymap.bindings().to_vec();
         for (sc, cmd) in bindings {
-            if assistant_typing
-                && !matches!(cmd, Command::ToggleAssistant | Command::CommandPalette)
-            {
+            let find_cmd = matches!(
+                cmd,
+                Command::Find | Command::FindNext | Command::FindPrevious
+            );
+            if typing_elsewhere && !cmd.is_global() && !(in_find && find_cmd) {
                 continue;
             }
-            // Esc only means "cancel" while something is running.
-            if cmd == Command::Cancel && !running {
+            // Esc only means "cancel" while something is running, and only
+            // when no inner widget wants it (the completion popup; the find
+            // bar and a cell editor are covered above).
+            if cmd == Command::Cancel && (!running || completing) {
                 continue;
             }
-            if ctx.input_mut(|i| i.consume_shortcut(&sc)) {
+            if ctx.input_mut(|i| crate::commands::consume_exact(i, &sc)) {
                 self.execute(ctx, cmd);
             }
         }
@@ -1732,8 +1965,10 @@ impl SqailApp {
         };
         match crate::sql::format::format(&tab.text[start..end], engine, &style) {
             Ok(formatted) => {
+                tab.undo_point();
                 tab.text.replace_range(start..end, &formatted);
                 tab.select_bytes(start, start + formatted.len());
+                tab.undo_point();
             }
             Err(why) => self.notify(format!("Format: {why}"), true),
         }
@@ -1997,6 +2232,12 @@ impl SqailApp {
             let resp = ui.label(RichText::new(text).small());
             if let Some(store) = self.service.token_store {
                 resp.on_hover_text(format!("Token stored in the {}", store.describe()));
+            }
+            if matches!(self.service.status, ServiceStatus::Failed(_))
+                && let Some(p) = self.service.profile.clone()
+                && ui.small_button("Reconnect").clicked()
+            {
+                self.connect(p);
             }
 
             if let Some(tab) = self.tabs.get(self.active)
@@ -2438,6 +2679,62 @@ impl SqailApp {
     }
 }
 
+/// The run's event stream closed without `Done` (the service stopped, or its
+/// query task died): nothing more will arrive for it.
+pub const STREAM_ENDED: &str = "The query stream ended unexpectedly (the service may have \
+     stopped). The result is incomplete; whether the statement finished is unknown.";
+
+/// Pass a run's events on as messages. A stream that ends without `Done`
+/// fails the run, so the tab never waits forever.
+async fn forward_events(
+    mut events: impl futures::Stream<Item = sqail_client::Result<QueryEvent>> + Unpin,
+    tab: u64,
+    run: u64,
+    mut send: impl FnMut(Msg),
+) {
+    let fail = |error: String| Msg::QueryFailed {
+        tab,
+        run,
+        error,
+        session_gone: false,
+    };
+    let mut done = false;
+    while let Some(ev) = events.next().await {
+        match ev {
+            Ok(event) => {
+                done |= matches!(event, QueryEvent::Done { .. });
+                send(Msg::Query { tab, run, event });
+            }
+            Err(e) => return send(fail(e.to_string())),
+        }
+    }
+    if !done {
+        send(fail(STREAM_ENDED.into()));
+    }
+}
+
+/// A client observer that tells the UI when what requests show about the
+/// service changes (not on every request).
+fn reach_reporter(
+    sink: crate::worker::Sink,
+    generation: u64,
+) -> impl Fn(sqail_client::Reach) + Send + Sync + 'static {
+    use sqail_client::Reach;
+    use std::sync::atomic::{AtomicU8, Ordering};
+    // The connect that creates the client is its first answer.
+    let last = AtomicU8::new(0);
+    move |reach| {
+        let kind = match reach {
+            Reach::Answered => 0,
+            Reach::Unreachable(_) => 1,
+            Reach::Unauthorized(_) => 2,
+        };
+        if last.swap(kind, Ordering::Relaxed) != kind {
+            sink.send(Msg::ServiceReach { generation, reach });
+        }
+    }
+}
+
 /// Shown instead of running a statement when the tab's transaction is gone.
 const TRANSACTION_LOST: &str = "The session was lost, so its open transaction was rolled back. \
      The statement was not run; run it again to start a new transaction.";
@@ -2552,6 +2849,7 @@ impl eframe::App for SqailApp {
         crate::palette::show(&ctx, self);
         self.autosave_workspace(false);
         crate::dialogs::show(&ctx, self);
+        self.focus_seen = (ctx.memory(|m| m.focused()), ctx.text_edit_focused());
 
         let running = self
             .tabs
@@ -2577,5 +2875,56 @@ struct FreeSession(crate::worker::Sink, u64);
 impl Drop for FreeSession {
     fn drop(&mut self) {
         self.0.send(Msg::SessionFree { tab: self.1 });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn collect(events: Vec<sqail_client::Result<QueryEvent>>) -> Vec<Msg> {
+        let mut out = Vec::new();
+        futures::executor::block_on(forward_events(futures::stream::iter(events), 1, 2, |m| {
+            out.push(m)
+        }));
+        out
+    }
+
+    fn started() -> sqail_client::Result<QueryEvent> {
+        Ok(QueryEvent::Started {
+            query_id: Uuid::nil(),
+        })
+    }
+
+    #[test]
+    fn a_stream_without_done_fails_the_run() {
+        let msgs = collect(vec![started()]);
+        assert_eq!(msgs.len(), 2);
+        assert!(matches!(
+            &msgs[1],
+            Msg::QueryFailed { tab: 1, run: 2, error, session_gone: false } if error == STREAM_ENDED
+        ));
+        // An empty body too.
+        assert!(matches!(&collect(vec![])[..], [Msg::QueryFailed { .. }]));
+    }
+
+    #[test]
+    fn a_finished_stream_does_not_fail() {
+        let done = Ok(QueryEvent::Done {
+            elapsed_ms: 1,
+            cancelled: false,
+            in_transaction: None,
+        });
+        let msgs = collect(vec![started(), done]);
+        assert_eq!(msgs.len(), 2);
+        assert!(msgs.iter().all(|m| matches!(m, Msg::Query { .. })));
+    }
+
+    #[test]
+    fn a_broken_stream_fails_once() {
+        let broken = Err(sqail_client::Error::Transport("reset".into()));
+        let msgs = collect(vec![started(), broken, started()]);
+        assert_eq!(msgs.len(), 2);
+        assert!(matches!(&msgs[1], Msg::QueryFailed { error, .. } if error.contains("reset")));
     }
 }

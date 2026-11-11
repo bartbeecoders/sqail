@@ -14,7 +14,9 @@ mod tokens;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderName, HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use axum::{Router, middleware};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
@@ -143,8 +145,15 @@ pub fn router(state: AppState) -> Router {
             StatusCode::GATEWAY_TIMEOUT,
             timeout,
         ))
+        // axum's extractors have a 2 MiB limit of their own; the configured
+        // one replaces it.
+        .layer(DefaultBodyLimit::max(state.config.limits.body_limit_bytes))
         .layer(RequestBodyLimitLayer::new(
             state.config.limits.body_limit_bytes,
+        ))
+        .layer(middleware::map_response_with_state(
+            state.config.limits.body_limit_bytes,
+            too_large_as_problem,
         ))
         .layer(SetResponseHeaderLayer::overriding(
             header::STRICT_TRANSPORT_SECURITY,
@@ -168,6 +177,25 @@ pub fn router(state: AppState) -> Router {
         .layer(SetSensitiveRequestHeadersLayer::new([
             header::AUTHORIZATION,
         ]))
+}
+
+/// A body over the limit is refused with plain text, by the limit layer (a
+/// `content-length` over it) or by an extractor (a longer body); answer
+/// with a problem document like every other error.
+async fn too_large_as_problem(State(limit): State<usize>, res: Response) -> Response {
+    let is_problem = res
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .is_some_and(|v| v.as_bytes().starts_with(b"application/problem+json"));
+    if res.status() != StatusCode::PAYLOAD_TOO_LARGE || is_problem {
+        return res;
+    }
+    ApiError::new(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "payload_too_large",
+        format!("the request body is larger than the service accepts ({limit} bytes, limits.body_limit_bytes)"),
+    )
+    .into_response()
 }
 
 /// Load a profile and check the caller may use it at all.

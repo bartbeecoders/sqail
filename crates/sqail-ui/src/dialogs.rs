@@ -21,7 +21,9 @@ pub enum Dialog {
     AzureDiscover(Box<DiscoverForm>),
     Settings(Box<crate::settings_ui::SettingsPage>),
     ConfirmDelete(Uuid, String),
-    ConfirmClose(usize),
+    /// Closing the dirty tab with this id (ids, not indices: tabs before it
+    /// may close while the dialog is open).
+    ConfirmClose(u64),
     SaveSnippet {
         name: String,
         sql: String,
@@ -29,10 +31,13 @@ pub enum Dialog {
     Import(Box<ImportForm>),
     ApplyEdits(Box<ApplyEdits>),
     DropTable(Box<DropTable>),
-    /// Closing a tab (`Some(index)`) or quitting (`None`) with open transactions.
-    ConfirmCloseTransaction(Option<usize>),
-    /// Changing the connection of tab `index`, which has an open transaction.
-    ConfirmSwitchTransaction(usize, Option<Uuid>),
+    /// Closing a tab (`Some(tab id)`) or quitting (`None`) with open transactions.
+    ConfirmCloseTransaction(Option<u64>),
+    /// Changing the connection of the tab with this id, which has an open
+    /// transaction.
+    ConfirmSwitchTransaction(u64, Option<Uuid>),
+    /// History → Clear.
+    ConfirmClearHistory,
 }
 
 // ---------------------------------------------------------------- welcome --
@@ -236,7 +241,7 @@ impl MsAuthChoice {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum EngineChoice {
     Postgres,
     Mssql,
@@ -303,6 +308,13 @@ pub struct ConnForm {
     testing: bool,
     pub saving: bool,
     pub error: Option<String>,
+    /// Tells this form's background results (test, certificate file) from
+    /// those of a form that was closed meanwhile.
+    pub nonce: u64,
+    /// What the fields held when the form was first shown.
+    baseline: Option<String>,
+    /// Cancel or Esc on a changed form: asking whether to discard it.
+    confirm_discard: bool,
 }
 
 impl ConnForm {
@@ -346,7 +358,44 @@ impl ConnForm {
             testing: false,
             saving: false,
             error: None,
+            nonce: {
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            },
+            baseline: None,
+            confirm_discard: false,
         }
+    }
+
+    /// Everything the user can type or pick, to see whether the form changed.
+    fn fields(&self) -> String {
+        format!(
+            "{:?}",
+            [
+                &self.name,
+                &format!("{:?}", self.engine),
+                &self.host,
+                &self.port,
+                &self.database,
+                &self.user,
+                &self.password,
+                &format!("{:?}", self.pg_ssl),
+                &self.pg_root_cert,
+                &self.pg_client_cert,
+                &self.pg_client_key,
+                &format!("{}", self.pg_key_cleared),
+                &format!("{:?}", self.ms_auth),
+                &self.ms_tenant,
+                &self.ms_client_id,
+                &self.ms_instance,
+                &format!("{:?} {}", self.ms_encrypt, self.ms_trust),
+                &self.sqlite_path,
+                &format!("{} {}", self.sqlite_create, self.read_only),
+                &format!("{:?}", self.color),
+                &self.environment,
+                &self.folder,
+            ]
+        )
     }
 
     pub fn edit(c: &Connection) -> Self {
@@ -785,7 +834,10 @@ fn connection_form(ctx: &egui::Context, app: &mut SqailApp) {
     let mut test = false;
     let mut want_dbs = false;
     let mut save = false;
+    let mut discard = false;
     let before = form.engine;
+    let fields = form.fields();
+    let changed = *form.baseline.get_or_insert_with(|| fields.clone()) != fields;
 
     let resp = Modal::new(Id::new("conn_form")).show(ctx, |ui| {
         ui.set_width(560.0);
@@ -1111,6 +1163,21 @@ fn connection_form(ctx: &egui::Context, app: &mut SqailApp) {
             ui.colored_label(Color32::from_rgb(0xd6, 0x45, 0x45), e);
         }
         ui.separator();
+        if form.confirm_discard {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Discard your changes to this connection?").strong());
+                if ui
+                    .button(RichText::new("Discard").color(Color32::from_rgb(0xd6, 0x45, 0x45)))
+                    .clicked()
+                {
+                    discard = true;
+                }
+                if ui.button("Keep editing").clicked() {
+                    form.confirm_discard = false;
+                }
+            });
+            ui.separator();
+        }
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(!form.testing, egui::Button::new("Test"))
@@ -1137,9 +1204,17 @@ fn connection_form(ctx: &egui::Context, app: &mut SqailApp) {
             });
         });
     });
-    if resp.should_close() {
+    // Esc closes; a click beside the form does not (it would lose the input).
+    if resp.should_close() && !resp.backdrop_response.clicked() {
         close = true;
     }
+    if close && changed && !form.confirm_discard {
+        form.confirm_discard = true;
+        close = false;
+    } else if close && form.confirm_discard {
+        close = false; // already asking: Esc again doesn't discard
+    }
+    close |= discard;
     if form.engine != before {
         form.port = match form.engine {
             EngineChoice::Postgres => "5432".into(),
@@ -1185,9 +1260,13 @@ fn connection_form(ctx: &egui::Context, app: &mut SqailApp) {
                     (input.password.is_none() && form.has_password)
                         || (input.ssl_client_key.is_none() && form.has_ssl_client_key)
                 });
+                let form_id = form.nonce;
                 app.worker.run(async move {
                     let r = client.test_unsaved(&input, secret_from).await;
-                    Msg::ConnTested(r.map_err(|e| e.to_string()))
+                    Msg::ConnTested {
+                        form: form_id,
+                        result: r.map_err(|e| e.to_string()),
+                    }
                 });
             }
             Ok(input) => {
@@ -1213,6 +1292,7 @@ fn connection_form(ctx: &egui::Context, app: &mut SqailApp) {
     let Some(kind) = kind else {
         return;
     };
+    let form_id = form.nonce;
     app.worker.run(async move {
         let picked = rfd::AsyncFileDialog::new()
             .add_filter("PEM", &["pem", "crt", "cer", "key"])
@@ -1234,7 +1314,11 @@ fn connection_form(ctx: &egui::Context, app: &mut SqailApp) {
                 })
             }
         };
-        Msg::ConnCertPicked { kind, result }
+        Msg::ConnCertPicked {
+            form: form_id,
+            kind,
+            result,
+        }
     });
 }
 
@@ -1622,14 +1706,15 @@ fn confirm_delete(ctx: &egui::Context, app: &mut SqailApp) {
 }
 
 fn confirm_close(ctx: &egui::Context, app: &mut SqailApp) {
-    let Dialog::ConfirmClose(idx) = app.dialog else {
+    let Dialog::ConfirmClose(id) = app.dialog else {
         return;
     };
-    let title = app
-        .tabs
-        .get(idx)
-        .map(|t| t.title.clone())
-        .unwrap_or_default();
+    // The tab closed meanwhile (e.g. an earlier save-and-close finished).
+    let Some(idx) = app.tab_index(id) else {
+        app.dialog = Dialog::None;
+        return;
+    };
+    let title = app.tabs[idx].title.clone();
     let mut decision = None;
     let resp = Modal::new(Id::new("confirm_close")).show(ctx, |ui| {
         ui.heading("Unsaved changes");
@@ -2145,9 +2230,20 @@ fn drop_table(ctx: &egui::Context, app: &mut SqailApp) {
 fn confirm_close_transaction(
     ctx: &egui::Context,
     app: &mut SqailApp,
-    target: Option<usize>,
+    target: Option<u64>,
     switch_to: Option<Option<Uuid>>,
 ) {
+    // Look the tab up by id; if it closed meanwhile there is nothing to ask.
+    let target = match target {
+        Some(id) => match app.tab_index(id) {
+            Some(i) => Some(i),
+            None => {
+                app.dialog = Dialog::None;
+                return;
+            }
+        },
+        None => None,
+    };
     let mut decision = None;
     let resp = Modal::new(Id::new("confirm_close_tx")).show(ctx, |ui| {
         ui.set_width(440.0);
@@ -2229,6 +2325,41 @@ pub fn show(ctx: &egui::Context, app: &mut SqailApp) {
         Dialog::ConfirmSwitchTransaction(idx, conn) => {
             confirm_close_transaction(ctx, app, Some(idx), Some(conn))
         }
+        Dialog::ConfirmClearHistory => confirm_clear_history(ctx, app),
+    }
+}
+
+fn confirm_clear_history(ctx: &egui::Context, app: &mut SqailApp) {
+    let mut decision = None;
+    let n = app.history.entries.len();
+    let resp = Modal::new(Id::new("confirm_clear_history")).show(ctx, |ui| {
+        ui.set_width(380.0);
+        ui.heading("Clear the query history");
+        ui.label(format!(
+            "Delete all {n} queries from the history? This can't be undone."
+        ));
+        ui.horizontal(|ui| {
+            if ui
+                .button(RichText::new("Clear history").color(Color32::from_rgb(0xd6, 0x45, 0x45)))
+                .clicked()
+            {
+                decision = Some(true);
+            }
+            if ui.button("Cancel").clicked() {
+                decision = Some(false);
+            }
+        });
+    });
+    if resp.should_close() {
+        decision = Some(false);
+    }
+    match decision {
+        Some(true) => {
+            app.history.clear();
+            app.dialog = Dialog::None;
+        }
+        Some(false) => app.dialog = Dialog::None,
+        None => {}
     }
 }
 

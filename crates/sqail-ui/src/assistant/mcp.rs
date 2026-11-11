@@ -551,6 +551,7 @@ mod tests {
                     nullable: false,
                     default: None,
                     primary_key: true,
+                    ..Default::default()
                 }],
                 vec![],
                 vec![ForeignKeyInfo {

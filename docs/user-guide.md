@@ -328,7 +328,13 @@ or XML plan.
   must be selected once, without an alias. Binary columns (`bytea`,
   `varbinary`, `BLOB`) are edited as `0x` followed by hex digits, as they are
   shown (`0x` alone is an empty value); sqail writes the bytes themselves,
-  and refuses a value that isn't valid hex before anything is sent.
+  and refuses a value that isn't valid hex before anything is sent. Columns
+  the database fills are read-only and left out of new rows: identity
+  columns it always numbers (SQL Server `IDENTITY`, PostgreSQL `GENERATED
+  ALWAYS AS IDENTITY`), generated or computed columns, and SQL Server
+  `rowversion`. The column header's tooltip says why. A PostgreSQL
+  `BY DEFAULT` identity and SQLite's `INTEGER PRIMARY KEY` stay editable;
+  leave them empty in a new row to get the next number.
 * Messages (`RAISERROR`, `RAISE NOTICE`, `PRINT`) and row counts appear in the
   *Messages* tab, in the order the server sent them, between the results.
   On SQL Server every statement reports its row count (unless
@@ -346,7 +352,8 @@ panel on the right collapses the same way (**»**, Ctrl+Shift+A), and both
 remember their state.
 
 * **Connections:** a tree of schemas, tables, views, columns, indexes, foreign
-  keys and routines, loaded lazily. Right-click a table for *SELECT top 100*,
+  keys and routines, loaded lazily. Columns show their type and whether they
+  are an *identity* (*rowid* on SQLite) or *generated*. Right-click a table for *SELECT top 100*,
   *Design table…*, *Import CSV…*, *Script CREATE*, *Drop table…* or *Copy
   name*. *Import CSV* reads binary columns as `0x` + hex, the way CSV
   export writes them, and stops (changing nothing) at a value that isn't
@@ -388,7 +395,16 @@ be open at once. Pages:
 
 * **Columns:** name, type (type it, or pick a common one from ⏷), whether it
   allows NULL, and the default as an SQL expression (`0`, `'none'`,
-  `now()`). Tick *Key* to put a column in the primary key. Rows you added
+  `now()`). The menu in front of the default makes a column an *identity*
+  (numbered by the database: `BY DEFAULT` or `ALWAYS` on PostgreSQL,
+  `IDENTITY` on SQL Server) or *generated* (computed from an expression;
+  *Stored*, on SQL Server *Persisted*, keeps the values on disk). An
+  existing PostgreSQL column can become an identity or stop being one, and
+  a generated column can get a new expression (PostgreSQL 17 or later) or
+  become an ordinary column with its values kept. SQL Server can't change
+  either on an existing column, and the menu says so: drop the column and
+  add a new one. On SQLite a lone `INTEGER PRIMARY KEY` is shown as
+  *rowid*. Tick *Key* to put a column in the primary key. Rows you added
   are marked *new*, edited ones *changed*; removed columns are listed under
   *Dropped* and can be restored until you apply. Column order can be changed
   only for a new table.

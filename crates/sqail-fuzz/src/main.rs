@@ -164,6 +164,7 @@ impl sqail_ui::sql::complete::Catalog for Catalog {
             nullable: false,
             default: None,
             primary_key: true,
+            ..Default::default()
         }])
     }
     fn foreign_keys(&self, _: &str, _: &str) -> Option<Vec<ForeignKeyInfo>> {

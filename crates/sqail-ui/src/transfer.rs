@@ -643,6 +643,7 @@ mod tests {
             nullable: true,
             default: None,
             primary_key: false,
+            ..Default::default()
         }
     }
 

@@ -735,15 +735,52 @@ pub struct TableInfo {
     pub kind: TableKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct ColumnInfo {
     pub name: String,
     pub ordinal: i64,
     pub data_type: String,
     pub nullable: bool,
+    /// The default expression. None for identity and generated columns,
+    /// whose values come from [`ColumnInfo::identity`] and
+    /// [`ColumnInfo::generated`].
     pub default: Option<String>,
     pub primary_key: bool,
+    /// The column numbers itself: PostgreSQL `GENERATED … AS IDENTITY`,
+    /// SQL Server `IDENTITY`, SQLite's `INTEGER PRIMARY KEY` (the rowid).
+    /// None from services older than this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<IdentityInfo>,
+    /// The column is computed from the others: PostgreSQL and SQLite
+    /// `GENERATED ALWAYS AS (…)`, SQL Server computed columns. None from
+    /// services older than this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated: Option<GeneratedInfo>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct IdentityInfo {
+    /// Values can't be written: PostgreSQL `GENERATED ALWAYS`, SQL Server
+    /// `IDENTITY` (short of `SET IDENTITY_INSERT`). False for PostgreSQL
+    /// `BY DEFAULT` and SQLite, where a written value wins.
+    pub always: bool,
+    /// The first value, as the engine prints it; None when unknown (SQLite).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<String>,
+    /// The step between values; None when unknown (SQLite).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub increment: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct GeneratedInfo {
+    /// The expression, as the engine prints it.
+    pub expression: String,
+    /// Stored (SQL Server `PERSISTED`) rather than computed when read.
+    pub stored: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

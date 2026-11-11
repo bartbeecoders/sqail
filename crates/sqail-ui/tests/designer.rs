@@ -8,8 +8,9 @@ use sqail_client::proto::{
     PostgresParams, QueryEvent, QueryRequest, SqliteParams,
 };
 use sqail_client::{Client, On, Target, Trust};
-use sqail_ui::designer::model::{Design, IndexPart, Plan, drop_table};
+use sqail_ui::designer::model::{Design, IndexPart, Plan, ValueKind, drop_table};
 use sqail_ui::designer::{self};
+use sqail_ui::editing::locked_column;
 use sqail_ui::sql::drop::{DropItem, ObjectKind, Spot, text_for};
 use sqail_ui::sql::format::Style;
 use uuid::Uuid;
@@ -465,6 +466,289 @@ fn table_design_round_trip_on_postgres_and_mssql() {
         "IF DATABASE_PRINCIPAL_ID('sqail_it_reader') IS NULL CREATE USER sqail_it_reader WITHOUT LOGIN",
     );
     exercise(&s, ms, Engine::Mssql, "sales", Some("sqail_it_reader"));
+}
+
+fn pg_conn(s: &Svc) -> Uuid {
+    s.connect(
+        ConnectionParams::Postgres(PostgresParams {
+            host: "127.0.0.1".into(),
+            port: 55432,
+            database: "sqail_test".into(),
+            user: "sqail".into(),
+            ssl_mode: PgSslMode::Disable,
+            ssl_root_cert: None,
+            ssl_client_cert: None,
+        }),
+        Some("sqail_dev_pw"),
+    )
+}
+
+fn ms_conn(s: &Svc) -> Uuid {
+    s.connect(
+        ConnectionParams::Mssql(MssqlParams {
+            host: "127.0.0.1".into(),
+            port: 51433,
+            instance: None,
+            database: Some("sqail_test".into()),
+            auth: MssqlAuth::Sql {
+                user: "sqail".into(),
+            },
+            encrypt: MssqlEncrypt::Required,
+            trust_server_certificate: true,
+        }),
+        Some("Sqail2_dev!Passw0rd"),
+    )
+}
+
+fn kind(d: &Design, name: &str) -> ValueKind {
+    ValueKind::of(d.column(column(d, name)).unwrap())
+}
+
+fn expression(d: &Design, name: &str) -> String {
+    let c = d.column(column(d, name)).unwrap();
+    c.generated.as_ref().unwrap().expression.clone()
+}
+
+/// PostgreSQL: identity and generated columns load as such, and the
+/// designer adds, switches and drops them with ALTER COLUMN.
+#[test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+fn postgres_identity_and_generated_columns() {
+    let s = svc();
+    let pg = pg_conn(&s);
+    let e = Engine::Postgres;
+    let schema = format!("it174_{}", &Uuid::new_v4().simple().to_string()[..8]);
+    s.rows(
+        pg,
+        &format!(
+            "CREATE SCHEMA {schema};
+             CREATE TABLE {schema}.t (
+                id int GENERATED ALWAYS AS IDENTITY (START WITH 10 INCREMENT BY 5) PRIMARY KEY,
+                qty int DEFAULT 0,
+                total int GENERATED ALWAYS AS (qty * 2) STORED);"
+        ),
+    );
+    let mut d = s.load(pg, e, &schema, "t");
+    no_changes(&d);
+    assert_eq!(kind(&d, "id"), ValueKind::IdentityAlways);
+    let id = d
+        .column(column(&d, "id"))
+        .unwrap()
+        .identity
+        .clone()
+        .unwrap();
+    assert_eq!(
+        (id.seed.as_deref(), id.increment.as_deref()),
+        (Some("10"), Some("5"))
+    );
+    assert_eq!(kind(&d, "total"), ValueKind::Generated);
+    assert_eq!(expression(&d, "total"), "(qty * 2)");
+    assert_eq!(d.column(column(&d, "total")).unwrap().default, "");
+
+    // Switch the key to BY DEFAULT, make qty an identity, change the
+    // expression, and add a generated and an identity column.
+    let (idc, qty, total) = (column(&d, "id"), column(&d, "qty"), column(&d, "total"));
+    d.set_kind(idc, ValueKind::IdentityByDefault);
+    d.set_kind(qty, ValueKind::IdentityByDefault);
+    d.column_mut(total)
+        .unwrap()
+        .generated
+        .as_mut()
+        .unwrap()
+        .expression = "qty * 3".into();
+    let half = d.add_column();
+    d.column_mut(half).unwrap().name = "half".into();
+    d.column_mut(half).unwrap().data_type = "integer".into();
+    d.set_kind(half, ValueKind::Generated);
+    d.column_mut(half)
+        .unwrap()
+        .generated
+        .as_mut()
+        .unwrap()
+        .expression = "qty / 2".into();
+    let seq = d.add_column();
+    d.column_mut(seq).unwrap().name = "seq".into();
+    d.column_mut(seq).unwrap().data_type = "bigint".into();
+    d.set_kind(seq, ValueKind::IdentityAlways);
+    s.apply(pg, e, d.plan().unwrap());
+
+    let mut d = s.load(pg, e, &schema, "t");
+    no_changes(&d);
+    let kinds: Vec<ValueKind> = ["id", "qty", "total", "half", "seq"]
+        .iter()
+        .map(|n| kind(&d, n))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            ValueKind::IdentityByDefault,
+            ValueKind::IdentityByDefault,
+            ValueKind::Generated,
+            ValueKind::Generated,
+            ValueKind::IdentityAlways,
+        ]
+    );
+    assert_eq!(expression(&d, "total"), "(qty * 3)");
+    s.rows(pg, &format!("INSERT INTO {schema}.t DEFAULT VALUES"));
+    assert_eq!(
+        s.rows(pg, &format!("SELECT id, qty, total, half FROM {schema}.t")),
+        [["10", "1", "3", "0"]]
+    );
+
+    // Back to plain columns; generated values stay.
+    for n in ["id", "qty", "total"] {
+        let c = column(&d, n);
+        d.set_kind(c, ValueKind::Plain);
+    }
+    s.apply(pg, e, d.plan().unwrap());
+    let d = s.load(pg, e, &schema, "t");
+    no_changes(&d);
+    for n in ["id", "qty", "total"] {
+        assert_eq!(kind(&d, n), ValueKind::Plain, "{n}");
+    }
+    assert_eq!(
+        s.rows(pg, &format!("SELECT total FROM {schema}.t")),
+        [["3"]]
+    );
+    s.rows(pg, &format!("DROP SCHEMA {schema} CASCADE"));
+}
+
+/// SQL Server: identity, computed and rowversion columns load as such, keep
+/// working when the identity key is retyped, and are read-only in the grid.
+#[test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+fn mssql_identity_and_computed_columns() {
+    let s = svc();
+    let ms = ms_conn(&s);
+    let e = Engine::Mssql;
+    let schema = format!("it174_{}", &Uuid::new_v4().simple().to_string()[..8]);
+    s.rows(ms, &format!("CREATE SCHEMA {schema}"));
+    s.rows(
+        ms,
+        &format!(
+            "CREATE TABLE {schema}.t (
+                id int IDENTITY(10, 5) PRIMARY KEY, qty int DEFAULT 0,
+                total AS (qty * 2), p AS (qty + 1) PERSISTED, rv rowversion)"
+        ),
+    );
+    let mut d = s.load(ms, e, &schema, "t");
+    no_changes(&d);
+    assert_eq!(kind(&d, "id"), ValueKind::IdentityAlways);
+    assert_eq!(kind(&d, "total"), ValueKind::Generated);
+    assert_eq!(expression(&d, "total"), "([qty]*(2))");
+    let p = d
+        .column(column(&d, "p"))
+        .unwrap()
+        .generated
+        .clone()
+        .unwrap();
+    assert!(p.stored);
+    assert!(
+        d.kind_allowed(column(&d, "qty"), ValueKind::IdentityAlways)
+            .is_err()
+    );
+
+    // Retype the identity key (which SQL Server refuses while a persisted
+    // computed column exists, so drop that) and add a computed column.
+    d.remove_column(column(&d, "p"));
+    let id = column(&d, "id");
+    d.column_mut(id).unwrap().data_type = "bigint".into();
+    let half = d.add_column();
+    d.column_mut(half).unwrap().name = "half".into();
+    d.set_kind(half, ValueKind::Generated);
+    d.column_mut(half)
+        .unwrap()
+        .generated
+        .as_mut()
+        .unwrap()
+        .expression = "[qty] / 2".into();
+    s.apply(ms, e, d.plan().unwrap());
+    let d = s.load(ms, e, &schema, "t");
+    no_changes(&d);
+    assert_eq!(kind(&d, "id"), ValueKind::IdentityAlways);
+    assert_eq!(d.column(column(&d, "id")).unwrap().data_type, "bigint");
+    assert_eq!(kind(&d, "half"), ValueKind::Generated);
+
+    // The grid: columns the database fills are read-only.
+    let cols =
+        s.rt.block_on(s.client.columns(ms, Some(&schema), "t"))
+            .unwrap();
+    let locked: Vec<(&str, bool)> = cols
+        .iter()
+        .map(|c| (c.name.as_str(), locked_column(e, c).is_some()))
+        .collect();
+    assert_eq!(
+        locked,
+        [
+            ("id", true),
+            ("qty", false),
+            ("total", true),
+            ("rv", true),
+            ("half", true)
+        ]
+    );
+    s.rows(ms, &format!("DROP TABLE {schema}.t; DROP SCHEMA {schema};"));
+}
+
+/// SQLite: the rowid and generated columns load as such; changing a
+/// generated column rebuilds the table without copying into it.
+#[test]
+fn sqlite_identity_and_generated_columns() {
+    let s = svc();
+    let conn = s.connect(
+        ConnectionParams::Sqlite(SqliteParams {
+            path: s.dir.path().join("g.db").to_string_lossy().into(),
+            create: true,
+        }),
+        None,
+    );
+    let e = Engine::Sqlite;
+    s.rows(
+        conn,
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, qty INTEGER DEFAULT 0,
+            total INTEGER GENERATED ALWAYS AS (qty * 2) STORED, v TEXT AS (upper('x' || qty)))",
+    );
+    s.rows(conn, "INSERT INTO t (qty) VALUES (4)");
+    let mut d = s.load(conn, e, "main", "t");
+    no_changes(&d);
+    assert_eq!(d.table.columns.len(), 4, "generated columns are listed");
+    assert_eq!(kind(&d, "id"), ValueKind::IdentityByDefault);
+    assert_eq!(expression(&d, "total"), "qty * 2");
+    assert_eq!(expression(&d, "v"), "upper('x' || qty)");
+    assert!(
+        !d.column(column(&d, "v"))
+            .unwrap()
+            .generated
+            .as_ref()
+            .unwrap()
+            .stored
+    );
+
+    let total = column(&d, "total");
+    d.column_mut(total)
+        .unwrap()
+        .generated
+        .as_mut()
+        .unwrap()
+        .expression = "qty * 3".into();
+    let half = d.add_column();
+    d.column_mut(half).unwrap().name = "half".into();
+    d.set_kind(half, ValueKind::Generated);
+    d.column_mut(half)
+        .unwrap()
+        .generated
+        .as_mut()
+        .unwrap()
+        .expression = "qty / 2".into();
+    s.apply(conn, e, d.plan().unwrap());
+    let d = s.load(conn, e, "main", "t");
+    no_changes(&d);
+    assert_eq!(expression(&d, "total"), "qty * 3");
+    assert_eq!(kind(&d, "id"), ValueKind::IdentityByDefault);
+    assert_eq!(
+        s.rows(conn, "SELECT id, qty, total, v, half FROM t"),
+        [["1", "4", "12", "X4", "2"]]
+    );
 }
 
 /// A table whose column names the engine reserves, built and reloaded by the

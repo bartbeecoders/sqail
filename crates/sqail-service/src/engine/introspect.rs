@@ -4,8 +4,8 @@
 
 use serde_json::Value;
 use sqail_proto::{
-    ColumnInfo, Ddl, Engine, ForeignKeyInfo, IndexInfo, NamedItem, Param, RoutineInfo, RoutineKind,
-    TableGrant, TableInfo, TableKind, TablePrivileges,
+    ColumnInfo, Ddl, Engine, ForeignKeyInfo, GeneratedInfo, IdentityInfo, IndexInfo, NamedItem,
+    Param, RoutineInfo, RoutineKind, TableGrant, TableInfo, TableKind, TablePrivileges,
 };
 
 use super::{Conn, DbError, Result, fetch_rows};
@@ -187,6 +187,32 @@ macro_rules! ms_type {
     };
 }
 
+/// SQL Server: the identity and computed-column rows of column `c` (`idc`,
+/// `cc`) and its default constraint (`dc`).
+macro_rules! ms_column_joins {
+    () => {
+        "LEFT JOIN sys.identity_columns idc ON idc.object_id = c.object_id AND idc.column_id = c.column_id
+         LEFT JOIN sys.computed_columns cc ON cc.object_id = c.object_id AND cc.column_id = c.column_id
+         LEFT JOIN sys.default_constraints dc ON dc.object_id = c.default_object_id"
+    };
+}
+
+/// PostgreSQL: the sequence that column `a` of table `c` owns, as `s`
+/// (`seqoid`, `deptype` 'i' for identity or 'a' for serial, `seqstart`,
+/// `seqincrement`).
+macro_rules! pg_owned_sequence {
+    () => {
+        "LEFT JOIN LATERAL (
+             SELECT sc.oid AS seqoid, dep.deptype, sq.seqstart, sq.seqincrement
+             FROM pg_depend dep
+             JOIN pg_class sc ON sc.oid = dep.objid AND sc.relkind = 'S'
+             JOIN pg_sequence sq ON sq.seqrelid = sc.oid
+             WHERE dep.classid = 'pg_class'::regclass AND dep.refclassid = 'pg_class'::regclass
+               AND dep.refobjid = c.oid AND dep.refobjsubid = a.attnum AND dep.deptype IN ('a', 'i')
+             LIMIT 1) s ON true"
+    };
+}
+
 /// The schema an unqualified `table` resolves to on `conn`, the way the
 /// engine resolves it in a statement: PostgreSQL's search path, SQL Server's
 /// default schema then `dbo`, SQLite's `temp`, `main`, then attached
@@ -231,20 +257,28 @@ pub async fn columns(
     schema: Option<&str>,
     table: &str,
 ) -> Result<Vec<ColumnInfo>> {
+    // Columns 0-5 as in `ColumnInfo`; then the identity kind ('a' always,
+    // 'd' by default, '' none), seed and increment, and the generation kind
+    // ('s' stored, 'v' virtual, '' none) whose expression is column 4.
     let (sql, params) = match conn.engine() {
         Engine::Unknown => return Err(DbError::unknown_engine()),
         Engine::Postgres => (
-            "SELECT a.attname::text, a.attnum::int8, format_type(a.atttypid, a.atttypmod)::text,
+            concat!(
+                "SELECT a.attname::text, a.attnum::int8, format_type(a.atttypid, a.atttypmod)::text,
                     (NOT a.attnotnull)::bool, pg_get_expr(d.adbin, d.adrelid)::text,
-                    COALESCE(a.attnum = ANY(i.indkey), false)::bool
+                    COALESCE(a.attnum = ANY(i.indkey), false)::bool,
+                    a.attidentity::text, s.seqstart::text, s.seqincrement::text, a.attgenerated::text
              FROM pg_attribute a
              JOIN pg_class c ON c.oid = a.attrelid
              JOIN pg_namespace n ON n.oid = c.relnamespace
              LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
-             LEFT JOIN pg_index i ON i.indrelid = c.oid AND i.indisprimary
+             LEFT JOIN pg_index i ON i.indrelid = c.oid AND i.indisprimary ",
+                pg_owned_sequence!(),
+                "
              WHERE n.nspname = COALESCE($1, current_schema()) AND c.relname = $2
                AND a.attnum > 0 AND NOT a.attisdropped
-             ORDER BY a.attnum",
+             ORDER BY a.attnum"
+            ),
             vec![param(schema), param(Some(table))],
         ),
         Engine::Mssql => (
@@ -252,13 +286,17 @@ pub async fn columns(
                 "SELECT c.name, c.column_id, ",
                 ms_type!(),
                 ",
-                    c.is_nullable, dc.definition,
-                    CAST(CASE WHEN pk.column_id IS NULL THEN 0 ELSE 1 END AS bit)
+                    c.is_nullable, COALESCE(cc.definition, dc.definition),
+                    CAST(CASE WHEN pk.column_id IS NULL THEN 0 ELSE 1 END AS bit),
+                    IIF(c.is_identity = 1, 'a', ''),
+                    CAST(idc.seed_value AS nvarchar(40)), CAST(idc.increment_value AS nvarchar(40)),
+                    CASE WHEN cc.is_persisted = 1 THEN 's' WHEN c.is_computed = 1 THEN 'v' ELSE '' END
              FROM sys.columns c
              JOIN sys.objects o ON o.object_id = c.object_id
              JOIN sys.schemas s ON s.schema_id = o.schema_id
-             JOIN sys.types t ON t.user_type_id = c.user_type_id
-             LEFT JOIN sys.default_constraints dc ON dc.object_id = c.default_object_id
+             JOIN sys.types t ON t.user_type_id = c.user_type_id ",
+                ms_column_joins!(),
+                "
              LEFT JOIN (SELECT ic.object_id, ic.column_id FROM sys.indexes i
                         JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
                         WHERE i.is_primary_key = 1) pk
@@ -268,29 +306,169 @@ pub async fn columns(
             ),
             vec![param(schema), param(Some(table))],
         ),
-        Engine::Sqlite => {
-            sqlite_schema(conn, schema).await?;
-            (
-                "SELECT name, cid + 1, type, \"notnull\" = 0 AND pk = 0, dflt_value, pk > 0
-                 FROM pragma_table_info(?1, ?2) ORDER BY cid",
-                vec![param(Some(table)), param(Some(schema.unwrap_or("main")))],
-            )
-        }
+        Engine::Sqlite => return sqlite_columns(conn, schema, table).await,
     };
     Ok(rows(conn, sql, params)
         .await?
         .iter()
         .filter_map(|r| {
+            let expr = get_str(&r[4]);
+            let generated = match get_str(&r[9]).as_deref() {
+                Some(g @ ("s" | "v")) => Some(GeneratedInfo {
+                    expression: expr.clone().unwrap_or_default(),
+                    stored: g == "s",
+                }),
+                _ => None,
+            };
+            let identity = match get_str(&r[6]).as_deref() {
+                Some(k @ ("a" | "d")) => Some(IdentityInfo {
+                    always: k == "a",
+                    seed: get_str(&r[7]),
+                    increment: get_str(&r[8]),
+                }),
+                _ => None,
+            };
             Some(ColumnInfo {
                 name: get_str(&r[0])?,
                 ordinal: get_i64(&r[1]),
                 data_type: get_str(&r[2]).unwrap_or_default(),
                 nullable: get_bool(&r[3]),
-                default: get_str(&r[4]),
+                default: if generated.is_some() { None } else { expr },
                 primary_key: get_bool(&r[5]),
+                identity,
+                generated,
             })
         })
         .collect())
+}
+
+/// SQLite columns, generated ones included (`pragma_table_info` leaves
+/// them out). Their expressions are only in the `CREATE TABLE` text.
+async fn sqlite_columns(
+    conn: &mut dyn Conn,
+    schema: Option<&str>,
+    table: &str,
+) -> Result<Vec<ColumnInfo>> {
+    let db = sqlite_schema(conn, schema).await?;
+    let params = || vec![param(Some(table)), param(Some(&db.name))];
+    // A lone `INTEGER PRIMARY KEY` is the rowid, numbered by SQLite, unless
+    // the table is WITHOUT ROWID (its key then has an index of its own).
+    let raw = rows(
+        conn,
+        "SELECT name, cid + 1, type, \"notnull\" = 0 AND pk = 0, dflt_value, pk > 0, hidden,
+                pk = 1 AND upper(type) = 'INTEGER'
+                  AND (SELECT count(*) FROM pragma_table_info(?1, ?2) WHERE pk > 0) = 1
+                  AND NOT EXISTS (SELECT 1 FROM pragma_index_list(?1, ?2) WHERE origin = 'pk')
+         FROM pragma_table_xinfo(?1, ?2) WHERE hidden IN (0, 2, 3) ORDER BY cid",
+        params(),
+    )
+    .await?;
+    let create_sql = if raw.iter().any(|r| get_i64(&r[6]) != 0) {
+        let sql = format!(
+            "SELECT sql FROM {}.sqlite_schema WHERE type = 'table' AND name = ?1",
+            db.quoted
+        );
+        rows(conn, &sql, vec![param(Some(table))])
+            .await?
+            .first()
+            .and_then(|r| get_str(&r[0]))
+    } else {
+        None
+    };
+    Ok(raw
+        .iter()
+        .filter_map(|r| {
+            let name = get_str(&r[0])?;
+            let hidden = get_i64(&r[6]);
+            let generated = (hidden == 2 || hidden == 3).then(|| GeneratedInfo {
+                expression: create_sql
+                    .as_deref()
+                    .and_then(|s| sqlite_generated_expr(s, &name))
+                    .unwrap_or_default(),
+                stored: hidden == 3,
+            });
+            Some(ColumnInfo {
+                ordinal: get_i64(&r[1]),
+                data_type: get_str(&r[2]).unwrap_or_default(),
+                nullable: get_bool(&r[3]),
+                default: get_str(&r[4]),
+                primary_key: get_bool(&r[5]),
+                identity: get_bool(&r[7]).then(IdentityInfo::default),
+                generated,
+                name,
+            })
+        })
+        .collect())
+}
+
+/// The expression of generated column `column` in an SQLite `CREATE TABLE`
+/// statement: what is inside the parentheses after `AS` in its definition.
+fn sqlite_generated_expr(create: &str, column: &str) -> Option<String> {
+    let body = &create[create.find('(')? + 1..];
+    // Split the body into top-level definitions, minding quotes and nesting.
+    let mut defs = Vec::new();
+    let (mut depth, mut start, mut quote) = (0i32, 0, None::<char>);
+    for (i, ch) in body.char_indices() {
+        match (quote, ch) {
+            (Some(q), c) if c == q || (q == '[' && c == ']') => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"' | '`' | '[') => quote = Some(ch),
+            (None, '(') => depth += 1,
+            (None, ')') if depth == 0 => {
+                defs.push(&body[start..i]);
+                break;
+            }
+            (None, ')') => depth -= 1,
+            (None, ',') if depth == 0 => {
+                defs.push(&body[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    let def = defs.into_iter().map(str::trim).find(|d| {
+        let first = match d.chars().next() {
+            Some(q @ ('"' | '`' | '[')) => {
+                let close = if q == '[' { ']' } else { q };
+                d[1..]
+                    .find(close)
+                    .map(|end| d[1..1 + end].to_string())
+                    .unwrap_or_default()
+            }
+            _ => d
+                .split(|c: char| c.is_whitespace())
+                .next()
+                .unwrap_or_default()
+                .to_string(),
+        };
+        first.eq_ignore_ascii_case(column)
+    })?;
+    // `… [GENERATED ALWAYS] AS (expr) …`: the first `AS` followed by `(`.
+    let upper = def.to_ascii_uppercase();
+    let mut from = 0;
+    let open = loop {
+        let at = from + upper[from..].find("AS")?;
+        let before_ok = at == 0 || !upper.as_bytes()[at - 1].is_ascii_alphanumeric();
+        let rest = upper[at + 2..].trim_start();
+        if before_ok && rest.starts_with('(') {
+            break upper.len() - rest.len();
+        }
+        from = at + 2;
+    };
+    let mut depth = 0;
+    for (i, ch) in def[open..].char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(def[open + 1..open + i].trim().to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 // -------------------------------------------------------------- indexes --
@@ -780,7 +958,8 @@ const PG_DDL_TABLE: &str = "SELECT (quote_ident(n.nspname) || '.' || quote_ident
 /// the type's, identity START and INCREMENT, whether it is a serial (its
 /// default draws from a sequence the column owns), and the comment (as a
 /// literal).
-const PG_DDL_COLUMNS: &str = "SELECT quote_ident(a.attname)::text, format_type(a.atttypid, a.atttypmod)::text,
+const PG_DDL_COLUMNS: &str = concat!(
+    "SELECT quote_ident(a.attname)::text, format_type(a.atttypid, a.atttypmod)::text,
         a.attnotnull, pg_get_expr(d.adbin, d.adrelid)::text, a.attidentity::text, a.attgenerated::text,
         CASE WHEN a.attcollation <> 0 AND a.attcollation <> t.typcollation
              THEN quote_ident(cn.nspname) || '.' || quote_ident(co.collname) END::text,
@@ -794,17 +973,12 @@ const PG_DDL_COLUMNS: &str = "SELECT quote_ident(a.attname)::text, format_type(a
  JOIN pg_type t ON t.oid = a.atttypid
  LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
  LEFT JOIN pg_collation co ON co.oid = a.attcollation
- LEFT JOIN pg_namespace cn ON cn.oid = co.collnamespace
- LEFT JOIN LATERAL (
-     SELECT sc.oid AS seqoid, dep.deptype, sq.seqstart, sq.seqincrement
-     FROM pg_depend dep
-     JOIN pg_class sc ON sc.oid = dep.objid AND sc.relkind = 'S'
-     JOIN pg_sequence sq ON sq.seqrelid = sc.oid
-     WHERE dep.classid = 'pg_class'::regclass AND dep.refclassid = 'pg_class'::regclass
-       AND dep.refobjid = c.oid AND dep.refobjsubid = a.attnum AND dep.deptype IN ('a', 'i')
-     LIMIT 1) s ON true
+ LEFT JOIN pg_namespace cn ON cn.oid = co.collnamespace ",
+    pg_owned_sequence!(),
+    "
  WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped
- ORDER BY a.attnum";
+ ORDER BY a.attnum"
+);
 
 async fn pg_table_ddl(conn: &mut dyn Conn, schema: &str, table: &str) -> Result<String> {
     let params = || vec![param(Some(schema)), param(Some(table))];
@@ -959,10 +1133,9 @@ const MS_DDL_COLUMNS: &str = concat!(
  FROM sys.columns c
  JOIN sys.objects o ON o.object_id = c.object_id
  JOIN sys.schemas s ON s.schema_id = o.schema_id
- JOIN sys.types t ON t.user_type_id = c.user_type_id
- LEFT JOIN sys.identity_columns idc ON idc.object_id = c.object_id AND idc.column_id = c.column_id
- LEFT JOIN sys.computed_columns cc ON cc.object_id = c.object_id AND cc.column_id = c.column_id
- LEFT JOIN sys.default_constraints dc ON dc.object_id = c.default_object_id
+ JOIN sys.types t ON t.user_type_id = c.user_type_id ",
+    ms_column_joins!(),
+    "
  WHERE s.name = @P1 AND o.name = @P2
  ORDER BY c.column_id"
 );
@@ -1156,6 +1329,19 @@ async fn ms_table_ddl(conn: &mut dyn Conn, schema: &str, table: &str) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sqlite_generated_expressions() {
+        let sql = "CREATE TABLE t (id INTEGER PRIMARY KEY, \"has\" TEXT DEFAULT 'a,b',
+            total REAL GENERATED ALWAYS AS (price * (1 + tax)) STORED,
+            [Label x] TEXT AS (upper(\"has\")) VIRTUAL, alias AS (id), CHECK (id > 0))";
+        let e = |c: &str| sqlite_generated_expr(sql, c);
+        assert_eq!(e("total").as_deref(), Some("price * (1 + tax)"));
+        assert_eq!(e("Label x").as_deref(), Some("upper(\"has\")"));
+        assert_eq!(e("ALIAS").as_deref(), Some("id"));
+        assert_eq!(e("has"), None);
+        assert_eq!(e("missing"), None);
+    }
 
     #[test]
     fn identifier_quoting() {

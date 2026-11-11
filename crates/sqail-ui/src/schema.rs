@@ -839,6 +839,15 @@ fn table_node(
                             if !col.nullable {
                                 ty.push_str(" not null");
                             }
+                            if col.identity.is_some() {
+                                ty.push_str(if engine == sqail_client::proto::Engine::Sqlite {
+                                    " rowid"
+                                } else {
+                                    " identity"
+                                });
+                            } else if col.generated.is_some() {
+                                ty.push_str(" generated");
+                            }
                             ui.label(RichText::new(ty).weak().small());
                         });
                     }

@@ -144,6 +144,16 @@ api $URL/v1/connections/$ID/query -d '{"sql": "SELECT id, name FROM customers; U
 * Once the stream has started, the HTTP status is 200. Failures inside the
   script arrive as `error` events (`code`, `message` and `db_code`, which holds
   the SQLSTATE or SQL Server error number).
+* Connections: a 502 `connect_failed` names `host:port` and the cause
+  (refused, unknown host, timed out, no SSL on the server, the server's own
+  message). A connection that dies after it was opened is
+  `connection_lost` ("connection to the database was lost", with the
+  server's reason when it gave one). A pooled connection the server closed
+  while it was idle (restart, `pg_terminate_backend`, idle timeout) is
+  replaced before use, and a pooled query whose connection turns out dead
+  before anything was sent is retried once on a fresh one. A session's
+  connection is never replaced silently: the query fails with
+  `connection_lost` and the session is closed (open a new one).
 * Cells: `null`; bools and ints (i64) as JSON bool and number; floats as
   numbers (`"NaN"`, `"Infinity"` and `"-Infinity"` as strings; a 4-byte
   `real`/`float4` with its own shortest digits, `3.14`); bytes as lowercase

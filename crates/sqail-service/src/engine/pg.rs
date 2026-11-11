@@ -10,7 +10,7 @@
 //! use the extended protocol and binary decoding.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -30,6 +30,8 @@ use super::{
 
 pub struct PgDriver {
     config: tokio_postgres::Config,
+    /// `host:port`, for connect errors.
+    addr: String,
     tls: MakeRustlsConnect,
     read_only: bool,
 }
@@ -73,6 +75,7 @@ impl PgDriver {
         .map_err(DbError::Invalid)?;
         Ok(Self {
             config,
+            addr: format!("{}:{}", p.host, p.port),
             tls: MakeRustlsConnect::new((*tls).clone()),
             read_only,
         })
@@ -86,10 +89,13 @@ impl Driver for PgDriver {
             .config
             .connect(self.tls.clone())
             .await
-            .map_err(|e| DbError::Connect(pg_message(&e)))?;
+            .map_err(|e| DbError::Connect(connect_message(&e, &self.addr)))?;
 
-        // Drive the connection; forward NOTICE/WARNING messages to the conn.
+        // Drive the connection; forward NOTICE/WARNING messages to the conn,
+        // and keep why it ended (a server shutdown says so).
         let (notice_tx, notices) = mpsc::unbounded_channel();
+        let closed_reason = Arc::new(Mutex::new(None));
+        let reason = closed_reason.clone();
         tokio::spawn(async move {
             let mut messages = futures::stream::poll_fn(move |cx| connection.poll_message(cx));
             while let Some(msg) = messages.next().await {
@@ -100,6 +106,8 @@ impl Driver for PgDriver {
                     Ok(_) => {}
                     Err(e) => {
                         tracing::debug!(error = %e, "postgres connection closed");
+                        *reason.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some(closed_message(&e));
                         break;
                     }
                 }
@@ -119,6 +127,7 @@ impl Driver for PgDriver {
             }),
             client,
             notices,
+            closed_reason,
             read_only: self.read_only,
             type_names: None,
             missing_types: Vec::new(),
@@ -133,6 +142,8 @@ impl Driver for PgDriver {
 struct PgConn {
     client: Client,
     notices: mpsc::UnboundedReceiver<(String, String)>,
+    /// Why the connection ended, once it has.
+    closed_reason: Arc<Mutex<Option<String>>>,
     cancel: Arc<PgCancel>,
     read_only: bool,
     /// Names of the database's own types (enums, extension types such as
@@ -192,6 +203,14 @@ impl Cancel for PgCancel {
 }
 
 impl PgConn {
+    fn closed_reason(&self) -> String {
+        self.closed_reason
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .unwrap_or_else(|| CLOSED.into())
+    }
+
     /// Type names for result columns: before the first script, the
     /// database's own types; after a script that showed unknown OIDs, those.
     /// A failure (for example in an aborted transaction) only costs names.
@@ -449,6 +468,10 @@ impl Conn for PgConn {
         }
         let copy_out = copy == Some(pg_guard::CopyStdio::ToStdout);
         self.load_type_names().await;
+        if self.client.is_closed() {
+            // Nothing of the script has been sent.
+            return Err(DbError::Stale);
+        }
         let res = if req.params.is_empty() {
             // A single query stops at max_rows on the server; a script can
             // only skip converting the rows past it.
@@ -485,7 +508,10 @@ impl Conn for PgConn {
         }
         // Close a result interrupted by an error so clients see its rows.
         out.end().await?;
-        res
+        res.map_err(|e| match e {
+            DbError::Lost(m) if m == CLOSED => DbError::Lost(self.closed_reason()),
+            e => e,
+        })
     }
 
     fn canceller(&self) -> Canceller {
@@ -517,6 +543,10 @@ impl Conn for PgConn {
     async fn ping(&mut self) -> Result<()> {
         self.client.simple_query("").await.map_err(db_err)?;
         Ok(())
+    }
+
+    fn is_closed(&self) -> bool {
+        self.client.is_closed()
     }
 
     async fn server_version(&mut self) -> Result<String> {
@@ -786,11 +816,19 @@ fn db_err(e: tokio_postgres::Error) -> DbError {
 /// `db_err` for a statement that starts `offset` characters into the script.
 fn db_err_at(e: tokio_postgres::Error, offset: usize) -> DbError {
     match e.as_db_error() {
+        // FATAL ends the session: the server is shutting down, or killed
+        // this backend (pg_terminate_backend, idle_session_timeout).
+        Some(db)
+            if db.severity() == "FATAL"
+                || db.parsed_severity() == Some(tokio_postgres::error::Severity::Fatal) =>
+        {
+            DbError::Lost(pg_message_at(&e, offset))
+        }
         Some(db) => DbError::Database {
             code: Some(db.code().code().to_string()),
             message: pg_message_at(&e, offset),
         },
-        None if e.is_closed() => DbError::Connect("connection closed".into()),
+        None if e.is_closed() => DbError::Lost(CLOSED.into()),
         None => DbError::Database {
             code: None,
             message: e.to_string(),
@@ -812,6 +850,50 @@ fn rolled_back_together(e: DbError) -> DbError {
         },
         other => other,
     }
+}
+
+const CLOSED: &str = "the server closed the connection";
+
+/// Why a connection ended: the server's message (`FATAL: terminating
+/// connection due to administrator command`) or the I/O error.
+fn closed_message(e: &tokio_postgres::Error) -> String {
+    if e.as_db_error().is_some() {
+        return pg_message(e);
+    }
+    with_causes(e)
+}
+
+/// `e` followed by its chain of causes: tokio-postgres' own message is only
+/// the kind of failure ("error connecting to server").
+fn with_causes(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut msg = e.to_string();
+    let mut cause = e.source();
+    while let Some(c) = cause {
+        let text = c.to_string();
+        if !msg.ends_with(&text) {
+            msg.push_str(": ");
+            msg.push_str(&text);
+        }
+        cause = c.source();
+    }
+    msg
+}
+
+/// A connect error with where it went and the underlying cause: refused,
+/// unknown host, timed out, no TLS on the server, a certificate problem;
+/// or the server's own message (authentication, unknown database).
+fn connect_message(e: &tokio_postgres::Error, addr: &str) -> String {
+    if e.as_db_error().is_some() {
+        return format!("{addr}: {}", pg_message(e));
+    }
+    let mut msg = format!("{addr}: {}", with_causes(e));
+    if msg.contains("server does not support TLS") {
+        msg.push_str(
+            " (the server does not accept SSL connections: set the SSL mode to \
+             'prefer' or 'disable', or enable SSL on the server)",
+        );
+    }
+    msg
 }
 
 fn pg_message(e: &tokio_postgres::Error) -> String {

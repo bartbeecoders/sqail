@@ -194,6 +194,14 @@ pub enum DbError {
     },
     #[error("cannot connect: {0}")]
     Connect(String),
+    /// An established connection died (server restart, idle kill, ...).
+    #[error("connection to the database was lost: {0}")]
+    Lost(String),
+    /// The connection turned out to be dead before the query was sent to
+    /// the server, so nothing ran: a pooled query is retried once on a
+    /// fresh connection.
+    #[error("connection to the database was lost before the query was sent; nothing was run")]
+    Stale,
     #[error("query cancelled")]
     Cancelled,
     #[error("query timed out")]
@@ -222,6 +230,7 @@ impl DbError {
         match self {
             DbError::Database { .. } => "db_error",
             DbError::Connect(_) => "connect_failed",
+            DbError::Lost(_) | DbError::Stale => "connection_lost",
             DbError::Cancelled => "cancelled",
             DbError::Timeout => "timeout",
             DbError::ClientGone => "client_gone",
@@ -230,6 +239,14 @@ impl DbError {
             DbError::Internal(_) => "internal",
             DbError::Reported => "db_error",
         }
+    }
+
+    /// Whether the connection is unusable after this error.
+    pub fn is_connection_gone(&self) -> bool {
+        matches!(
+            self,
+            DbError::Connect(_) | DbError::Lost(_) | DbError::Stale
+        )
     }
 
     pub fn to_event(&self) -> QueryEvent {
@@ -490,6 +507,11 @@ pub trait Conn: Send {
     async fn in_transaction(&mut self) -> Result<bool>;
     /// Cheap round trip to check the connection is still usable.
     async fn ping(&mut self) -> Result<()>;
+    /// Whether the driver already knows the connection is dead (the server
+    /// closed it), without a round trip.
+    fn is_closed(&self) -> bool {
+        false
+    }
     /// Human-readable server version.
     async fn server_version(&mut self) -> Result<String>;
     /// Undo session state that user SQL may have changed (settings, role,
@@ -613,6 +635,9 @@ pub struct Pool {
 
 /// Idle connections older than this are pinged before reuse.
 const REVALIDATE_AFTER: Duration = Duration::from_secs(30);
+/// How long that ping may take (a connection a firewall dropped silently
+/// would otherwise hang until TCP gives up).
+const PING_TIMEOUT: Duration = Duration::from_secs(5);
 /// Idle connections older than this are closed.
 const MAX_IDLE: Duration = Duration::from_secs(300);
 
@@ -644,10 +669,17 @@ impl Pool {
                 break;
             };
             let age = since.elapsed();
-            if age > MAX_IDLE {
+            // Closed by the server meanwhile (restart, pg_terminate_backend,
+            // idle timeout): replace it rather than fail the next query.
+            if age > MAX_IDLE || conn.is_closed() {
                 continue;
             }
-            if age > REVALIDATE_AFTER && conn.ping().await.is_err() {
+            if age > REVALIDATE_AFTER
+                && !matches!(
+                    tokio::time::timeout(PING_TIMEOUT, conn.ping()).await,
+                    Ok(Ok(()))
+                )
+            {
                 continue;
             }
             return Ok(Pooled::new(conn, self.clone(), permit));
@@ -697,6 +729,14 @@ impl Pooled {
         self.conn
             .as_deref_mut()
             .expect("conn present until released")
+    }
+
+    /// Replace the connection with a fresh one, keeping the pool slot: for
+    /// a connection found dead before anything was sent on it.
+    pub async fn reconnect(&mut self) -> Result<()> {
+        self.conn = Some(self.pool.driver.connect().await?);
+        self.used = false;
+        Ok(())
     }
 
     /// Return the connection as it is. Only for connections that ran nothing
@@ -764,6 +804,8 @@ mod tests {
         resets: AtomicUsize,
         cancels: AtomicUsize,
         closed: AtomicUsize,
+        /// What `is_closed` says (the server closed the connections).
+        dead: std::sync::atomic::AtomicBool,
     }
 
     struct FakeDriver {
@@ -805,6 +847,9 @@ mod tests {
         }
         async fn ping(&mut self) -> Result<()> {
             Ok(())
+        }
+        fn is_closed(&self) -> bool {
+            self.counts.dead.load(Ordering::SeqCst)
         }
         async fn server_version(&mut self) -> Result<String> {
             Ok("fake".into())
@@ -880,6 +925,39 @@ mod tests {
         assert_eq!(idle(&p), 0);
         assert_eq!(n(&counts.connects), 2);
         assert_eq!(n(&counts.closed), 2);
+    }
+
+    /// A pooled connection the server closed while it was idle is replaced
+    /// instead of failing the next query.
+    #[tokio::test]
+    async fn connections_closed_while_idle_are_replaced() {
+        let (p, counts) = pool(true);
+        let mut c = p.get().await.unwrap();
+        c.conn();
+        c.release();
+        counts.dead.store(true, Ordering::SeqCst);
+        let mut c = p.get().await.unwrap();
+        assert_eq!(n(&counts.connects), 2);
+        assert_eq!(n(&counts.closed), 1);
+        counts.dead.store(false, Ordering::SeqCst);
+        // And a checked-out connection found dead is swapped in place.
+        c.conn();
+        c.reconnect().await.unwrap();
+        assert_eq!(n(&counts.connects), 3);
+        assert_eq!(n(&counts.closed), 2);
+        c.release();
+        assert_eq!(idle(&p), 1);
+    }
+
+    #[test]
+    fn lost_connections_say_so() {
+        assert_eq!(DbError::Stale.code(), "connection_lost");
+        assert!(
+            DbError::Lost("x".into())
+                .to_string()
+                .starts_with("connection to the database was lost")
+        );
+        assert!(DbError::Stale.is_connection_gone() && !DbError::Timeout.is_connection_gone());
     }
 
     #[tokio::test]

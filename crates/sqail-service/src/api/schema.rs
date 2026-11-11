@@ -5,7 +5,7 @@ use axum::extract::{Path, Query, State};
 use serde::Deserialize;
 use sqail_proto::{
     CheckInfo, ColumnInfo, Ddl, ForeignKeyInfo, IndexInfo, NamedItem, ReferencingKey, RoutineInfo,
-    TableInfo, TablePrivileges,
+    TableDetails, TableInfo, TablePrivileges,
 };
 use utoipa::IntoParams;
 use uuid::Uuid;
@@ -190,6 +190,20 @@ pub async fn referencing_keys(
 ) -> ApiResult<Json<Vec<ReferencingKey>>> {
     catalog!(s, p, id, |c| {
         introspect::referencing_keys(c, q.schema.as_deref(), &q.name)
+    })
+}
+
+/// Facts about a table beyond its columns, keys and grants (its comment).
+#[utoipa::path(get, path = "/v1/connections/{id}/schema/table-details", tag = "schema",
+    params(("id" = Uuid, Path), ObjectRef), responses((status = 200, body = TableDetails)))]
+pub async fn table_details(
+    State(s): State<AppState>,
+    p: Principal,
+    Path(id): Path<Uuid>,
+    Query(q): Query<ObjectRef>,
+) -> ApiResult<Json<TableDetails>> {
+    catalog!(s, p, id, |c| {
+        introspect::table_details(c, q.schema.as_deref(), &q.name)
     })
 }
 

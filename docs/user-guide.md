@@ -395,7 +395,8 @@ be open at once. Pages:
 
 * **Columns:** name, type (type it, or pick a common one from ⏷), whether it
   allows NULL, and the default as an SQL expression (`0`, `'none'`,
-  `now()`). The menu in front of the default makes a column an *identity*
+  `now()`), and (PostgreSQL, SQL Server) a comment. The menu in front of
+  the default makes a column an *identity*
   (numbered by the database: `BY DEFAULT` or `ALWAYS` on PostgreSQL,
   `IDENTITY` on SQL Server) or *generated* (computed from an expression;
   *Stored*, on SQL Server *Persisted*, keeps the values on disk). An
@@ -415,12 +416,28 @@ be open at once. Pages:
   to the index but can't be edited here.
 * **Primary key:** the key columns in order and, on PostgreSQL and SQL
   Server, the constraint name. Key columns are always NOT NULL.
+* **Foreign keys:** name, the key columns in order (click the list to
+  change them), the referenced table (`table` in the same schema, or
+  `schema.table`) and its columns (comma-separated), and what happens *On
+  delete* and *On update* (no action, restrict, cascade, set null, set
+  default). Add, change, rename and drop them; a changed key is dropped and
+  added again, a renamed one is renamed. Options it was declared with
+  (`MATCH FULL`, `DEFERRABLE`, `NOT FOR REPLICATION`) are shown and kept.
+  SQLite keeps no names for foreign keys, and changing one rebuilds the
+  table.
+* **Checks:** `CHECK` constraints, by name and condition (`qty > 0`). A
+  changed condition drops and adds the constraint again, so existing rows
+  must satisfy it.
 * **Security:** who holds which privilege on the table (`SELECT`, `INSERT`,
   `UPDATE`, `DELETE`, …). Tick and untick to grant and revoke; *+ Add
   grantee* adds a role or user (⏷ lists the ones the database has). Not
   available for SQLite, which has no permissions.
 * **SQL:** the statements your edits add up to; *Open in editor* copies them
   to a new tab.
+
+Next to the table name is the table's comment. Comments are written with
+`COMMENT ON` on PostgreSQL and as the `MS_Description` extended property on
+SQL Server (what SSMS shows as *Description*); SQLite has none.
 
 **Apply…** shows the statements again and runs them in one transaction: if
 one fails, nothing changes and the error is shown. Afterwards the designer
@@ -437,7 +454,8 @@ Good to know:
   `NONCLUSTERED` are kept (the Indexes page shows them); a PostgreSQL index
   method other than B-tree is not.
 * Dropping a column takes it out of the indexes that include it (they are
-  re-created without it); an index whose filter uses the column is dropped.
+  re-created without it); an index whose filter uses the column is dropped,
+  and so are the foreign keys and `CHECK` constraints that use it.
 * SQL Server: changing a column's type or NULL-ness re-creates the indexes
   that use it (as a key, included or in the filter) and the key on it, and a
   default is dropped and re-added by its generated name. `CHECK`
@@ -456,8 +474,6 @@ Good to know:
 * Columns a generated or computed column uses can't be dropped or change
   type while it exists (nor be renamed, on SQL Server); the designer says
   which column is in the way. Dropping both together works.
-* SQL Server and SQLite: a column a `CHECK` constraint uses can't be
-  dropped until the constraint is.
 * SQLite can change only a few things in place (renames, adding and dropping
   columns, indexes). Anything else (a type, NULL-ness, a default, the
   primary key) rebuilds the table: the rows are copied into a new table

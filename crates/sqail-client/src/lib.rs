@@ -542,6 +542,22 @@ impl Client {
         .await
     }
 
+    /// A table's comment. A service older than this call answers 404.
+    pub async fn table_details(
+        &self,
+        id: Uuid,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<TableDetails> {
+        self.get(&Self::schema_path(
+            id,
+            "schema/table-details",
+            schema,
+            Some(table),
+        ))
+        .await
+    }
+
     /// A table's CHECK constraints. A service older than this call
     /// answers 404.
     pub async fn checks(

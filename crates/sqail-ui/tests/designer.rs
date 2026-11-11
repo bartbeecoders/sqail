@@ -900,6 +900,148 @@ fn mssql_designer_handles_dependents() {
     );
 }
 
+/// Foreign keys, CHECK constraints and comments made, changed, renamed and
+/// dropped by the designer on a server, compared through the catalog.
+fn keys_checks_comments(s: &Svc, conn: Uuid, engine: Engine, schema: &str) {
+    use sqail_client::proto::ReferentialAction;
+    let int = if engine == Engine::Postgres {
+        "integer"
+    } else {
+        "int"
+    };
+    let q = |n: &str| sqail_ui::sql::qualified_name(engine, Some(schema), n);
+    s.rows(
+        conn,
+        &format!("CREATE TABLE {} (id {int} PRIMARY KEY)", q("kc_owner")),
+    );
+
+    // A new table with a check, a key to the owner, and comments.
+    let mut d = Design::new_table(engine, Some(schema));
+    d.table.name = "kc_item".into();
+    d.table.comment = "Items".into();
+    let id = d.table.columns[0].id;
+    d.column_mut(id).unwrap().data_type = int.into();
+    d.column_mut(id).unwrap().comment = "the key".into();
+    let owner = d.add_column();
+    d.column_mut(owner).unwrap().name = "owner".into();
+    d.column_mut(owner).unwrap().data_type = int.into();
+    let qty = d.add_column();
+    d.column_mut(qty).unwrap().name = "qty".into();
+    d.column_mut(qty).unwrap().data_type = int.into();
+    let ck = d.add_check();
+    d.check_mut(ck).unwrap().name = "ck_qty".into();
+    d.check_mut(ck).unwrap().expression = "qty > 0".into();
+    let fk = d.add_foreign_key();
+    let f = d.foreign_key_mut(fk).unwrap();
+    f.name = "fk_owner".into();
+    f.columns = vec![owner];
+    f.ref_table = "kc_owner".into();
+    f.ref_columns = vec!["id".into()];
+    f.on_delete = ReferentialAction::Cascade;
+    s.apply(conn, engine, d.plan().unwrap());
+
+    let mut d = s.load(conn, engine, schema, "kc_item");
+    no_changes(&d);
+    assert_eq!(d.table.comment, "Items");
+    assert_eq!(d.column(column(&d, "id")).unwrap().comment, "the key");
+    assert_eq!(d.table.checks.len(), 1);
+    assert_eq!(d.table.checks[0].name, "ck_qty");
+    let f = &d.table.foreign_keys[0];
+    assert_eq!(
+        (f.name.as_str(), f.ref_table.as_str(), f.on_delete),
+        ("fk_owner", "kc_owner", ReferentialAction::Cascade)
+    );
+
+    // Rename the key and the check, change the check, add a second key
+    // (self-reference), change and drop comments.
+    let fk = d.table.foreign_keys[0].id;
+    d.foreign_key_mut(fk).unwrap().name = "fk_item_owner".into();
+    d.foreign_key_mut(fk).unwrap().on_update = ReferentialAction::NoAction;
+    let ck = d.table.checks[0].id;
+    d.check_mut(ck).unwrap().name = "ck_item_qty".into();
+    let ck2 = d.add_check();
+    d.check_mut(ck2).unwrap().expression = "owner <> qty".into();
+    let parent = d.add_column();
+    d.column_mut(parent).unwrap().name = "parent".into();
+    d.column_mut(parent).unwrap().data_type = int.into();
+    let fk2 = d.add_foreign_key();
+    let f = d.foreign_key_mut(fk2).unwrap();
+    f.columns = vec![parent];
+    f.ref_table = "kc_item".into();
+    f.ref_columns = vec!["id".into()];
+    f.on_delete = ReferentialAction::NoAction;
+    d.table.comment = "All items".into();
+    let id = column(&d, "id");
+    d.column_mut(id).unwrap().comment.clear();
+    s.apply(conn, engine, d.plan().unwrap());
+
+    let mut d = s.load(conn, engine, schema, "kc_item");
+    no_changes(&d);
+    assert_eq!(d.table.comment, "All items");
+    assert_eq!(d.column(column(&d, "id")).unwrap().comment, "");
+    let mut names: Vec<&str> = d
+        .table
+        .foreign_keys
+        .iter()
+        .map(|f| f.name.as_str())
+        .chain(d.table.checks.iter().map(|c| c.name.as_str()))
+        .collect();
+    names.sort();
+    assert_eq!(names.len(), 4, "{names:?}");
+    assert!(names.contains(&"fk_item_owner") && names.contains(&"ck_item_qty"));
+
+    // Change the first key's action, drop the column under the second key
+    // (its key goes with it), drop the second check, and the comment.
+    let fk = d
+        .table
+        .foreign_keys
+        .iter()
+        .find(|f| f.name == "fk_item_owner")
+        .unwrap()
+        .id;
+    d.foreign_key_mut(fk).unwrap().on_delete = ReferentialAction::SetNull;
+    d.remove_column(column(&d, "parent"));
+    let other = d
+        .table
+        .checks
+        .iter()
+        .find(|c| c.name != "ck_item_qty")
+        .unwrap()
+        .id;
+    d.remove_check(other);
+    d.table.comment.clear();
+    s.apply(conn, engine, d.plan().unwrap());
+    let d = s.load(conn, engine, schema, "kc_item");
+    no_changes(&d);
+    assert_eq!(d.table.foreign_keys.len(), 1);
+    assert_eq!(
+        d.table.foreign_keys[0].on_delete,
+        ReferentialAction::SetNull
+    );
+    assert_eq!(d.table.checks.len(), 1);
+    assert_eq!(d.table.comment, "");
+    s.rows(
+        conn,
+        &format!("DROP TABLE {}; DROP TABLE {}", q("kc_item"), q("kc_owner")),
+    );
+}
+
+#[test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+fn keys_checks_and_comments_on_postgres_and_mssql() {
+    let s = svc();
+    let pg = pg_conn(&s);
+    let schema = format!("it175_{}", &Uuid::new_v4().simple().to_string()[..8]);
+    s.rows(pg, &format!("CREATE SCHEMA {schema}"));
+    keys_checks_comments(&s, pg, Engine::Postgres, &schema);
+    s.rows(pg, &format!("DROP SCHEMA {schema} CASCADE"));
+
+    let ms = ms_conn(&s);
+    s.rows(ms, &format!("CREATE SCHEMA {schema}"));
+    keys_checks_comments(&s, ms, Engine::Mssql, &schema);
+    s.rows(ms, &format!("DROP SCHEMA {schema}"));
+}
+
 /// SQLite: a rebuild keeps CHECK constraints and foreign-key actions.
 #[test]
 fn sqlite_rebuild_keeps_checks_and_key_actions() {
@@ -944,8 +1086,8 @@ fn sqlite_rebuild_keeps_checks_and_key_actions() {
         ]
     );
     assert_eq!(
-        d.foreign_keys[0].on_delete,
-        Some(sqail_client::proto::ReferentialAction::Cascade)
+        d.table.foreign_keys[0].on_delete,
+        sqail_client::proto::ReferentialAction::Cascade
     );
 
     // The owner knows who references it, and its key column can't go.

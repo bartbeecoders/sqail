@@ -757,6 +757,19 @@ pub struct ColumnInfo {
     /// services older than this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generated: Option<GeneratedInfo>,
+    /// PostgreSQL `COMMENT ON COLUMN`, SQL Server `MS_Description`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
+/// Facts about one table beyond its columns, keys and grants.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct TableDetails {
+    /// PostgreSQL `COMMENT ON TABLE`, SQL Server `MS_Description`; SQLite
+    /// has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

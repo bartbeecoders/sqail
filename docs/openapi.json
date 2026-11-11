@@ -397,6 +397,13 @@
       },
       "ColumnInfo": {
         "properties": {
+          "comment": {
+            "description": "PostgreSQL `COMMENT ON COLUMN`, SQL Server `MS_Description`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "data_type": {
             "type": "string"
           },
@@ -1910,6 +1917,19 @@
         ],
         "type": "object"
       },
+      "TableDetails": {
+        "description": "Facts about one table beyond its columns, keys and grants.",
+        "properties": {
+          "comment": {
+            "description": "PostgreSQL `COMMENT ON TABLE`, SQL Server `MS_Description`; SQLite\nhas none.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "TableGrant": {
         "description": "One privilege on a table held by a role or user.",
         "properties": {
@@ -3258,6 +3278,58 @@
             }
           }
         },
+        "tags": [
+          "schema"
+        ]
+      }
+    },
+    "/v1/connections/{id}/schema/table-details": {
+      "get": {
+        "operationId": "table_details",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Defaults to the connection's current schema.",
+            "in": "query",
+            "name": "schema",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Table, view or routine name.",
+            "in": "query",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TableDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Facts about a table beyond its columns, keys and grants (its comment).",
         "tags": [
           "schema"
         ]

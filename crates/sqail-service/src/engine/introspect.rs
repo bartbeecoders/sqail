@@ -5,8 +5,8 @@
 use serde_json::Value;
 use sqail_proto::{
     CheckInfo, ColumnInfo, Ddl, Engine, ForeignKeyInfo, GeneratedInfo, IdentityInfo, IndexInfo,
-    NamedItem, Param, ReferencingKey, ReferentialAction, RoutineInfo, RoutineKind, TableGrant,
-    TableInfo, TableKind, TablePrivileges,
+    NamedItem, Param, ReferencingKey, ReferentialAction, RoutineInfo, RoutineKind, TableDetails,
+    TableGrant, TableInfo, TableKind, TablePrivileges,
 };
 
 use super::{Conn, DbError, Result, fetch_rows};
@@ -270,8 +270,9 @@ pub async fn columns(
     table: &str,
 ) -> Result<Vec<ColumnInfo>> {
     // Columns 0-5 as in `ColumnInfo`; then the identity kind ('a' always,
-    // 'd' by default, '' none), seed and increment, and the generation kind
-    // ('s' stored, 'v' virtual, '' none) whose expression is column 4.
+    // 'd' by default, '' none), seed and increment, the generation kind
+    // ('s' stored, 'v' virtual, '' none) whose expression is column 4, and
+    // the comment.
     let (sql, params) = match conn.engine() {
         Engine::Unknown => return Err(DbError::unknown_engine()),
         Engine::Postgres => (
@@ -279,7 +280,8 @@ pub async fn columns(
                 "SELECT a.attname::text, a.attnum::int8, format_type(a.atttypid, a.atttypmod)::text,
                     (NOT a.attnotnull)::bool, pg_get_expr(d.adbin, d.adrelid)::text,
                     COALESCE(a.attnum = ANY(i.indkey), false)::bool,
-                    a.attidentity::text, s.seqstart::text, s.seqincrement::text, a.attgenerated::text
+                    a.attidentity::text, s.seqstart::text, s.seqincrement::text, a.attgenerated::text,
+                    col_description(c.oid, a.attnum)::text
              FROM pg_attribute a
              JOIN pg_class c ON c.oid = a.attrelid
              JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -302,13 +304,16 @@ pub async fn columns(
                     CAST(CASE WHEN pk.column_id IS NULL THEN 0 ELSE 1 END AS bit),
                     IIF(c.is_identity = 1, 'a', ''),
                     CAST(idc.seed_value AS nvarchar(40)), CAST(idc.increment_value AS nvarchar(40)),
-                    CASE WHEN cc.is_persisted = 1 THEN 's' WHEN c.is_computed = 1 THEN 'v' ELSE '' END
+                    CASE WHEN cc.is_persisted = 1 THEN 's' WHEN c.is_computed = 1 THEN 'v' ELSE '' END,
+                    CAST(ep.value AS nvarchar(max))
              FROM sys.columns c
              JOIN sys.objects o ON o.object_id = c.object_id
              JOIN sys.schemas s ON s.schema_id = o.schema_id
              JOIN sys.types t ON t.user_type_id = c.user_type_id ",
                 ms_column_joins!(),
                 "
+             LEFT JOIN sys.extended_properties ep ON ep.class = 1 AND ep.major_id = c.object_id
+                    AND ep.minor_id = c.column_id AND ep.name = 'MS_Description'
              LEFT JOIN (SELECT ic.object_id, ic.column_id FROM sys.indexes i
                         JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
                         WHERE i.is_primary_key = 1) pk
@@ -349,6 +354,7 @@ pub async fn columns(
                 primary_key: get_bool(&r[5]),
                 identity,
                 generated,
+                comment: get_str(&r[10]),
             })
         })
         .collect())
@@ -408,6 +414,7 @@ async fn sqlite_columns(
                 identity: get_bool(&r[7]).then(IdentityInfo::default),
                 generated,
                 name,
+                comment: None,
             })
         })
         .collect())
@@ -860,6 +867,41 @@ pub async fn referencing_keys(
             })
         })
         .collect())
+}
+
+// ---------------------------------------------------------- table details --
+
+pub async fn table_details(
+    conn: &mut dyn Conn,
+    schema: Option<&str>,
+    table: &str,
+) -> Result<TableDetails> {
+    let not_found = || DbError::Invalid(format!("table '{table}' not found"));
+    let sql = match conn.engine() {
+        Engine::Unknown => return Err(DbError::unknown_engine()),
+        Engine::Sqlite => {
+            sqlite_schema(conn, schema).await?;
+            return Ok(TableDetails { comment: None });
+        }
+        Engine::Postgres => {
+            "SELECT obj_description(c.oid, 'pg_class')::text
+             FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = COALESCE($1, current_schema()) AND c.relname = $2"
+        }
+        Engine::Mssql => {
+            "SELECT CAST(ep.value AS nvarchar(max))
+             FROM sys.objects o
+             JOIN sys.schemas s ON s.schema_id = o.schema_id
+             LEFT JOIN sys.extended_properties ep ON ep.class = 1 AND ep.major_id = o.object_id
+                    AND ep.minor_id = 0 AND ep.name = 'MS_Description'
+             WHERE s.name = COALESCE(@P1, SCHEMA_NAME()) AND o.name = @P2"
+        }
+    };
+    let rows = rows(conn, sql, vec![param(schema), param(Some(table))]).await?;
+    let row = rows.first().ok_or_else(not_found)?;
+    Ok(TableDetails {
+        comment: get_str(&row[0]),
+    })
 }
 
 // --------------------------------------------------------------- checks --

@@ -234,9 +234,11 @@ already failed (or a SQL Server one that can no longer commit) gets 400.
 
 All schema routes are `GET`s under `/v1/connections/{id}/schema/`:
 `databases`, `schemas`, `tables?schema=`, `routines?schema=`, and
-`columns`, `indexes`, `foreign-keys`, `referencing-keys`, `checks` and
-`privileges`, each with `?schema=&name=` for a table (`schema` defaults to
-the connection's current schema). `referencing-keys` lists the foreign keys,
+`columns`, `indexes`, `foreign-keys`, `referencing-keys`, `checks`,
+`table-details` and `privileges`, each with `?schema=&name=` for a table
+(`schema` defaults to the connection's current schema). `table-details`
+has the table's `comment`; a column's comment is in its optional
+`comment`. `referencing-keys` lists the foreign keys,
 in any table, that reference the table, each with the table that holds it.
 A foreign key's optional `on_delete` / `on_update` (`no_action`,
 `restrict`, `cascade`, `set_null`, `set_default`) and `options` (`MATCH

@@ -71,10 +71,16 @@ pub fn source_table(sql: &str, engine: Engine) -> Option<Source> {
     let from = toks
         .iter()
         .position(|t| t.kind == Kind::Word && sql[t.range.clone()].eq_ignore_ascii_case("FROM"))?;
+    // PostgreSQL folds unquoted names to lower case: `FROM Customers` reads
+    // `customers`. Quoted names keep their case.
     let name = |i: usize| {
-        toks.get(i)
-            .filter(|t| matches!(t.kind, Kind::Word | Kind::QuotedIdent))
-            .map(|t| unquote(&sql[t.range.clone()]))
+        toks.get(i).and_then(|t| match t.kind {
+            Kind::Word if engine == Engine::Postgres => {
+                Some(sql[t.range.clone()].to_ascii_lowercase())
+            }
+            Kind::Word | Kind::QuotedIdent => Some(unquote(&sql[t.range.clone()])),
+            _ => None,
+        })
     };
     let first = name(from + 1)?;
     let dot = toks
@@ -338,6 +344,10 @@ pub struct EditState {
     pub editing: Option<(usize, usize, String)>,
     /// Give the inline editor keyboard focus on its next frame.
     pub focus_editor: bool,
+    /// The text in the inline editor was changed. An editor left unchanged
+    /// records nothing, so opening a NULL cell (shown empty) and clicking
+    /// away doesn't turn it into `''`.
+    pub edit_dirty: bool,
 }
 
 impl EditState {
@@ -403,6 +413,7 @@ impl EditState {
             inserted: Vec::new(),
             editing: None,
             focus_editor: false,
+            edit_dirty: false,
         })
     }
 
@@ -723,6 +734,21 @@ mod tests {
         assert_eq!(
             src("select id, name from \"People\" p limit 5"),
             Some((None, "People".into()))
+        );
+        // Unquoted names fold to lower case on PostgreSQL (#164); quoted
+        // ones keep their case.
+        assert_eq!(
+            src("SELECT * FROM Sales.Customers"),
+            Some((Some("sales".into()), "customers".into()))
+        );
+        assert_eq!(
+            src("SELECT * FROM \"Sales\".Customers"),
+            Some((Some("Sales".into()), "customers".into()))
+        );
+        assert_eq!(
+            source_table("SELECT * FROM Customers", Engine::Mssql).map(|s| s.table),
+            Some("Customers".into()),
+            "SQL Server keeps the case"
         );
         assert_eq!(src("SELECT * FROM a JOIN b ON a.id = b.id"), None);
         assert_eq!(src("SELECT * FROM a, b"), None);

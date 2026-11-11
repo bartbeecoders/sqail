@@ -390,6 +390,38 @@ fn edits_apply_on_postgres_and_mssql() {
     s.run(ms, &format!("DROP TABLE sales.{t}; SELECT 1"));
 }
 
+/// PostgreSQL folds unquoted names: `FROM Sales.It_Edit_X` is the table
+/// `sales.it_edit_x`, so editing it finds the table and the DML hits it (#164).
+#[test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+fn postgres_unquoted_mixed_case_table_is_editable() {
+    let s = svc();
+    let t = format!("it_edit_case_{}", &Uuid::new_v4().simple().to_string()[..8]);
+    let pg = postgres(&s);
+    s.run(
+        pg,
+        &format!(
+            "CREATE TABLE sales.{t} (id int PRIMARY KEY, name text);
+             INSERT INTO sales.{t} VALUES (1, 'a'); SELECT 1"
+        ),
+    );
+    let session = s.session(pg);
+    let select = format!("SELECT * FROM Sales.{}", t.to_ascii_uppercase());
+    let (run, mut e) = s.edit(session, Engine::Postgres, &select);
+    assert_eq!(e.table, t);
+    e.set(0, 1, Some("upper".into()), &run.results[0]);
+    s.apply(session, Engine::Postgres, &e, &run, EditTx::Commit)
+        .unwrap();
+    assert_eq!(
+        s.value(
+            On::Connection(pg),
+            &format!("SELECT name FROM sales.{t} WHERE id = 1")
+        ),
+        "upper"
+    );
+    s.run(pg, &format!("DROP TABLE sales.{t}; SELECT 1"));
+}
+
 /// A table the tab's session sees under the same unqualified name as another
 /// one: edits must hit the session's table (#162). On SQLite a temp table
 /// shadows `main.products`; its columns differ, so the lookup must be on the

@@ -716,6 +716,24 @@ pub fn selection_tsv_capped(
     headers: bool,
     max_rows: usize,
 ) -> (String, bool) {
+    selection_tsv_with(rs, sel, headers, max_rows, rs.len(), |pos, c| {
+        let cell = &rs.row(pos)[c];
+        (!cell.is_null()).then(|| cell.display(rs.columns[c].logical).into_owned())
+    })
+}
+
+/// Tab-separated text of the selected cells of a grid of `n_rows` rows,
+/// each value (`None` = NULL) from `value(position, column)`, so a grid
+/// being edited copies what it shows. At most `max_rows` data rows; the bool
+/// is `true` when more were selected.
+pub fn selection_tsv_with(
+    rs: &ResultSet,
+    sel: &Selection,
+    headers: bool,
+    max_rows: usize,
+    n_rows: usize,
+    value: impl Fn(usize, usize) -> Option<String>,
+) -> (String, bool) {
     let cols: Vec<usize> = sel.cols().filter(|&c| c < rs.columns.len()).collect();
     let mut out = String::new();
     if headers {
@@ -724,22 +742,17 @@ pub fn selection_tsv_capped(
         out.push('\n');
     }
     let mut truncated = false;
-    for (written, r) in sel.rows().filter(|&r| r < rs.len()).enumerate() {
+    for (written, r) in sel.rows().filter(|&r| r < n_rows).enumerate() {
         if written == max_rows {
             truncated = true;
             break;
         }
-        let row = rs.row(r);
         let cells: Vec<String> = cols
             .iter()
             .map(|&c| {
-                if row[c].is_null() {
-                    String::new()
-                } else {
-                    row[c]
-                        .display(rs.columns[c].logical)
-                        .replace(['\t', '\n', '\r'], " ")
-                }
+                value(r, c)
+                    .map(|v| v.replace(['\t', '\n', '\r'], " "))
+                    .unwrap_or_default()
             })
             .collect();
         out.push_str(&cells.join("\t"));

@@ -377,7 +377,12 @@ or XML plan.
   must be selected once, without an alias. Binary columns (`bytea`,
   `varbinary`, `BLOB`) are edited as `0x` followed by hex digits, as they are
   shown (`0x` alone is an empty value); sqail writes the bytes themselves,
-  and refuses a value that isn't valid hex before anything is sent.
+  and refuses a value that isn't valid hex before anything is sent. Opening
+  a cell's editor and leaving it without typing changes nothing: a NULL cell,
+  which opens empty, stays NULL. On PostgreSQL an unquoted table
+  name is folded to lower case, as the server does (`FROM Customers` edits
+  `customers`). While editing, copying copies what the grid shows: the
+  pending values and the new rows.
 * Messages (`RAISERROR`, `RAISE NOTICE`, `PRINT`) and row counts appear in the
   *Messages* tab, in the order the server sent them, between the results.
   On SQL Server every statement reports its row count (unless

@@ -7,7 +7,7 @@ use sqail_client::proto::LogicalType;
 use crate::editing::EditState;
 use crate::results::{
     COPY_ROW_LIMIT, GridHit, Pane, ResultSet, Run, Selection, Severity, fmt_duration,
-    selection_tsv_capped,
+    selection_tsv_with,
 };
 
 #[derive(Default)]
@@ -762,7 +762,7 @@ fn grid_ui(
         {
             // Ctrl+Shift+C arrives as a copy event with Shift still held.
             let headers = ui.input(|i| i.modifiers.shift);
-            copy_selection(ui, rs, sel, headers, out);
+            copy_selection(ui, rs, edit.as_deref(), sel, headers, out);
         }
     }
 
@@ -1002,6 +1002,7 @@ fn grid_ui(
                                     let focus = std::mem::take(&mut e.focus_editor);
                                     let Some((_, _, buf)) = e.editing.as_mut() else { return };
                                     let r = ui.add(egui::TextEdit::singleline(buf).font(mono.clone()).desired_width(f32::INFINITY));
+                                    e.edit_dirty |= r.changed();
                                     if focus {
                                         r.request_focus();
                                     }
@@ -1186,9 +1187,12 @@ fn grid_ui(
     };
 
     // Finish an inline edit.
+    // An editor left without typing records nothing (#164): a NULL cell
+    // opens empty and must not become ''.
     if let (Some(done), Some(e)) = (finished_edit, edit.as_deref_mut())
         && let Some((pos, c, _)) = e.editing.take()
         && let Some(text) = done
+        && std::mem::take(&mut e.edit_dirty)
     {
         match row_ref(rs, pos) {
             RowRef::Existing(r) => e.set(r, c, Some(text), rs),
@@ -1209,6 +1213,7 @@ fn grid_ui(
                 };
                 e.editing = Some((pos, c, current));
                 e.focus_editor = true;
+                e.edit_dirty = false;
             }
             _ => out.view = Some(view(rs, edit.as_deref(), pos, c)),
         }
@@ -1225,8 +1230,8 @@ fn grid_ui(
         *selection = Some(sel);
         ui.memory_mut(|m| m.request_focus(grid_focus));
         match action {
-            CellAction::Copy => copy_selection(ui, rs, &sel, false, out),
-            CellAction::CopyHeaders => copy_selection(ui, rs, &sel, true, out),
+            CellAction::Copy => copy_selection(ui, rs, edit.as_deref(), &sel, false, out),
+            CellAction::CopyHeaders => copy_selection(ui, rs, edit.as_deref(), &sel, true, out),
             CellAction::CopyRow => {
                 let row_sel = Selection::click(
                     None,
@@ -1242,7 +1247,7 @@ fn grid_ui(
                     total_rows,
                     rs.columns.len(),
                 );
-                copy_selection(ui, rs, &row_sel, false, out);
+                copy_selection(ui, rs, edit.as_deref(), &row_sel, false, out);
                 *selection = Some(row_sel);
             }
             CellAction::CopyColumn => {
@@ -1260,13 +1265,13 @@ fn grid_ui(
                     total_rows,
                     rs.columns.len(),
                 );
-                copy_selection(ui, rs, &col_sel, false, out);
+                copy_selection(ui, rs, edit.as_deref(), &col_sel, false, out);
                 *selection = Some(col_sel);
             }
             CellAction::CopyTable => {
                 let all =
                     Selection::click(None, GridHit::Table, false, total_rows, rs.columns.len());
-                copy_selection(ui, rs, &all, true, out);
+                copy_selection(ui, rs, edit.as_deref(), &all, true, out);
                 *selection = Some(all);
             }
             CellAction::View => out.view = Some(view(rs, edit.as_deref(), r, c)),
@@ -1296,14 +1301,24 @@ fn covers_cols(sel: &Selection, n_cols: usize) -> bool {
     n_cols > 0 && *sel.cols().start() == 0 && *sel.cols().end() + 1 >= n_cols
 }
 
+/// Copy the selected cells as the grid shows them: pending edits and new
+/// rows included, a new row's unset (DEFAULT) cells empty.
 fn copy_selection(
     ui: &egui::Ui,
     rs: &ResultSet,
+    edit: Option<&EditState>,
     sel: &Selection,
     headers: bool,
     out: &mut GridOutput,
 ) {
-    let (text, truncated) = selection_tsv_capped(rs, sel, headers, COPY_ROW_LIMIT);
+    let n_rows = rs.len() + edit.map_or(0, |e| e.inserted.len());
+    let (text, truncated) =
+        selection_tsv_with(rs, sel, headers, COPY_ROW_LIMIT, n_rows, |pos, c| {
+            match (row_ref(rs, pos), edit) {
+                (RowRef::New(i), Some(e)) if e.inserted[i][c].is_none() => None,
+                _ => cell_text(rs, edit, pos, c).0,
+            }
+        });
     ui.ctx().copy_text(text);
     if truncated {
         out.copy_note = Some(format!(
@@ -1773,5 +1788,121 @@ mod tests {
         let sel = h.state().selection.expect("ctrl+a");
         assert_eq!(sel.rows(), 0..=1);
         assert_eq!(sel.cols(), 0..=1);
+    }
+
+    /// A run of `SELECT id, name FROM t` (rows 10/NULL and 20/'b') being
+    /// edited.
+    fn edit_run() -> Run {
+        use sqail_client::proto::{Column, ColumnInfo, Engine, LogicalType, QueryEvent};
+        let sql = "SELECT id, name FROM t";
+        let mut run = Run::new(1, sql.into());
+        let columns = vec![
+            Column {
+                name: "id".into(),
+                type_name: "int4".into(),
+                logical: LogicalType::Int,
+            },
+            Column {
+                name: "name".into(),
+                type_name: "text".into(),
+                logical: LogicalType::Text,
+            },
+        ];
+        run.apply(QueryEvent::ResultStart {
+            index: 0,
+            columns: columns.clone(),
+        });
+        run.apply(QueryEvent::Rows {
+            index: 0,
+            rows: vec![
+                vec![10.into(), serde_json::Value::Null],
+                vec![20.into(), "b".into()],
+            ],
+        });
+        run.apply(QueryEvent::ResultEnd {
+            index: 0,
+            row_count: 2,
+            truncated: false,
+        });
+        run.apply(QueryEvent::Done {
+            elapsed_ms: 1,
+            cancelled: false,
+            in_transaction: None,
+        });
+        let info = |name: &str, ordinal: i64, ty: &str, pk: bool| -> ColumnInfo {
+            serde_json::from_value(serde_json::json!({
+                "name": name, "ordinal": ordinal, "data_type": ty,
+                "nullable": !pk, "primary_key": pk,
+            }))
+            .unwrap()
+        };
+        let table = [
+            info("id", 1, "integer", true),
+            info("name", 2, "text", false),
+        ];
+        let source = crate::editing::source_table(sql, Engine::Postgres).unwrap();
+        let e = EditState::new(Engine::Postgres, source, &columns, &table).unwrap();
+        run.edit = Some((0, e));
+        run
+    }
+
+    fn edits<'a>(h: &'a egui_kittest::Harness<'_, Run>) -> &'a EditState {
+        &h.state().edit.as_ref().expect("editing").1
+    }
+
+    /// Opening the editor on a NULL cell and clicking away records nothing;
+    /// typing does (#164).
+    #[test]
+    fn leaving_an_unchanged_editor_keeps_null() {
+        use egui_kittest::kittest::Queryable;
+
+        let mut h = harness(edit_run(), 0.25);
+        h.run();
+        h.get_by_label("NULL").click();
+        h.run();
+        h.key_press(egui::Key::F2);
+        h.run();
+        assert!(edits(&h).editing.is_some(), "F2 opens the editor");
+        // Focus moves to another cell: the editor closes.
+        h.get_by_label("b").click();
+        h.run();
+        assert!(edits(&h).editing.is_none());
+        assert_eq!(edits(&h).pending(), 0, "NULL must not become ''");
+        h.get_by_label("NULL");
+
+        // Typing then leaving commits.
+        h.get_by_label("NULL").click();
+        h.run();
+        h.key_press(egui::Key::F2);
+        h.run();
+        h.event(egui::Event::Text("new".into()));
+        h.run();
+        h.get_by_label("b").click();
+        h.run();
+        assert_eq!(
+            edits(&h).changes.get(&0).and_then(|m| m.get(&1)),
+            Some(&Some("new".to_string()))
+        );
+    }
+
+    /// Copy while editing copies the pending values and the new rows (#164).
+    #[test]
+    fn copy_in_edit_mode_shows_pending_values() {
+        use egui_kittest::kittest::Queryable;
+
+        let mut run = edit_run();
+        let (_, e) = run.edit.as_mut().unwrap();
+        e.set(1, 1, Some("changed".into()), &run.results[0]);
+        e.inserted.push(vec![None, Some(Some("added".into()))]);
+        let mut h = harness(run, 0.25);
+        h.run();
+        h.get_by_label("#").click();
+        h.run();
+        h.event(egui::Event::Copy);
+        h.step();
+        assert_eq!(
+            clipboard_text(&h),
+            vec!["10\t\n20\tchanged\n\tadded\n".to_string()]
+        );
     }
 }

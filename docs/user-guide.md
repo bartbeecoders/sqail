@@ -496,6 +496,19 @@ allowed to share with them.
 On Windows, sqail uses the native `grok.exe` behind npm's `grok.cmd`. If it
 can't find it, set `grok_path`.
 
+**When a turn fails** the conversation shows why, in red:
+
+* *sqail's database tools did not start* — the CLI could not start `sqail mcp`.
+  sqail runs it once itself and shows its error (service not running, token
+  rejected, connection deleted, …).
+* *No answer received* — the CLI ended without an answer; its output and the
+  end of its error output follow.
+* *printed nothing for 5 minutes* — the CLI went quiet (for example, it waits
+  for a sign-in in a terminal), so sqail stopped it. A turn also stops after
+  30 minutes.
+* *This chat's connection … is no longer available* — the connection was
+  deleted, or sqail is connected to another service. Start a **New chat**.
+
 ## Settings
 
 *File → Settings…* (Ctrl+,) opens every application-wide setting in one

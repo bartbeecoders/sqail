@@ -115,17 +115,22 @@ fn call(id: u32, name: &str, args: Value) -> String {
         + "\n"
 }
 
-/// Replies to `calls`, as (text, is_error).
+/// Replies to `calls`, as (text, is_error), in the order of their ids (the
+/// server answers requests as they finish).
 async fn mcp(backend: &ServiceBackend, calls: &[String]) -> Vec<(String, bool)> {
     let mut out = Vec::new();
     serve(backend, 20, calls.concat().as_bytes(), &mut out)
         .await
         .unwrap();
-    String::from_utf8(out)
+    let mut replies: Vec<Value> = String::from_utf8(out)
         .unwrap()
         .lines()
-        .map(|l| {
-            let v: Value = serde_json::from_str(l).unwrap();
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    replies.sort_by_key(|v| v["id"].as_u64());
+    replies
+        .iter()
+        .map(|v| {
             let r = &v["result"];
             (
                 r["content"][0]["text"].as_str().unwrap().to_string(),
@@ -332,6 +337,41 @@ fn postgres_assistant_queries_call_only_non_volatile_functions() {
             &format!("DROP SCHEMA {s} CASCADE; DROP OWNED BY {role}; DROP ROLE {role}"),
         )
         .await;
+    });
+}
+
+/// A query dropped midway (`notifications/cancelled`) leaves its
+/// transaction open on the session: the next query gets a fresh session.
+#[test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+fn a_cancelled_query_does_not_spoil_the_next() {
+    let f = fixture();
+    f.rt.block_on(async {
+        let backend = ServiceBackend::connect(&f.target, f.pg).await.unwrap();
+        let pid = "SELECT pg_backend_pid(), current_setting('transaction_read_only')";
+        let before = backend.query(pid, 5).await.unwrap().rows;
+        let slow = backend.query("SELECT count(*) FROM generate_series(1, 200000000) a", 5);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), slow)
+                .await
+                .is_err(),
+            "the slow query finished"
+        );
+        let start = std::time::Instant::now();
+        let after = backend.query(pid, 5).await.unwrap().rows;
+        // A new session (the old one may still be busy, its transaction
+        // open), in its own read-only transaction, without waiting.
+        assert_ne!(before[0][0], after[0][0]);
+        assert_eq!(after[0][1], json!("on"));
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            start.elapsed()
+        );
+        // Finished queries keep the session.
+        let again = backend.query(pid, 5).await.unwrap().rows;
+        assert_eq!(after[0][0], again[0][0]);
+        backend.close().await;
     });
 }
 

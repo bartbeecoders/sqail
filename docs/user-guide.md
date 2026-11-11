@@ -457,9 +457,13 @@ started (shown under the title). The assistant can:
 
 | Tool | What it does |
 |---|---|
-| `list_schemas`, `list_tables` | See what's in the database |
+| `list_schemas`, `list_tables` | See what's in the database (`list_tables` takes a name pattern and lists at most 200 tables unless asked for more, up to 1,000; on a large database without a schema or pattern it gives the number of tables per schema) |
 | `describe_table` | Columns, types, keys, indexes and foreign keys |
-| `run_query` | Run **one read-only statement** and see up to 100 rows |
+| `run_query` | Run **one read-only statement** and see up to 100 rows (`max_rows`, at most 1,000) |
+
+Each tool result is kept under 40,000 characters, with at most 50 columns and
+200 characters per value; the assistant is told what was left out, so it can
+ask for less.
 
 Each tool call shows up in the conversation; click it to see the SQL and the
 result.
@@ -502,7 +506,7 @@ allowed to share with them.
 | `provider` | `"claude_code"` | or `"grok"` |
 | `claude_path`, `grok_path` | found on `PATH` | Full path to the CLI |
 | `claude_model`, `grok_model` | the CLI's default | e.g. `"sonnet"` |
-| `max_rows` | `100` | Most rows one assistant query returns to the model |
+| `max_rows` | `100` | Most rows one assistant query returns to the model (1–1,000) |
 
 On Windows, sqail uses the native `grok.exe` behind npm's `grok.cmd`. If it
 can't find it, set `grok_path`.
@@ -557,7 +561,7 @@ dialog. (A bad `tokens.toml` is set aside the same way and logged.) Fix the
 `.bad` file and rename it back while sqail is closed to get your services,
 tabs or snippets back. Out-of-range values in `settings.toml` are brought
 into the range the Settings window offers: interface size 75–200 %, font
-size 9–28, indent 2–4, assistant rows 1–10,000, row limit at least 1 (its
+size 9–28, indent 2–4, assistant rows 1–1,000, row limit at least 1 (its
 upper bound is the service's).
 
 Only one sqail runs per settings folder: starting a second one shows

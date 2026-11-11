@@ -99,7 +99,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut SqailApp) {
         RichText::new(format!(
             "{} can read the schema and run read-only queries; up to {} rows per query are sent to it.",
             provider.label(),
-            app.settings.assistant.max_rows
+            super::mcp::effective_max_rows(app.settings.assistant.max_rows)
         ))
         .small()
         .weak(),

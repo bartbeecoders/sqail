@@ -2605,6 +2605,77 @@ async fn postgres_scripts_commit_each_statement() {
     assert_eq!(count(&ev), json!(3), "{ev:?}");
 }
 
+/// `COPY … FROM STDIN` (pasted pg_dump output) is refused before anything
+/// runs, leaving a session's transaction and temp tables; `COPY … TO
+/// STDOUT` is a one-column result.
+#[tokio::test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+async fn postgres_copy_stdin_and_stdout() {
+    let h = harness().await;
+    let c = profile(&h, &postgres(), false).await;
+    let s: SessionInfo = h
+        .post("/v1/sessions", &json!({"connection_id": c}), &h.admin)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let path = format!("/v1/sessions/{}/query", s.id);
+    let run = |sql: &str| h.query_on(&path, json!({ "sql": sql }), None);
+    let ev = run("BEGIN; CREATE TEMP TABLE copy187 (a int, b text); \
+                  INSERT INTO copy187 VALUES (1, 'x'), (2, 'y,z')")
+    .await;
+    assert_eq!(done(&ev).1, Some(true), "{ev:?}");
+
+    // As pg_dump writes it, after a statement that must not run either.
+    let ev = run("INSERT INTO copy187 VALUES (3, 'no');\n\
+                  COPY copy187 (a, b) FROM stdin;\n4\tw\n\\.\n")
+    .await;
+    let (code, message) = error(&ev).expect("refused");
+    assert_eq!(code, "unsupported");
+    assert!(
+        message.contains("FROM STDIN") && message.contains("Import CSV"),
+        "{message}"
+    );
+    assert_eq!(done(&ev).1, Some(true), "the transaction survives: {ev:?}");
+    assert!(!connection_lost(&ev), "{ev:?}");
+
+    let ev = run("copy copy187 to stdout (format binary)").await;
+    assert_eq!(error(&ev).unwrap().0, "unsupported");
+
+    let ev = run(
+        "SELECT count(*) FROM copy187; COPY (SELECT * FROM copy187 ORDER BY a) TO STDOUT; \
+                  copy copy187 to stdout with (format csv, header); SELECT 'after'",
+    )
+    .await;
+    assert_eq!(error(&ev), None, "{ev:?}");
+    assert_eq!(rows(&ev, 0), vec![vec![json!(2)]]);
+    assert_eq!(column_types(&ev, 1), vec![("copy".into(), "text".into())]);
+    assert_eq!(
+        rows(&ev, 1),
+        vec![vec![json!("1\tx")], vec![json!("2\ty,z")]]
+    );
+    assert_eq!(
+        rows(&ev, 2),
+        vec![
+            vec![json!("a,b")],
+            vec![json!("1,x")],
+            vec![json!("2,\"y,z\"")]
+        ]
+    );
+    assert_eq!(rows(&ev, 3), vec![vec![json!("after")]]);
+    assert_eq!(done(&ev).1, Some(true));
+
+    // A COPY error leaves a usable session, as any other error does.
+    let ev = run("ROLLBACK; COPY no_such_table_187 TO STDOUT").await;
+    assert!(
+        error(&ev).unwrap().1.contains("no_such_table_187"),
+        "{ev:?}"
+    );
+    let ev = run("COPY (SELECT 1) TO STDOUT").await;
+    assert_eq!(rows(&ev, 0), vec![vec![json!("1")]]);
+    assert_eq!(done(&ev).1, Some(false));
+}
+
 #[tokio::test]
 #[ignore = "needs podman test databases (scripts/db.sh up)"]
 async fn postgres_types_and_notices() {

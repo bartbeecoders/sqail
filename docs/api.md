@@ -187,6 +187,12 @@ api $URL/v1/connections/$ID/query -d '{"sql": "SELECT id, name FROM customers; U
   quote in a plain string), the script is sent as one message instead:
   PostgreSQL then runs it as one transaction, and the error message says
   that the statements before it were rolled back.
+* **PostgreSQL `COPY`:** `COPY … TO STDOUT` in text or CSV format is a
+  result set with one `text` column, `copy`, and a row per line the server
+  sends (a CSV value with a line break stays in its row). `COPY … FROM
+  STDIN` and binary `COPY … TO STDOUT` are refused with an `unsupported`
+  error before any statement of the script runs, so a session keeps its
+  connection, transaction and temp tables.
 * **`single_statement: true`** refuses (with an `error` event, before running
   anything) a script that is more than one statement. Postgres parses it as a
   prepared statement and SQLite checks what follows the first statement, so

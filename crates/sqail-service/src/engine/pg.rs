@@ -9,6 +9,7 @@
 //! would silently roll back the ones before it). Parameterised statements
 //! use the extended protocol and binary decoding.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,7 +22,7 @@ use tokio_postgres::types::{FromSql, ToSql, Type};
 use tokio_postgres::{AsyncMessage, CancelToken, Client, SimpleQueryMessage};
 use tokio_postgres_rustls::MakeRustlsConnect;
 
-use super::value::{bytes, float, int, text};
+use super::value::{bytes, float, float32, int, text};
 use super::{
     Cancel, Canceller, Conn, DbError, Driver, EventSink, ExecRequest, Result, ResultWriter,
     pg_guard, tls_client,
@@ -119,6 +120,8 @@ impl Driver for PgDriver {
             client,
             notices,
             read_only: self.read_only,
+            type_names: None,
+            missing_types: Vec::new(),
         }))
     }
 
@@ -132,7 +135,23 @@ struct PgConn {
     notices: mpsc::UnboundedReceiver<(String, String)>,
     cancel: Arc<PgCancel>,
     read_only: bool,
+    /// Names of the database's own types (enums, extension types such as
+    /// hstore or geometry, ...), which the simple protocol only gives as an
+    /// OID. Loaded before the first script on this connection.
+    type_names: Option<HashMap<u32, String>>,
+    /// OIDs that were not in `type_names` (types created since, composite
+    /// row types); looked up after the script, for the next one.
+    missing_types: Vec<u32>,
 }
+
+/// User-defined types a result column can have. Row types of tables
+/// (and arrays of them) are many and rare in results; they are looked up
+/// when they occur.
+const PG_TYPE_NAMES: &str = "SELECT t.oid, format_type(t.oid, NULL) FROM pg_type t \
+     WHERE t.oid >= 16384 AND t.typtype NOT IN ('c', 'p') \
+       AND NOT EXISTS (SELECT 1 FROM pg_type e WHERE e.oid = t.typelem AND e.typtype = 'c')";
+const PG_TYPE_NAMES_OF: &str =
+    "SELECT oid, format_type(oid, NULL) FROM pg_type WHERE oid = ANY($1)";
 
 /// `DISCARD ALL` without its `DEALLOCATE ALL`: tokio-postgres keeps prepared
 /// statements of its own (type lookups) that must survive. Statements the
@@ -164,6 +183,43 @@ impl Cancel for PgCancel {
 }
 
 impl PgConn {
+    /// Type names for result columns: before the first script, the
+    /// database's own types; after a script that showed unknown OIDs, those.
+    /// A failure (for example in an aborted transaction) only costs names.
+    async fn load_type_names(&mut self) {
+        let res = match &self.type_names {
+            None => self.client.query(PG_TYPE_NAMES, &[]).await,
+            Some(_) if !self.missing_types.is_empty() => {
+                let oids = std::mem::take(&mut self.missing_types);
+                self.client.query(PG_TYPE_NAMES_OF, &[&oids]).await
+            }
+            Some(_) => return,
+        };
+        match res {
+            Ok(rows) => self.type_names.get_or_insert_default().extend(
+                rows.iter()
+                    .filter_map(|r| Some((r.try_get(0).ok()?, r.try_get(1).ok()?))),
+            ),
+            Err(e) => tracing::debug!(error = %e, "cannot load postgres type names"),
+        }
+    }
+
+    fn column(&mut self, name: &str, oid: u32) -> Column {
+        if Type::from_oid(oid).is_none() {
+            match self.type_names.as_ref().and_then(|t| t.get(&oid)) {
+                Some(type_name) => {
+                    return Column {
+                        name: name.to_string(),
+                        type_name: type_name.clone(),
+                        logical: LogicalType::Other,
+                    };
+                }
+                None => self.missing_types.push(oid),
+            }
+        }
+        column(name, oid)
+    }
+
     async fn forward_notices(&mut self, out: &mut ResultWriter<'_>) -> Result<()> {
         while let Ok((severity, message)) = self.notices.try_recv() {
             out.message(&severity.to_lowercase(), message).await?;
@@ -199,7 +255,7 @@ impl PgConn {
                 Some(SimpleQueryMessage::RowDescription(cols)) => {
                     let meta: Vec<Column> = cols
                         .iter()
-                        .map(|c| column(c.name(), c.type_oid()))
+                        .map(|c| self.column(c.name(), c.type_oid()))
                         .collect();
                     columns = meta.iter().map(|c| c.logical).collect();
                     out.start(meta).await?;
@@ -230,14 +286,28 @@ impl PgConn {
     }
 
     /// Run a script's statements one by one, each in its own simple-query
-    /// message, stopping at the first error.
+    /// message, stopping at the first error. Types an earlier statement
+    /// created, or showed unnamed, are named in the later ones: the type
+    /// names are refreshed between statements when needed.
     async fn run_statements(
         &mut self,
         stmts: &[pg_guard::Statement<'_>],
         out: &mut ResultWriter<'_>,
     ) -> Result<()> {
-        for s in stmts {
+        let mut created_types = false;
+        for (i, s) in stmts.iter().enumerate() {
+            let creates_types = may_create_types(s.sql);
+            if created_types && !creates_types {
+                // Once per run of type-creating statements, not after each.
+                self.type_names = None;
+                created_types = false;
+            }
+            if i > 0 {
+                // `execute` loaded them before the first statement.
+                self.load_type_names().await;
+            }
             self.run_simple(s.sql, s.offset, None, out).await?;
+            created_types |= creates_types;
         }
         Ok(())
     }
@@ -266,9 +336,14 @@ impl PgConn {
         let types: Vec<Type> = stmt.columns().iter().map(|c| c.type_().clone()).collect();
         if !types.is_empty() {
             out.start(
+                // Prepared statements come with resolved types.
                 stmt.columns()
                     .iter()
-                    .map(|c| column(c.name(), c.type_().oid()))
+                    .map(|c| Column {
+                        name: c.name().to_string(),
+                        type_name: c.type_().name().to_string(),
+                        logical: logical(c.type_()),
+                    })
                     .collect(),
             )
             .await?;
@@ -314,6 +389,7 @@ impl PgConn {
 impl Conn for PgConn {
     async fn execute(&mut self, req: &ExecRequest, sink: &EventSink) -> Result<()> {
         let mut out = ResultWriter::new(sink, req.max_rows);
+        self.load_type_names().await;
         let res = if req.params.is_empty() {
             // A single query stops at max_rows on the server; a script can
             // only skip converting the rows past it.
@@ -343,6 +419,10 @@ impl Conn for PgConn {
         } else {
             self.run_prepared(&req.sql, &req.params, &mut out).await
         };
+        if may_create_types(&req.sql) {
+            // Load them all again before the next script.
+            self.type_names = None;
+        }
         // Close a result interrupted by an error so clients see its rows.
         out.end().await?;
         res
@@ -470,6 +550,16 @@ fn logical(ty: &Type) -> LogicalType {
     }
 }
 
+/// Whether a script may have created types (CREATE TYPE, CREATE EXTENSION
+/// or CREATE DOMAIN); cheap, and a false positive only costs a reload.
+fn may_create_types(sql: &str) -> bool {
+    let sql = sql.to_ascii_lowercase();
+    sql.contains("create")
+        && ["type", "extension", "domain"]
+            .iter()
+            .any(|w| sql.contains(w))
+}
+
 /// Convert a simple-protocol (text format) value.
 fn text_cell(logical: LogicalType, s: &str) -> Value {
     match logical {
@@ -492,7 +582,7 @@ fn binary_cell(row: &tokio_postgres::Row, i: usize, ty: &Type) -> Result<Value> 
         Type::INT4 => get::<i32>(row, i)?.map(|v| int(v.into())),
         Type::INT8 => get::<i64>(row, i)?.map(int),
         Type::OID => get::<u32>(row, i)?.map(|v| int(v.into())),
-        Type::FLOAT4 => get::<f32>(row, i)?.map(|v| float(v.into())),
+        Type::FLOAT4 => get::<f32>(row, i)?.map(float32),
         Type::FLOAT8 => get::<f64>(row, i)?.map(float),
         Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::UNKNOWN | Type::XML => {
             get::<String>(row, i)?.map(text)
@@ -723,12 +813,32 @@ mod tests {
     }
 
     #[test]
+    fn type_creating_scripts() {
+        assert!(may_create_types("CREATE TYPE mood AS ENUM ('ok')"));
+        assert!(may_create_types("create extension hstore"));
+        assert!(!may_create_types("create table t (i int)"));
+        assert!(!may_create_types("select 'type'"));
+    }
+
+    #[test]
     fn text_cells() {
         assert_eq!(text_cell(LogicalType::Bool, "t"), Value::Bool(true));
         assert_eq!(text_cell(LogicalType::Int, "42"), serde_json::json!(42));
         assert_eq!(
             text_cell(LogicalType::Float, "NaN"),
             serde_json::json!("NaN")
+        );
+        assert_eq!(
+            text_cell(LogicalType::Float, "-Infinity"),
+            serde_json::json!("-Infinity")
+        );
+        assert_eq!(
+            text_cell(LogicalType::Float, "Infinity"),
+            serde_json::json!("Infinity")
+        );
+        assert_eq!(
+            text_cell(LogicalType::Float, "1.1805916207174113e+21"),
+            serde_json::json!(1.1805916207174113e21)
         );
         assert_eq!(
             text_cell(LogicalType::Bytes, "\\xdeadbeef"),

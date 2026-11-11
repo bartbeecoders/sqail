@@ -4,25 +4,33 @@
 //! batch runs as one request with multiple result sets. tiberius does not
 //! surface DONE row counts on result streams, so a batch that is a single
 //! INSERT/UPDATE/DELETE/MERGE runs via `execute` to report affected rows.
-//! Cancelling sends `KILL <spid>` from a side connection (needs ALTER ANY
-//! CONNECTION); the caller also drops the connection if that does not stop it.
-//! A batch that is a single query is stopped with a TDS Attention once it
-//! passes `max_rows`; other batches skip converting the rows past it.
+//! Cancelling sends a TDS Attention, as SSMS does: it aborts the running
+//! batch and leaves the session (its transaction, unless XACT_ABORT is on,
+//! #temp tables and SET options) as it was. Only when the server does not
+//! acknowledge it in time does the canceller fall back to `KILL <spid>` from a
+//! side connection (needs ALTER ANY CONNECTION); the caller drops the
+//! connection if that does not stop it either. A batch that is a single query
+//! is also stopped with an Attention once it passes `max_rows`; other batches
+//! skip converting the rows past it.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::TryStreamExt;
 use serde_json::Value;
 use sqail_proto::{Column, Engine, LogicalType, MssqlAuth, MssqlEncrypt, MssqlParams, Param};
-use tiberius::{AuthMethod, ColumnData, ColumnType, Config, EncryptionLevel, FromSql, QueryItem};
+use tiberius::{
+    AttentionHandle, AuthMethod, ColumnData, ColumnType, Config, EncryptionLevel, FromSql,
+    QueryItem,
+};
 use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
 use super::entra::Entra;
 use super::split::{check_single_statement, shape, single_query, split_go};
-use super::value::{bytes, float, int, text};
+use super::value::{bytes, float, float32, int, text};
 use super::{
     Cancel, Canceller, Conn, DbError, Driver, EventSink, ExecRequest, Result, ResultWriter,
 };
@@ -195,13 +203,17 @@ impl Driver for MssqlDriver {
             .into_row()
             .await
             .map_err(db_err)?
-            .and_then(|r| r.get::<i32, _>(0))
+            .and_then(|r| int_cell(&r, 0))
             .unwrap_or(0);
+        let attention = client.attention_handle();
         Ok(Box::new(MssqlConn {
             client,
+            in_tx: false,
             cancel: Arc::new(MssqlCancel {
                 driver: self.clone(),
                 spid,
+                attention,
+                runs: Arc::default(),
             }),
         }))
     }
@@ -214,36 +226,121 @@ impl Driver for MssqlDriver {
 struct MssqlConn {
     client: Client,
     cancel: Arc<MssqlCancel>,
+    /// The last transaction state the probe could read. With SHOWPLAN on
+    /// the server answers the probe with a plan instead of running it; it
+    /// does not run BEGIN/COMMIT either then, so the state stays as it was.
+    in_tx: bool,
 }
 
+/// An `int` cell, or `None` for NULL or anything else. Probes get a plan
+/// instead of their value when SHOWPLAN_XML/TEXT/ALL is on, so the shape
+/// of their result is never trusted (`Row::get` would panic on it).
+fn int_cell(row: &tiberius::Row, idx: usize) -> Option<i32> {
+    row.try_get::<i32, _>(idx).ok().flatten()
+}
+
+impl Drop for MssqlConn {
+    fn drop(&mut self) {
+        self.cancel.runs.running.store(false, Ordering::Release);
+    }
+}
+
+/// How long the server gets to acknowledge an Attention before the
+/// canceller falls back to KILL. Shorter than the callers' grace periods
+/// (5 s and more), so that the KILL can still stop the query in time.
+const ATTENTION_TIMEOUT: Duration = Duration::from_secs(3);
+
+#[derive(Clone)]
 struct MssqlCancel {
     driver: MssqlDriver,
     spid: i32,
+    attention: AttentionHandle,
+    runs: Arc<Runs>,
 }
 
-#[async_trait]
-impl Cancel for MssqlCancel {
-    async fn cancel(&self) -> bool {
+/// Which `execute` is running, so a late KILL fallback cannot hit a later
+/// query or a closed connection's session id.
+#[derive(Default)]
+struct Runs {
+    running: AtomicBool,
+    finished: AtomicU64,
+}
+
+impl Runs {
+    fn start(&self) {
+        self.running.store(true, Ordering::Release);
+    }
+
+    fn finish(&self) {
+        self.finished.fetch_add(1, Ordering::AcqRel);
+        self.running.store(false, Ordering::Release);
+    }
+
+    fn still_running(&self, finished: u64) -> bool {
+        self.running.load(Ordering::Acquire) && self.finished.load(Ordering::Acquire) == finished
+    }
+}
+
+impl MssqlCancel {
+    /// Ends the whole session, not just the batch. Fails without ALTER ANY
+    /// CONNECTION.
+    async fn kill(&self, finished: Option<u64>) -> bool {
         if self.spid <= 0 {
             return false;
         }
         let res = async {
             let mut side = self.driver.open().await?;
+            if finished.is_some_and(|f| !self.runs.still_running(f)) {
+                return Ok(false);
+            }
             side.simple_query(format!("KILL {}", self.spid))
                 .await
                 .map_err(db_err)?
                 .into_results()
                 .await
-                .map_err(db_err)
+                .map_err(db_err)?;
+            Ok::<_, DbError>(true)
         }
         .await;
         match res {
-            Ok(_) => true,
+            Ok(killed) => killed,
             Err(e) => {
                 tracing::info!(spid = self.spid, error = %e, "KILL failed; dropping the connection instead");
                 false
             }
         }
+    }
+}
+
+#[async_trait]
+impl Cancel for MssqlCancel {
+    /// Requests an Attention, which the running `execute` sends on its next
+    /// read, so it needs that future polled: the callers wait for it after
+    /// cancelling. If the query has not stopped after [`ATTENTION_TIMEOUT`],
+    /// KILL it. A request made while no `execute` runs stops the next one
+    /// before its first batch (the caller may cancel before the query's
+    /// future was first polled); no caller cancels after a query finished.
+    async fn cancel(&self) -> bool {
+        let finished = self.runs.finished.load(Ordering::Acquire);
+        self.attention.request();
+        let this = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(ATTENTION_TIMEOUT).await;
+            if this.runs.still_running(finished) {
+                tracing::info!(
+                    spid = this.spid,
+                    "SQL Server did not acknowledge the Attention; trying KILL"
+                );
+                this.kill(Some(finished)).await;
+            }
+        });
+        true
+    }
+
+    /// Nothing reads the connection any more, so an Attention would not go
+    /// out: KILL before it is closed.
+    async fn cancel_abandoned(&self) -> bool {
+        self.kill(None).await
     }
 }
 
@@ -254,9 +351,13 @@ async fn stream_results(
     mut stream: tiberius::QueryStream<'_>,
     out: &mut ResultWriter<'_>,
     stop_at_cap: bool,
+    attention: &AttentionHandle,
 ) -> Result<bool> {
     while let Some(item) = stream.try_next().await.map_err(db_err)? {
         match item {
+            // Cancelled: what the server sent before the Attention reached it
+            // is read to the acknowledgement but not passed on.
+            _ if attention.is_requested() => {}
             QueryItem::Metadata(meta) => {
                 out.start(meta.columns().iter().map(column).collect())
                     .await?
@@ -286,7 +387,13 @@ impl MssqlConn {
             .into_row()
             .await
             .map_err(db_err)?;
-        Ok(row.is_some_and(|r| r.get::<i32, _>(0) == Some(0) || r.get::<i32, _>(1) == Some(0)))
+        // Anything but two ints (a plan, under SHOWPLAN) means unknown: no.
+        Ok(
+            row.is_some_and(|r| match (int_cell(&r, 0), int_cell(&r, 1)) {
+                (Some(trancount), Some(xact_abort)) => trancount == 0 || xact_abort == 0,
+                _ => false,
+            }),
+        )
     }
 
     async fn run_batch(
@@ -295,11 +402,17 @@ impl MssqlConn {
         params: &[Param],
         out: &mut ResultWriter<'_>,
     ) -> Result<()> {
+        if self.cancel.attention.is_requested() {
+            return Err(DbError::Cancelled);
+        }
         let results_before = out.results_seen();
         if shape(sql).is_single_dml() {
             let mut q = tiberius::Query::new(sql);
             bind_all(&mut q, params);
             let res = q.execute(&mut self.client).await.map_err(db_err)?;
+            if self.cancel.attention.is_requested() {
+                return Err(DbError::Cancelled);
+            }
             return out.rows_affected(res.total()).await;
         }
         // A lone query is stopped once it passes max_rows. The probe that
@@ -316,7 +429,7 @@ impl MssqlConn {
             bind_all(&mut q, params);
             q.query(&mut self.client).await.map_err(db_err)?
         };
-        if stream_results(stream, out, stop_at_cap).await? {
+        if stream_results(stream, out, stop_at_cap, &self.cancel.attention).await? {
             // An Attention aborts the batch; tiberius then drains the
             // acknowledgement, which leaves the connection ready for reuse.
             self.client
@@ -349,6 +462,7 @@ fn bind_all<'a>(q: &mut tiberius::Query<'a>, params: &'a [Param]) {
 impl Conn for MssqlConn {
     async fn execute(&mut self, req: &ExecRequest, sink: &EventSink) -> Result<()> {
         let mut out = ResultWriter::new(sink, req.max_rows);
+        self.cancel.runs.start();
         let res = async {
             if req.single_statement {
                 check_single_statement(&req.sql).map_err(DbError::Invalid)?;
@@ -364,6 +478,15 @@ impl Conn for MssqlConn {
             Ok(())
         }
         .await;
+        // After an Attention, read its acknowledgement so the session can
+        // run the next request.
+        let res = match self.client.finish_attention().await {
+            Ok(false) => res,
+            Ok(true) if matches!(res, Err(DbError::ClientGone)) => res,
+            Ok(true) => Err(DbError::Cancelled),
+            Err(e) => Err(DbError::Connect(format!("cannot cancel the query: {e}"))),
+        };
+        self.cancel.runs.finish();
         out.end().await?;
         res
     }
@@ -381,7 +504,13 @@ impl Conn for MssqlConn {
             .into_row()
             .await
             .map_err(db_err)?;
-        Ok(row.and_then(|r| r.get::<i32, _>(0)).unwrap_or(0) > 0)
+        match row.as_ref().and_then(|r| int_cell(r, 0)) {
+            Some(n) => self.in_tx = n > 0,
+            None => tracing::debug!(
+                "@@TRANCOUNT probe returned no int (SHOWPLAN on?); keeping the last known state"
+            ),
+        }
+        Ok(self.in_tx)
     }
 
     async fn ping(&mut self) -> Result<()> {
@@ -405,7 +534,7 @@ impl Conn for MssqlConn {
             .await
             .map_err(db_err)?;
         Ok(row
-            .and_then(|r| r.get::<&str, _>(0).map(str::to_string))
+            .and_then(|r| r.try_get::<&str, _>(0).ok().flatten().map(str::to_string))
             .unwrap_or_default())
     }
 
@@ -436,7 +565,8 @@ fn column(c: &tiberius::Column) -> Column {
         ColumnType::Intn => ("int", LogicalType::Int),
         ColumnType::Float4 => ("real", LogicalType::Float),
         ColumnType::Float8 | ColumnType::Floatn => ("float", LogicalType::Float),
-        ColumnType::Money | ColumnType::Money4 => ("money", LogicalType::Decimal),
+        ColumnType::Money => ("money", LogicalType::Decimal),
+        ColumnType::Money4 => ("smallmoney", LogicalType::Decimal),
         ColumnType::Decimaln => ("decimal", LogicalType::Decimal),
         ColumnType::Numericn => ("numeric", LogicalType::Decimal),
         ColumnType::Guid => ("uniqueidentifier", LogicalType::Uuid),
@@ -456,18 +586,66 @@ fn column(c: &tiberius::Column) -> Column {
         ColumnType::BigVarBin => ("varbinary", LogicalType::Bytes),
         ColumnType::BigBinary => ("binary", LogicalType::Bytes),
         ColumnType::Image => ("image", LogicalType::Bytes),
+        // hierarchyid, geometry, geography: their serialized bytes. tiberius
+        // does not pass the UDT's own name on.
+        ColumnType::Udt => ("udt", LogicalType::Bytes),
+        ColumnType::SSVariant => ("sql_variant", LogicalType::Other),
         other => {
             return Column {
-                name: c.name().to_string(),
+                name: column_name(c),
                 type_name: format!("{other:?}").to_lowercase(),
                 logical: LogicalType::Other,
             };
         }
     };
     Column {
-        name: c.name().to_string(),
+        name: column_name(c),
         type_name: type_name.to_string(),
         logical,
+    }
+}
+
+/// An expression without an alias has no name; SSMS shows this instead.
+fn column_name(c: &tiberius::Column) -> String {
+    match c.name() {
+        "" => "(No column name)".to_string(),
+        name => name.to_string(),
+    }
+}
+
+/// `hh:mm:ss` and `digits` fraction digits of `nanos` (always a whole number
+/// of the type's own increments, so this is exact).
+fn time_text(t: chrono::NaiveTime, digits: u8) -> String {
+    use chrono::Timelike;
+    let hms = t.format("%H:%M:%S");
+    match digits.min(9) {
+        0 => hms.to_string(),
+        n => {
+            let frac = t.nanosecond() % 1_000_000_000 / 10u32.pow(9 - u32::from(n));
+            format!("{hms}.{frac:0width$}", width = usize::from(n))
+        }
+    }
+}
+
+/// `datetime` counts 1/300 s ticks; SQL Server shows (and parses back) them
+/// rounded to milliseconds: .997, not .996666666.
+fn datetime_text(v: chrono::NaiveDateTime) -> String {
+    use chrono::Timelike;
+    let ms = (v.nanosecond() % 1_000_000_000 + 500_000) / 1_000_000;
+    let v = v.with_nanosecond(0).unwrap_or(v) + chrono::TimeDelta::milliseconds(ms.into());
+    format!(
+        "{}.{:03}",
+        v.format("%Y-%m-%dT%H:%M:%S"),
+        v.nanosecond() / 1_000_000
+    )
+}
+
+/// A decimal's exact digits; tiberius prints `0.0` for scale 0.
+fn numeric_text(n: tiberius::numeric::Numeric) -> String {
+    if n.scale() == 0 {
+        n.value().to_string()
+    } else {
+        n.to_string()
     }
 }
 
@@ -487,27 +665,43 @@ fn cell(d: &ColumnData<'static>) -> Value {
         ColumnData::I16(v) => v.map(|v| int(v.into())).unwrap_or(Value::Null),
         ColumnData::I32(v) => v.map(|v| int(v.into())).unwrap_or(Value::Null),
         ColumnData::I64(v) => v.map(int).unwrap_or(Value::Null),
-        ColumnData::F32(v) => v.map(|v| float(v.into())).unwrap_or(Value::Null),
+        ColumnData::F32(v) => v.map(float32).unwrap_or(Value::Null),
         ColumnData::F64(v) => v.map(float).unwrap_or(Value::Null),
         ColumnData::Bit(v) => v.map(Value::Bool).unwrap_or(Value::Null),
         ColumnData::String(v) => v.as_ref().map(|s| text(s.as_ref())).unwrap_or(Value::Null),
         ColumnData::Guid(v) => v.map(|g| text(g.to_string())).unwrap_or(Value::Null),
         ColumnData::Binary(v) => v.as_ref().map(|b| bytes(b)).unwrap_or(Value::Null),
-        ColumnData::Numeric(v) => v.map(|n| text(n.to_string())).unwrap_or(Value::Null),
+        // decimal, numeric, and money (decoded exactly with scale 4)
+        ColumnData::Numeric(v) => v.map(|n| text(numeric_text(n))).unwrap_or(Value::Null),
         ColumnData::Xml(v) => v
             .as_ref()
             .map(|x| text(x.to_string()))
             .unwrap_or(Value::Null),
         ColumnData::Date(_) => chrono_cell::<chrono::NaiveDate>(d, |v| v.to_string()),
-        ColumnData::Time(_) => chrono_cell::<chrono::NaiveTime>(d, |v| v.to_string()),
-        ColumnData::DateTime(_) | ColumnData::SmallDateTime(_) | ColumnData::DateTime2(_) => {
+        // time, datetime2 and datetimeoffset print the column's own scale.
+        ColumnData::Time(t) => {
+            let scale = t.map_or(0, |t| t.scale());
+            chrono_cell::<chrono::NaiveTime>(d, |v| time_text(v, scale))
+        }
+        ColumnData::DateTime(_) => chrono_cell::<chrono::NaiveDateTime>(d, datetime_text),
+        ColumnData::SmallDateTime(_) => {
+            chrono_cell::<chrono::NaiveDateTime>(d, |v| v.format("%Y-%m-%dT%H:%M:%S").to_string())
+        }
+        ColumnData::DateTime2(dt) => {
+            let scale = dt.map_or(0, |dt| dt.time().scale());
             chrono_cell::<chrono::NaiveDateTime>(d, |v| {
-                v.format("%Y-%m-%dT%H:%M:%S%.f").to_string()
+                format!("{}T{}", v.format("%Y-%m-%d"), time_text(v.time(), scale))
             })
         }
-        ColumnData::DateTimeOffset(_) => {
+        ColumnData::DateTimeOffset(dto) => {
+            let scale = dto.map_or(0, |dto| dto.datetime2().time().scale());
             chrono_cell::<chrono::DateTime<chrono::FixedOffset>>(d, |v| {
-                v.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false)
+                format!(
+                    "{}T{}{}",
+                    v.format("%Y-%m-%d"),
+                    time_text(v.time(), scale),
+                    v.format("%:z")
+                )
             })
         }
     }
@@ -586,6 +780,30 @@ mod tests {
             port,
             instance: instance.map(String::from),
         }
+    }
+
+    #[test]
+    fn temporal_and_decimal_text() {
+        use chrono::{NaiveDate, NaiveTime};
+        let t = NaiveTime::from_hms_nano_opt(23, 59, 59, 123_456_700).unwrap();
+        assert_eq!(time_text(t, 7), "23:59:59.1234567");
+        assert_eq!(time_text(t, 3), "23:59:59.123");
+        assert_eq!(time_text(t, 0), "23:59:59");
+        let day = NaiveDate::from_ymd_opt(2024, 2, 29).unwrap();
+        for (nanos, want) in [
+            (996_666_666, "2024-02-29T13:45:12.997"),
+            (3_333_333, "2024-02-29T13:45:12.003"),
+            (0, "2024-02-29T13:45:12.000"),
+            (999_600_000, "2024-02-29T13:45:13.000"),
+        ] {
+            let v = day.and_hms_nano_opt(13, 45, 12, nanos).unwrap();
+            assert_eq!(datetime_text(v), want);
+        }
+        use tiberius::numeric::Numeric;
+        assert_eq!(numeric_text(Numeric::new_with_scale(0, 0)), "0");
+        assert_eq!(numeric_text(Numeric::new_with_scale(-42, 0)), "-42");
+        assert_eq!(numeric_text(Numeric::new_with_scale(11000, 4)), "1.1000");
+        assert_eq!(numeric_text(Numeric::new_with_scale(-5, 1)), "-0.5");
     }
 
     #[test]

@@ -134,9 +134,20 @@ api $URL/v1/connections/$ID/query -d '{"sql": "SELECT id, name FROM customers; U
   script arrive as `error` events (`code`, `message` and `db_code`, which holds
   the SQLSTATE or SQL Server error number).
 * Cells: `null`; bools and ints (i64) as JSON bool and number; floats as
-  numbers (`"NaN"`/`"Infinity"` as strings); bytes as lowercase hex;
-  everything else as a string (decimals keep full precision, temporal values
-  are ISO-8601, JSON columns are JSON text). `logical` says which applies.
+  numbers (`"NaN"`, `"Infinity"` and `"-Infinity"` as strings; a 4-byte
+  `real`/`float4` with its own shortest digits, `3.14`); bytes as lowercase
+  hex; everything else as a string. Decimals keep full precision and their
+  scale (`"1.50"`, `"0"` for scale 0; SQL Server `money`/`smallmoney` with
+  4 decimals). Temporal values are ISO-8601 with the column's own fraction
+  digits (`time(7)` `"23:59:59.1234567"`, `datetime2(0)` none; SQL Server
+  `datetime` 3, rounded as the server shows it, and `smalldatetime` none), so
+  the text parses back to the same value. JSON columns are JSON text.
+  `logical` says which applies.
+* `type_name` is the engine's type name. PostgreSQL enums and extension
+  types (hstore, PostGIS, ...) have their own name (`format_type`), or
+  `oid:<n>` if the service could not look it up. SQL Server CLR types
+  (`hierarchyid`, `geometry`, `geography`) are `udt` with `logical: bytes`.
+  A SQL Server column without a name is called `(No column name)`.
 * `max_rows` caps each result set (the service clamps it to
   `limits.max_rows`), and `truncated: true` says the cap was hit.
   A script that is a single query stops on the database server once it has
@@ -170,7 +181,11 @@ api $URL/v1/connections/$ID/query -d '{"sql": "SELECT id, name FROM customers; U
 
 **Cancel:** send `x-query-id: <uuid>` with the query, or read `query_id` from
 `started`, then call `DELETE /v1/queries/{query_id}`. The stream finishes with
-`done` and `cancelled: true`. Closing the HTTP connection stops the query too:
+`done` and `cancelled: true`. Only the running batch stops: a session keeps
+its connection, open transaction and temp tables. SQL Server is sent a TDS
+Attention (as SSMS does); only if it does not acknowledge that within 3 s
+does the service fall back to `KILL`, which ends the session. Closing the HTTP
+connection stops the query too:
 the service notices when it can no longer deliver events, and it discards a
 connection that was interrupted instead of returning it to the pool.
 
@@ -200,8 +215,10 @@ open transaction.
 `label`, `object`, `cost`, `rows` and, when analysed, `actual_rows` and
 `actual_ms`, plus engine-specific `props`. `raw` holds the engine's own plan
 (Postgres JSON, SQL Server showplan XML, SQLite rows). With `analyze: true`,
-Postgres and SQL Server execute the statement inside a transaction that is
-always rolled back.
+Postgres and SQL Server execute the statement and always roll it back: in a
+transaction of its own or, on a session with a transaction open, to a
+savepoint, so the rest of that transaction stays. A Postgres transaction that
+already failed (or a SQL Server one that can no longer commit) gets 400.
 
 ## Schema
 
@@ -215,6 +232,11 @@ its owner (Postgres) and the roles and users that could be granted
 privileges; `supported` is `false` on SQLite. `GET
 /v1/connections/{id}/ddl?schema=&name=` returns a best-effort `CREATE`
 script for a table, view or routine. `read` tokens may browse every profile.
+
+`GET /v1/sessions/{id}/schema/columns?schema=&name=` reads a table's columns
+as a session sees it: its search path, current database and temp tables.
+Without `schema`, the table is the one an unqualified name in a statement on
+that session resolves to (an empty list when there is none).
 
 ## Administration
 

@@ -1178,6 +1178,7 @@ impl SqailApp {
                             t.in_transaction = in_tx == Some(true);
                         }
                         self.record_history(tab);
+                        crate::schema::after_run(self, tab);
                     }
                 }
             }

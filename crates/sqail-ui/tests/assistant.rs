@@ -307,6 +307,90 @@ fn adversarial_queries_on_sql_server_change_nothing() {
     );
 }
 
+/// SQL Server has no read-only transaction: assistant queries must take no
+/// shared locks, and give up on a lock long before the query timeout.
+#[test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+fn sql_server_assistant_queries_neither_block_nor_wait() {
+    let f = fixture();
+    let table = format!("sqail_lockwait_{}", Uuid::new_v4().simple());
+    f.rt.block_on(async {
+        admin(&f, f.ms, &format!("CREATE TABLE {table} (n int)")).await;
+        admin(&f, f.ms, &format!("INSERT INTO {table} VALUES (1)")).await;
+        let backend = ServiceBackend::connect(&f.target, f.ms).await.unwrap();
+        let r = backend
+            .query(
+                "SELECT @@LOCK_TIMEOUT, transaction_isolation_level \
+                 FROM sys.dm_exec_sessions WHERE session_id = @@SPID",
+                1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.rows[0][0], json!(5000), "{:?}", r.rows);
+        // 1 = READ UNCOMMITTED, 5 = SNAPSHOT.
+        let level = r.rows[0][1].as_i64().unwrap();
+        assert!(level == 1 || level == 5, "isolation level {level}");
+
+        // Another session holds an exclusive lock on the only row.
+        let client = Client::new(&f.target).unwrap();
+        let other = client.open_session(f.ms).await.unwrap().id;
+        let held = client
+            .query_all(
+                On::Session(other),
+                &QueryRequest::new(format!("BEGIN TRANSACTION; UPDATE {table} SET n = 2")),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !held.iter().any(|e| matches!(e, QueryEvent::Error { .. })),
+            "{held:?}"
+        );
+        // A plain read does not wait for it.
+        let start = std::time::Instant::now();
+        let rows = backend
+            .query(&format!("SELECT n FROM {table}"), 5)
+            .await
+            .unwrap();
+        assert_eq!(rows.rows.len(), 1);
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            start.elapsed()
+        );
+        // A read that asks for a shared lock gives up after the lock
+        // timeout, not the 30 s query timeout.
+        let start = std::time::Instant::now();
+        let err = backend
+            .query(
+                &format!("SELECT n FROM {table} WITH (READCOMMITTEDLOCK)"),
+                5,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("Lock request time out"),
+            "{err:#}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "{:?}",
+            start.elapsed()
+        );
+        // The assistant's session is still usable.
+        assert_eq!(
+            count(&backend, "SELECT COUNT(*) FROM sys.objects WHERE 1 = 0").await,
+            0
+        );
+        client
+            .query_all(On::Session(other), &QueryRequest::new("ROLLBACK"))
+            .await
+            .unwrap();
+        client.close_session(other).await.unwrap();
+        backend.close().await;
+        admin(&f, f.ms, &format!("DROP TABLE {table}")).await;
+    });
+}
+
 async fn count(b: &ServiceBackend, sql: &str) -> i64 {
     let rows = b.query(sql, 1).await.unwrap();
     rows.rows[0][0].as_i64().unwrap()

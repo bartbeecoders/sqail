@@ -232,6 +232,28 @@ fn section(ui: &mut egui::Ui, section: Section, s: &mut Settings) {
                     ui.checkbox(&mut s.multiline_rows, "Multi-line rows");
                 },
             );
+            row(
+                ui,
+                "CSV export",
+                "Excel on Windows needs the byte order mark to read accented and other \
+                 non-ASCII text correctly.",
+                |ui, _| {
+                    ui.checkbox(&mut s.export_csv_bom, "Write a UTF-8 BOM");
+                },
+            );
+            row(
+                ui,
+                "CSV text for NULL",
+                "Empty: NULL and an empty string both export as an empty field.",
+                |ui, label| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut s.export_csv_null)
+                            .hint_text("e.g. NULL or \\N")
+                            .desired_width(120.0),
+                    )
+                    .labelled_by(label);
+                },
+            );
         }
         Section::Service => {
             row(

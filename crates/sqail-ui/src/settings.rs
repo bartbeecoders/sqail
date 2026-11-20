@@ -27,6 +27,11 @@ pub struct Settings {
     /// Result grid: wrap values and show their line breaks, rows growing to
     /// fit (up to 10 lines).
     pub multiline_rows: bool,
+    /// CSV exports start with a UTF-8 byte order mark, so Excel on Windows
+    /// reads them as UTF-8.
+    pub export_csv_bom: bool,
+    /// CSV exports write NULL as this text (empty: like an empty string).
+    pub export_csv_null: String,
     /// Open completions while typing (Ctrl+Space always works).
     pub autocomplete: bool,
     pub format_uppercase: bool,
@@ -117,6 +122,8 @@ impl Default for Settings {
             pinned_tabs_row: true,
             max_rows: 100_000,
             multiline_rows: false,
+            export_csv_bom: cfg!(windows),
+            export_csv_null: String::new(),
             autocomplete: true,
             format_uppercase: true,
             format_indent: 2,

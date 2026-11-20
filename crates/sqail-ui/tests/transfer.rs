@@ -19,6 +19,10 @@ struct Svc {
 }
 
 fn svc() -> Svc {
+    svc_with(|_| {})
+}
+
+fn svc_with(tweak: impl FnOnce(&mut sqail_service::Config)) -> Svc {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -29,6 +33,7 @@ fn svc() -> Svc {
         ..Default::default()
     };
     cfg.sqlite.allowed_dirs = vec![dir.path().to_path_buf(), root.join("dev/data")];
+    tweak(&mut cfg);
     std::fs::create_dir_all(&cfg.data_dir).unwrap();
     let server = rt.block_on(sqail_service::start(cfg)).unwrap();
     let client = Client::new(&Target {
@@ -108,15 +113,17 @@ fn round_trip(
             None,
             &csv,
             Format::Csv,
+            &transfer::ExportOptions::default(),
             |_| {},
         ))
-        .unwrap();
+        .unwrap()
+        .rows;
     assert!(exported > 0);
 
     let columns =
         s.rt.block_on(s.client.columns(conn, schema, target))
             .unwrap();
-    let preview = transfer::preview_csv(&csv, true).unwrap();
+    let preview = transfer::preview_csv(&csv, true, None, None).unwrap();
     let spec = ImportSpec {
         connection: conn,
         engine,
@@ -126,6 +133,7 @@ fn round_trip(
         columns,
         has_header: true,
         delimiter: preview.delimiter,
+        encoding: preview.encoding,
         empty_is_null: true,
     };
     assert!(
@@ -134,8 +142,14 @@ fn round_trip(
         spec.mapping
     );
     let imported =
-        s.rt.block_on(transfer::import_csv(&s.client, &csv, &spec, |_| {}))
-            .unwrap();
+        s.rt.block_on(transfer::import_csv(
+            &s.client,
+            &csv,
+            &spec,
+            &Default::default(),
+            |_| {},
+        ))
+        .unwrap();
     assert_eq!(imported, exported);
     let source_rows = s.rows(conn, &compare.replace("{t}", source));
     let target_rows = s.rows(conn, &compare.replace("{t}", target));
@@ -183,7 +197,7 @@ line'), (3, 'Grace', NULL, '');
     let columns =
         s.rt.block_on(s.client.columns(conn, Some("main"), "dst"))
             .unwrap();
-    let preview = transfer::preview_csv(&csv, true).unwrap();
+    let preview = transfer::preview_csv(&csv, true, None, None).unwrap();
     let spec = ImportSpec {
         connection: conn,
         engine: Engine::Sqlite,
@@ -193,11 +207,18 @@ line'), (3, 'Grace', NULL, '');
         columns,
         has_header: true,
         delimiter: b',',
+        encoding: transfer::Encoding::Utf8,
         empty_is_null: true,
     };
     let err =
-        s.rt.block_on(transfer::import_csv(&s.client, &csv, &spec, |_| {}))
-            .unwrap_err();
+        s.rt.block_on(transfer::import_csv(
+            &s.client,
+            &csv,
+            &spec,
+            &Default::default(),
+            |_| {},
+        ))
+        .unwrap_err();
     assert!(format!("{err:#}").contains("UNIQUE"), "{err:#}");
     assert_eq!(
         s.rows(conn, "SELECT count(*) FROM dst"),
@@ -241,11 +262,18 @@ line'), (3, 'Grace', NULL, '');
         columns,
         has_header: true,
         delimiter: b',',
+        encoding: transfer::Encoding::Utf8,
         empty_is_null: true,
     };
     let err =
-        s.rt.block_on(transfer::import_csv(&s.client, &csv, &spec, |_| {}))
-            .unwrap_err();
+        s.rt.block_on(transfer::import_csv(
+            &s.client,
+            &csv,
+            &spec,
+            &Default::default(),
+            |_| {},
+        ))
+        .unwrap_err();
     let err = format!("{err:#}");
     assert!(
         err.contains("CSV line 3, column b: 'hello' is not a binary value"),
@@ -255,6 +283,113 @@ line'), (3, 'Grace', NULL, '');
         s.rows(conn, "SELECT count(*) FROM bdst"),
         vec![vec![serde_json::json!(4)]]
     );
+}
+
+/// Import options and failures: rows with too few fields are refused with
+/// their physical line, other encodings and delimiters import, and Cancel
+/// rolls back.
+#[test]
+fn csv_import_checks_rows_encodings_and_cancel() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let s = svc();
+    let conn = s.connect(
+        "lite",
+        ConnectionParams::Sqlite(SqliteParams {
+            path: s.dir.path().join("imp.db").to_string_lossy().into(),
+            create: true,
+        }),
+        None,
+    );
+    s.rows(
+        conn,
+        "CREATE TABLE p (id INTEGER PRIMARY KEY, name TEXT, note TEXT)",
+    );
+    let columns =
+        s.rt.block_on(s.client.columns(conn, Some("main"), "p"))
+            .unwrap();
+    let import = |name: &str, bytes: &[u8], cancel: &AtomicBool, after: &dyn Fn(u64)| {
+        let csv = s.dir.path().join(name);
+        std::fs::write(&csv, bytes).unwrap();
+        let preview = transfer::preview_csv(&csv, true, None, None).unwrap();
+        let spec = ImportSpec {
+            connection: conn,
+            engine: Engine::Sqlite,
+            schema: Some("main".into()),
+            table: "p".into(),
+            mapping: transfer::auto_map(&preview.headers, &columns),
+            columns: columns.clone(),
+            has_header: true,
+            delimiter: preview.delimiter,
+            encoding: preview.encoding,
+            empty_is_null: true,
+        };
+        s.rt.block_on(transfer::import_csv(&s.client, &csv, &spec, cancel, after))
+            .map_err(|e| format!("{e:#}"))
+    };
+    let go = AtomicBool::new(false);
+    let count = || s.rows(conn, "SELECT count(*) FROM p")[0][0].clone();
+
+    // Line 4 is short; line 2's quoted note spans two lines, so it is the
+    // fourth line of the file, not the third record.
+    let err = import(
+        "short.csv",
+        b"id,name,note\n1,a,\"two\nlines\"\n2,b\n3,c,x\n",
+        &go,
+        &|_| {},
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("CSV line 4 has 2 fields, the header has 3"),
+        "{err}"
+    );
+    assert_eq!(count(), serde_json::json!(0));
+
+    // Windows-1252 with semicolons (and a comma in a value).
+    let n = import(
+        "ansi.csv",
+        b"id;name;note\n1;Ren\xE9e;\x80 5, more\n",
+        &go,
+        &|_| {},
+    )
+    .unwrap();
+    assert_eq!(n, 1);
+    // UTF-16 with a BOM, tab-separated.
+    let mut utf16 = vec![0xFF, 0xFE];
+    utf16.extend(
+        "id\tname\tnote\n2\t日本\t😀\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes),
+    );
+    assert_eq!(import("u16.csv", &utf16, &go, &|_| {}).unwrap(), 1);
+    assert_eq!(
+        s.rows(conn, "SELECT id, name, note FROM p ORDER BY id"),
+        vec![
+            vec![
+                serde_json::json!(1),
+                serde_json::json!("Renée"),
+                serde_json::json!("€ 5, more")
+            ],
+            vec![
+                serde_json::json!(2),
+                serde_json::json!("日本"),
+                serde_json::json!("😀")
+            ],
+        ]
+    );
+
+    // Cancelled after the first batch: nothing stays.
+    let mut big = String::from("id,name,note\n");
+    for i in 100..3100 {
+        big.push_str(&format!("{i},n{i},\n"));
+    }
+    let cancel = AtomicBool::new(false);
+    let err = import("big.csv", big.as_bytes(), &cancel, &|n| {
+        assert!(n < 3000, "the import ran to the end");
+        cancel.store(true, Ordering::Relaxed);
+    })
+    .unwrap_err();
+    assert!(err.contains("cancelled"), "{err}");
+    assert_eq!(count(), serde_json::json!(2));
 }
 
 /// "Export whole result" re-runs only the statement behind the result, on
@@ -298,10 +433,12 @@ fn whole_export_reruns_one_statement_on_the_session() {
             Some(cols),
             &path,
             Format::Csv,
+            &transfer::ExportOptions::default(),
             |_| {},
         ))
     };
-    assert_eq!(export(&["a".into()]).unwrap(), 1);
+    let done = export(&["a".into()]).unwrap();
+    assert_eq!((done.rows, done.truncated), (1, false));
     assert_eq!(std::fs::read_to_string(&path).unwrap().trim(), "a\n7");
     // The write ran once, with the script.
     assert_eq!(
@@ -310,6 +447,108 @@ fn whole_export_reruns_one_statement_on_the_session() {
     );
     // A different shape than the result shown is refused.
     assert!(export(&["b".into()]).is_err());
+}
+
+/// A whole-query export that stops at the service's `limits.max_rows` says
+/// so instead of passing for the complete result.
+#[test]
+fn whole_export_reports_the_service_row_limit() {
+    let s = svc_with(|cfg| {
+        cfg.limits.default_max_rows = 3;
+        cfg.limits.max_rows = 5;
+    });
+    let conn = s.connect(
+        "lite",
+        ConnectionParams::Sqlite(SqliteParams {
+            path: s.dir.path().join("cap.db").to_string_lossy().into(),
+            create: true,
+        }),
+        None,
+    );
+    let path = s.dir.path().join("cap.csv");
+    let export = |sql: &str| {
+        s.rt.block_on(transfer::export_query(
+            &s.client,
+            On::Connection(conn),
+            Engine::Sqlite,
+            sql,
+            None,
+            &path,
+            Format::Csv,
+            &transfer::ExportOptions::default(),
+            |_| {},
+        ))
+        .unwrap()
+    };
+    let many = "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 8) \
+                SELECT i FROM n";
+    let done = export(many);
+    assert_eq!((done.rows, done.truncated), (5, true));
+    assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 6);
+    let (text, warning) = transfer::export_notice(done.rows, &path, done.truncated, true);
+    assert!(warning && text.contains("rows are missing"), "{text}");
+
+    let done = export("SELECT 1 AS i UNION ALL SELECT 2");
+    assert_eq!((done.rows, done.truncated), (2, false));
+}
+
+/// An export that fails midway (here a runtime error after some rows)
+/// leaves no partial file, and an existing file untouched.
+#[test]
+fn failed_export_leaves_no_partial_file() {
+    let s = svc();
+    let conn = s.connect(
+        "lite",
+        ConnectionParams::Sqlite(SqliteParams {
+            path: s.dir.path().join("fail.db").to_string_lossy().into(),
+            create: true,
+        }),
+        None,
+    );
+    let out = s.dir.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+    let sql = "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 5000) \
+               SELECT CASE WHEN i < 4000 THEN i ELSE abs(-9223372036854775807 - 1) END AS i FROM n";
+    for format in Format::ALL {
+        let path = out.join(format!("fail.{}", format.extension()));
+        let mut written = 0;
+        let err =
+            s.rt.block_on(transfer::export_query(
+                &s.client,
+                On::Connection(conn),
+                Engine::Sqlite,
+                sql,
+                None,
+                &path,
+                format,
+                &transfer::ExportOptions::default(),
+                |n| written = n,
+            ))
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("overflow"), "{err:#}");
+        // Rows were written before the error.
+        assert!(written > 0, "{format:?}");
+    }
+    let left: Vec<_> = std::fs::read_dir(&out).unwrap().collect();
+    assert!(left.is_empty(), "{left:?}");
+
+    let path = out.join("keep.csv");
+    std::fs::write(&path, "old").unwrap();
+    assert!(
+        s.rt.block_on(transfer::export_query(
+            &s.client,
+            On::Connection(conn),
+            Engine::Sqlite,
+            sql,
+            None,
+            &path,
+            Format::Csv,
+            &transfer::ExportOptions::default(),
+            |_| {},
+        ))
+        .is_err()
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "old");
 }
 
 #[test]
@@ -428,6 +667,92 @@ fn rss_kb() -> u64 {
         .unwrap_or(0)
 }
 
+/// SQL INSERT and JSON exports of Postgres numeric NaN, bigints and jsonb
+/// give valid SQL and native JSON.
+#[test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+fn postgres_exports_keep_values_exact() {
+    let s = svc();
+    let pg = s.connect(
+        "pg",
+        ConnectionParams::Postgres(PostgresParams {
+            host: "127.0.0.1".into(),
+            port: 55432,
+            database: "sqail_test".into(),
+            user: "sqail".into(),
+            ssl_mode: PgSslMode::Disable,
+            ssl_root_cert: None,
+            ssl_client_cert: None,
+        }),
+        Some("sqail_dev_pw"),
+    );
+    let sql = "SELECT 'NaN'::numeric AS n, 1234567890123456789::bigint AS id, \
+               '{\"k\": 1}'::jsonb AS j";
+    let export = |format: Format, table: Option<&str>| {
+        let path = s.dir.path().join(format!("pg.{}", format.extension()));
+        s.rt.block_on(transfer::export_query(
+            &s.client,
+            On::Connection(pg),
+            Engine::Postgres,
+            sql,
+            None,
+            &path,
+            format,
+            &transfer::ExportOptions {
+                table: table.map(String::from),
+                ..Default::default()
+            },
+            |_| {},
+        ))
+        .unwrap();
+        std::fs::read_to_string(&path).unwrap()
+    };
+    let json: serde_json::Value = serde_json::from_str(&export(Format::Json, None)).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!([{"n": "NaN", "id": 1234567890123456789i64, "j": {"k": 1}}])
+    );
+    let t = format!("it_exact_{}", &Uuid::new_v4().simple().to_string()[..8]);
+    let insert = export(Format::Sql, Some(&t));
+    assert!(insert.contains("'NaN'"), "{insert}");
+    let session = s.rt.block_on(s.client.open_session(pg)).unwrap().id;
+    let run = |sql: &str| {
+        let events =
+            s.rt.block_on(
+                s.client
+                    .query_all(On::Session(session), &QueryRequest::new(sql)),
+            )
+            .unwrap();
+        for e in &events {
+            if let QueryEvent::Error { message, .. } = e {
+                panic!("{sql}: {message}");
+            }
+        }
+        events
+    };
+    run(&format!(
+        "CREATE TEMP TABLE {t} (n numeric, id bigint, j jsonb)"
+    ));
+    run(&insert);
+    let rows: Vec<_> = run(&format!("SELECT n::text, id, j->>'k' FROM {t}"))
+        .into_iter()
+        .filter_map(|e| match e {
+            QueryEvent::Rows { rows, .. } => Some(rows),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(
+        rows,
+        vec![vec![
+            serde_json::json!("NaN"),
+            serde_json::json!(1234567890123456789i64),
+            serde_json::json!("1")
+        ]]
+    );
+    let _ = s.rt.block_on(s.client.close_session(session));
+}
+
 #[test]
 #[ignore = "needs podman test databases (scripts/db.sh up)"]
 fn million_row_export_streams_with_flat_memory() {
@@ -457,9 +782,11 @@ fn million_row_export_streams_with_flat_memory() {
             None,
             &path,
             Format::Csv,
+            &transfer::ExportOptions::default(),
             |_| peak = peak.max(rss_kb()),
         ))
-        .unwrap();
+        .unwrap()
+        .rows;
     assert_eq!(n, 1_014_900);
     let size = std::fs::metadata(&path).unwrap().len();
     eprintln!(

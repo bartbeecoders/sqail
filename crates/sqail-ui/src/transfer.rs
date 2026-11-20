@@ -314,6 +314,34 @@ fn executed_statements(script: &str, engine: Engine) -> Vec<&str> {
     out.into_iter().map(|r| &script[r]).collect()
 }
 
+/// What an export wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Exported {
+    pub rows: u64,
+    /// The rows stopped at a row limit: the query returns more than the file
+    /// holds.
+    pub truncated: bool,
+}
+
+/// The notice after an export of `rows` rows to `path`, and whether it is a
+/// warning. `whole` is a re-run of the query (cut off by the service's
+/// `limits.max_rows`), otherwise the shown result (cut off by the tab's row
+/// limit).
+pub fn export_notice(rows: u64, path: &Path, truncated: bool, whole: bool) -> (String, bool) {
+    let done = format!("Exported {rows} rows to {}", path.display());
+    if !truncated {
+        return (done, false);
+    }
+    let remedy = if whole {
+        "the service stopped at its row limit (limits.max_rows in its config), so rows are \
+         missing. Raise that limit to export them all."
+    } else {
+        "the result was cut off at the row limit, so rows are missing. Use Export → Whole \
+         query to export them all."
+    };
+    (format!("{done}, but {remedy}"), true)
+}
+
 /// Run `sql` (one statement) and stream its first result set to `path`
 /// without holding the rows in memory. `progress` gets row counts. With
 /// `expect_columns`, the export is refused unless the result has exactly
@@ -328,7 +356,7 @@ pub async fn export_query(
     path: &Path,
     format: Format,
     mut progress: impl FnMut(u64),
-) -> Result<u64> {
+) -> Result<Exported> {
     let req = QueryRequest {
         sql: sql.to_string(),
         params: vec![],
@@ -340,6 +368,7 @@ pub async fn export_query(
     let mut stream = client.query(on, &req).await?;
     let mut exporter: Option<Exporter> = None;
     let mut error = None;
+    let mut truncated = false;
     while let Some(ev) = stream.events.next().await {
         match ev? {
             QueryEvent::ResultStart { index: 0, columns } => {
@@ -359,6 +388,11 @@ pub async fn export_query(
                     progress(ex.rows);
                 }
             }
+            QueryEvent::ResultEnd {
+                index: 0,
+                truncated: t,
+                ..
+            } => truncated = t,
             QueryEvent::Error { message, .. } => error = Some(message),
             _ => {}
         }
@@ -367,7 +401,10 @@ pub async fn export_query(
         bail!(e);
     }
     match exporter {
-        Some(ex) => ex.finish(),
+        Some(ex) => Ok(Exported {
+            rows: ex.finish()?,
+            truncated,
+        }),
         None => bail!("the query returned no result set"),
     }
 }
@@ -679,6 +716,22 @@ mod tests {
         assert!(ms("SELECT 1\nSELECT 2", 1, 2).is_err());
         assert!(ms("INSERT INTO t VALUES (1)\nSELECT * FROM t", 0, 1).is_err());
         assert_eq!(ms("SELECT 1\nGO\nSELECT 2\nGO", 1, 2).unwrap(), "SELECT 2");
+    }
+
+    #[test]
+    fn truncated_exports_say_rows_are_missing() {
+        let p = Path::new("out.csv");
+        let (text, warn) = export_notice(5, p, false, false);
+        assert_eq!(text, "Exported 5 rows to out.csv");
+        assert!(!warn);
+        let (text, warn) = export_notice(100_000, p, true, false);
+        assert!(warn);
+        assert!(text.contains("rows are missing"), "{text}");
+        assert!(text.contains("Whole query"), "{text}");
+        let (text, warn) = export_notice(5_000_000, p, true, true);
+        assert!(warn);
+        assert!(text.contains("rows are missing"), "{text}");
+        assert!(text.contains("limits.max_rows"), "{text}");
     }
 
     #[test]

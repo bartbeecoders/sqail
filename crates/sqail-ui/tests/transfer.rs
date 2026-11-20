@@ -19,6 +19,10 @@ struct Svc {
 }
 
 fn svc() -> Svc {
+    svc_with(|_| {})
+}
+
+fn svc_with(tweak: impl FnOnce(&mut sqail_service::Config)) -> Svc {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -29,6 +33,7 @@ fn svc() -> Svc {
         ..Default::default()
     };
     cfg.sqlite.allowed_dirs = vec![dir.path().to_path_buf(), root.join("dev/data")];
+    tweak(&mut cfg);
     std::fs::create_dir_all(&cfg.data_dir).unwrap();
     let server = rt.block_on(sqail_service::start(cfg)).unwrap();
     let client = Client::new(&Target {
@@ -110,7 +115,8 @@ fn round_trip(
             Format::Csv,
             |_| {},
         ))
-        .unwrap();
+        .unwrap()
+        .rows;
     assert!(exported > 0);
 
     let columns =
@@ -301,7 +307,8 @@ fn whole_export_reruns_one_statement_on_the_session() {
             |_| {},
         ))
     };
-    assert_eq!(export(&["a".into()]).unwrap(), 1);
+    let done = export(&["a".into()]).unwrap();
+    assert_eq!((done.rows, done.truncated), (1, false));
     assert_eq!(std::fs::read_to_string(&path).unwrap().trim(), "a\n7");
     // The write ran once, with the script.
     assert_eq!(
@@ -310,6 +317,48 @@ fn whole_export_reruns_one_statement_on_the_session() {
     );
     // A different shape than the result shown is refused.
     assert!(export(&["b".into()]).is_err());
+}
+
+/// A whole-query export that stops at the service's `limits.max_rows` says
+/// so instead of passing for the complete result.
+#[test]
+fn whole_export_reports_the_service_row_limit() {
+    let s = svc_with(|cfg| {
+        cfg.limits.default_max_rows = 3;
+        cfg.limits.max_rows = 5;
+    });
+    let conn = s.connect(
+        "lite",
+        ConnectionParams::Sqlite(SqliteParams {
+            path: s.dir.path().join("cap.db").to_string_lossy().into(),
+            create: true,
+        }),
+        None,
+    );
+    let path = s.dir.path().join("cap.csv");
+    let export = |sql: &str| {
+        s.rt.block_on(transfer::export_query(
+            &s.client,
+            On::Connection(conn),
+            Engine::Sqlite,
+            sql,
+            None,
+            &path,
+            Format::Csv,
+            |_| {},
+        ))
+        .unwrap()
+    };
+    let many = "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 8) \
+                SELECT i FROM n";
+    let done = export(many);
+    assert_eq!((done.rows, done.truncated), (5, true));
+    assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 6);
+    let (text, warning) = transfer::export_notice(done.rows, &path, done.truncated, true);
+    assert!(warning && text.contains("rows are missing"), "{text}");
+
+    let done = export("SELECT 1 AS i UNION ALL SELECT 2");
+    assert_eq!((done.rows, done.truncated), (2, false));
 }
 
 #[test]
@@ -459,7 +508,8 @@ fn million_row_export_streams_with_flat_memory() {
             Format::Csv,
             |_| peak = peak.max(rss_kb()),
         ))
-        .unwrap();
+        .unwrap()
+        .rows;
     assert_eq!(n, 1_014_900);
     let size = std::fs::metadata(&path).unwrap().len();
     eprintln!(

@@ -195,6 +195,10 @@ impl Assistant {
                     self.entries.push(Entry::Note(format!("${cost:.4}")));
                 }
             }
+            Update::Event(Event::Error(e)) => self.entries.push(Entry::Error(e)),
+            Update::Event(Event::McpFailed { server, status }) => self.entries.push(Entry::Error(
+                format!("The MCP server `{server}` did not start (status: {status})."),
+            )),
             Update::Finished(result) => {
                 self.running = None;
                 if let Err(e) = result {
@@ -235,15 +239,25 @@ impl SqailApp {
         }
         let tab = self.tabs.get(self.active);
         // A chat stays on the connection it started with.
-        let conn_id = match &self.assistant.conversation {
-            Some(c) => Some(c.connection),
-            None => tab.and_then(|t| t.connection),
+        let conn = match &self.assistant.conversation {
+            Some(c) => self.service.connection(c.connection).ok_or_else(|| {
+                format!(
+                    "This chat's connection “{}” is no longer available (deleted, or another \
+                     service is connected). Start a new chat.",
+                    c.connection_name
+                )
+            }),
+            None => tab
+                .and_then(|t| t.connection)
+                .and_then(|id| self.service.connection(id))
+                .ok_or_else(|| "Choose a connection for the editor tab first.".to_string()),
         };
-        let Some(conn) = conn_id.and_then(|id| self.service.connection(id)).cloned() else {
-            self.assistant.entries.push(Entry::Error(
-                "Choose a connection for the editor tab first.".into(),
-            ));
-            return;
+        let conn = match conn {
+            Ok(c) => c.clone(),
+            Err(e) => {
+                self.assistant.entries.push(Entry::Error(e));
+                return;
+            }
         };
         let (Some(profile), true) = (self.service.profile.clone(), self.service.client.is_some())
         else {
@@ -319,6 +333,7 @@ impl SqailApp {
             workdir: conversation.workdir.clone(),
             mcp_command: vec![exe, "mcp".into()],
             env,
+            limits: cli::Limits::default(),
         };
         self.assistant.entries.push(Entry::User(question));
         self.assistant.input.clear();
@@ -424,6 +439,13 @@ mod tests {
             }),
         );
         assert_eq!(a.entries.last(), Some(&Entry::Answer("Answer".into())));
+    }
+
+    #[test]
+    fn error_events_become_error_entries() {
+        let mut a = running();
+        a.apply(1, Update::Event(Event::Error("tools failed".into())));
+        assert_eq!(a.entries, [Entry::Error("tools failed".into())]);
     }
 
     #[test]

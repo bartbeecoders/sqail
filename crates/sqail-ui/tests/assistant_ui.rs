@@ -197,4 +197,16 @@ fn assistant_panel_streams_an_answer_and_inserts_sql() {
     assert_eq!(app.tabs.len(), tabs + 1);
     assert_eq!(app.tabs[app.active].text, SQL);
     assert_eq!(app.tabs[app.active].connection, Some(conn));
+
+    // The chat's connection disappears (deleted, or another service): the
+    // next question says so instead of asking for a connection.
+    h.state_mut().service.connections.clear();
+    h.state_mut().assistant.input = "And now?".into();
+    h.state_mut().assistant_send();
+    assert!(
+        matches!(h.state().assistant.entries.last(),
+            Some(Entry::Error(e)) if e.contains("“people db” is no longer available")),
+        "{:?}",
+        h.state().assistant.entries.last()
+    );
 }

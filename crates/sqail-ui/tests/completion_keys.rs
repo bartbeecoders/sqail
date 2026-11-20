@@ -20,6 +20,9 @@ impl Catalog for Fake {
             schema: Some("public".into()),
             name: n.into(),
             kind: TableKind::Table,
+            foreign: false,
+            partitioned: false,
+            partition_of: None,
         };
         Some(vec![t("orders"), t("customers")])
     }

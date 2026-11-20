@@ -154,6 +154,9 @@ impl sqail_ui::sql::complete::Catalog for Catalog {
             schema: Some(schema.into()),
             name: "orders".into(),
             kind: TableKind::Table,
+            foreign: false,
+            partitioned: false,
+            partition_of: None,
         }])
     }
     fn columns(&self, _: &str, _: &str) -> Option<Vec<ColumnInfo>> {

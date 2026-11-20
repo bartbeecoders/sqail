@@ -535,6 +535,9 @@ mod tests {
                 schema: Some("sales".into()),
                 name: "orders".into(),
                 kind: TableKind::Table,
+                foreign: false,
+                partitioned: false,
+                partition_of: None,
             }])
         }
         async fn describe(

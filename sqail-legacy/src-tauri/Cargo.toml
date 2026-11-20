@@ -34,7 +34,7 @@ hex = "0.4"
 sha2 = "0.10"
 aes-gcm = "0.10"
 argon2 = "0.5"
-rand = "0.8"
+rand = "0.9"
 base64 = "0.22"
 tiberius = { version = "0.12", default-features = false, features = ["tds73", "native-tls"] }
 bb8 = "0.8"
@@ -51,10 +51,10 @@ tauri-plugin-updater = "2.10.1"
 tauri-plugin-process = "2.3.1"
 
 # Git integration (libgit2 bindings).
-git2 = { version = "0.19", default-features = false, features = ["https", "vendored-libgit2", "vendored-openssl"] }
+git2 = { version = "0.20", default-features = false, features = ["https", "vendored-libgit2", "vendored-openssl"] }
 
 # Archive extraction for the runtime-downloaded llama-server sidecar.
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "4", default-features = false, features = ["deflate"] }
 flate2 = "1"
 tar = "0.4"
 

@@ -2577,6 +2577,9 @@ impl SqailApp {
         if grid_out.cancel {
             self.cancel_run(idx);
         }
+        if grid_out.ask_assistant {
+            self.assistant_ask_about_error(idx);
+        }
         if let Some(v) = grid_out.view {
             self.viewer = Some(v);
         }

@@ -14,6 +14,7 @@ use sqail_client::{Client, Target, Trust};
 use sqail_ui::SqailApp;
 use sqail_ui::app::ServiceStatus;
 use sqail_ui::assistant::Entry;
+use sqail_ui::results::{Message, Run, Severity};
 use sqail_ui::settings::{ServiceProfile, Settings};
 
 const SQL: &str = "SELECT name, score FROM people ORDER BY score DESC";
@@ -197,4 +198,96 @@ fn assistant_panel_streams_an_answer_and_inserts_sql() {
     assert_eq!(app.tabs.len(), tabs + 1);
     assert_eq!(app.tabs[app.active].text, SQL);
     assert_eq!(app.tabs[app.active].connection, Some(conn));
+}
+
+/// "Ask assistant" on a failed run sends that run's SQL and error, without
+/// the editor context on top, and opens the panel.
+#[test]
+fn ask_assistant_on_a_failed_query() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = sqail_service::Config {
+        data_dir: dir.path().join("service"),
+        bind: "127.0.0.1:0".parse().unwrap(),
+        docs_ui: false,
+        ..Default::default()
+    };
+    cfg.sqlite.allowed_dirs = vec![dir.path().to_path_buf()];
+    std::fs::create_dir_all(&cfg.data_dir).unwrap();
+    let server = rt.block_on(sqail_service::start(cfg)).unwrap();
+    let url = format!("https://{}", server.addr);
+    let token = server.bootstrap_token.clone().unwrap();
+    let client = Client::new(&Target {
+        url: url.clone(),
+        token: token.clone(),
+        trust: Trust::Pinned(server.fingerprint.clone()),
+        identity: None,
+    })
+    .unwrap();
+    rt.block_on(client.create_connection(&ConnectionInput {
+        name: "people db".into(),
+        params: ConnectionParams::Sqlite(SqliteParams {
+            path: dir.path().join("people.db").to_string_lossy().into(),
+            create: true,
+        }),
+        password: None,
+        ssl_client_key: None,
+        read_only: false,
+        color: None,
+        environment: None,
+        folder: None,
+    }))
+    .unwrap();
+
+    sqail_ui::settings::override_config_dir(dir.path().join("ui"));
+    sqail_ui::secrets::force_file_store();
+    let mut settings = Settings::default();
+    settings.upsert_service(ServiceProfile {
+        name: "test".into(),
+        url: url.clone(),
+        fingerprint: Some(server.fingerprint.clone()),
+        local: false,
+        client_cert: None,
+        client_key: None,
+    });
+    settings.assistant.open = false;
+    settings.assistant.claude_path = Some(fake_claude(dir.path()));
+    settings.save();
+    sqail_ui::secrets::save_token(&url, &token).unwrap();
+
+    let mut h = Harness::builder()
+        .with_size([1400.0, 850.0])
+        .build_eframe(|cc| SqailApp::new(cc));
+    step_until(&mut h, "service", |a| {
+        a.service.status == ServiceStatus::Connected && !a.service.connections.is_empty()
+    });
+    let conn = h.state().service.connections[0].id;
+    h.state_mut().tabs[0].connection = Some(conn);
+    h.state_mut().tabs[0].text = "SELECT nope FROM people".into();
+    h.step();
+    let mut run = Run::new(1, "SELECT nope FROM people".into());
+    run.running = false;
+    run.failed = true;
+    run.messages.push(Message {
+        severity: Severity::Error,
+        text: "no such table: people".into(),
+    });
+    h.state_mut().tabs[0].run = Some(run);
+    h.step();
+
+    h.get_by_label("Ask assistant").click();
+    step_until(&mut h, "the answer", |a| {
+        !a.assistant.is_running() && a.assistant.entries.len() >= 4
+    });
+    assert!(h.state().settings.assistant.open);
+    let stdin = std::fs::read_to_string(dir.path().join("stdin.txt")).unwrap();
+    assert_eq!(
+        stdin,
+        "This query failed:\n```sql\nSELECT nope FROM people\n```\nError:\n```\nno such table: people\n```\nWhy, and how do I fix it?"
+    );
+    assert!(
+        matches!(&h.state().assistant.entries[0], Entry::User(q) if q.starts_with("This query failed:")),
+        "{:?}",
+        h.state().assistant.entries[0]
+    );
 }

@@ -291,8 +291,11 @@ fn section(ui: &mut egui::Ui, section: Section, s: &mut Settings) {
                 "Rows shown to the model",
                 "Most rows of one query result the assistant sees.",
                 |ui, label| {
-                    ui.add(egui::DragValue::new(&mut a.max_rows).range(1..=10_000))
-                        .labelled_by(label);
+                    ui.add(
+                        egui::DragValue::new(&mut a.max_rows)
+                            .range(1..=crate::assistant::mcp::MAX_ROWS_LIMIT),
+                    )
+                    .labelled_by(label);
                 },
             );
             row(ui, "Context", "", |ui, _| {

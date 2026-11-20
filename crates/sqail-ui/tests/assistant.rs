@@ -115,17 +115,22 @@ fn call(id: u32, name: &str, args: Value) -> String {
         + "\n"
 }
 
-/// Replies to `calls`, as (text, is_error).
+/// Replies to `calls`, as (text, is_error), in the order of their ids (the
+/// server answers requests as they finish).
 async fn mcp(backend: &ServiceBackend, calls: &[String]) -> Vec<(String, bool)> {
     let mut out = Vec::new();
     serve(backend, 20, calls.concat().as_bytes(), &mut out)
         .await
         .unwrap();
-    String::from_utf8(out)
+    let mut replies: Vec<Value> = String::from_utf8(out)
         .unwrap()
         .lines()
-        .map(|l| {
-            let v: Value = serde_json::from_str(l).unwrap();
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    replies.sort_by_key(|v| v["id"].as_u64());
+    replies
+        .iter()
+        .map(|v| {
             let r = &v["result"];
             (
                 r["content"][0]["text"].as_str().unwrap().to_string(),
@@ -196,17 +201,20 @@ fn postgres_assistant_transactions_are_read_only() {
         )
         .await;
         assert!(!r[0].1, "{:?}", r[0]);
-        let err = backend
+        // A write past the guard fails: it can't be wrapped in the
+        // function check's view, and the query itself runs read-only.
+        backend
             .query(
                 "INSERT INTO sales.customers (name, email) VALUES ('x', 'assistant@test')",
                 5,
             )
             .await
             .unwrap_err();
-        assert!(
-            format!("{err:#}").contains("read-only transaction"),
-            "{err:#}"
-        );
+        let r = backend
+            .query("SELECT current_setting('transaction_read_only')", 5)
+            .await
+            .unwrap();
+        assert_eq!(r.rows[0][0], json!("on"));
         // The session is usable again afterwards.
         let r = mcp(
             &backend,
@@ -214,6 +222,155 @@ fn postgres_assistant_transactions_are_read_only() {
         )
         .await;
         assert_eq!(r[0], ("one\n1\n(1 row)".into(), false));
+        backend.close().await;
+    });
+}
+
+/// PostgreSQL: a function call passes only when the catalog marks the
+/// function as not volatile, resolved by the server (overloads, schemas,
+/// quoted names, operators); also where the probe view can't be created.
+#[test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+fn postgres_assistant_queries_call_only_non_volatile_functions() {
+    let f = fixture();
+    let s = format!("sqail_fn_{}", Uuid::new_v4().simple());
+    let role = format!("{s}_ro");
+    f.rt.block_on(async {
+        admin(
+            &f,
+            f.pg,
+            &format!(
+                "CREATE SCHEMA {s};
+                 CREATE FUNCTION {s}.vol() RETURNS int LANGUAGE sql VOLATILE AS 'SELECT 1';
+                 CREATE FUNCTION {s}.\"Mixed\"() RETURNS int LANGUAGE sql VOLATILE AS 'SELECT 1';
+                 CREATE FUNCTION {s}.calm() RETURNS int LANGUAGE sql STABLE AS 'SELECT 1';
+                 CREATE FUNCTION {s}.ov(int) RETURNS int LANGUAGE sql IMMUTABLE AS 'SELECT 1';
+                 CREATE FUNCTION {s}.ov(text) RETURNS int LANGUAGE sql VOLATILE AS 'SELECT 1';
+                 CREATE FUNCTION {s}.add_vol(int, int) RETURNS int LANGUAGE sql VOLATILE AS 'SELECT $1 + $2';
+                 CREATE OPERATOR {s}.### (LEFTARG = int, RIGHTARG = int, FUNCTION = {s}.add_vol);
+                 CREATE ROLE {role} LOGIN PASSWORD 'sqail_ro_pw';
+                 ALTER ROLE {role} SET default_transaction_read_only = on;
+                 GRANT USAGE ON SCHEMA {s} TO {role};"
+            ),
+        )
+        .await;
+        let backend = ServiceBackend::connect(&f.target, f.pg).await.unwrap();
+        let refused = [
+            format!("SELECT {s}.vol()"),
+            format!("SELECT \"{s}\".\"vol\" ()"),
+            format!("SELECT {s}.\"Mixed\"()"),
+            format!("SELECT {s}.ov('a'::text)"),
+            format!("SELECT x FROM (SELECT {s}.vol() AS x) q WHERE true"),
+            format!("SELECT 1 OPERATOR({s}.###) 2"),
+            format!("WITH c AS (SELECT {s}.vol()) SELECT 1;"),
+        ];
+        for sql in &refused {
+            let err = backend.query(sql, 5).await.unwrap_err();
+            let err = format!("{err:#}");
+            assert!(err.contains("marks VOLATILE"), "{sql}: {err}");
+        }
+        for sql in [
+            format!("SELECT {s}.calm(), {s}.ov(1), 1 AS a, 2 AS a"),
+            "SELECT random() < 2 AS r, pg_relation_size('sales.orders') >= 0 AS s".into(),
+            "SELECT count(*) FROM sales.orders o WHERE o.id = 1; -- done".into(),
+            "SHOW search_path".into(),
+            "VALUES (1)".into(),
+            "TABLE sales.customers".into(),
+            "SELECT * FROM pg_stat_activity WHERE false".into(),
+        ] {
+            let r = backend.query(&sql, 5).await;
+            assert!(r.is_ok(), "{sql}: {:#}", r.unwrap_err());
+        }
+        // A broken query reports its own error.
+        let err = backend.query("SELECT * FROM no_such_table", 5).await.unwrap_err();
+        assert!(format!("{err:#}").contains("no_such_table"), "{err:#}");
+        // Still read-only after the check.
+        let r = backend
+            .query("SELECT current_setting('transaction_read_only')", 5)
+            .await
+            .unwrap();
+        assert_eq!(r.rows[0][0], json!("on"));
+        backend.close().await;
+
+        // A login whose transactions are read-only by default can't create
+        // the probe view: the check falls back to the names called.
+        let client = Client::new(&f.target).unwrap();
+        let ro = client
+            .create_connection(&ConnectionInput {
+                name: role.clone(),
+                params: ConnectionParams::Postgres(PostgresParams {
+                    host: "127.0.0.1".into(),
+                    port: 55432,
+                    database: "sqail_test".into(),
+                    user: role.clone(),
+                    ssl_mode: PgSslMode::Disable,
+                    ssl_root_cert: None,
+                    ssl_client_cert: None,
+                }),
+                password: Some("sqail_ro_pw".into()),
+                ssl_client_key: None,
+                read_only: false,
+                color: None,
+                environment: None,
+                folder: None,
+            })
+            .await
+            .unwrap()
+            .id;
+        let backend = ServiceBackend::connect(&f.target, ro).await.unwrap();
+        let r = backend
+            .query("SELECT current_setting('default_transaction_read_only')", 5)
+            .await
+            .unwrap();
+        assert_eq!(r.rows[0][0], json!("on"));
+        for sql in &refused[..4] {
+            let err = backend.query(sql, 5).await.unwrap_err();
+            assert!(format!("{err:#}").contains("marks VOLATILE"), "{sql}: {err:#}");
+        }
+        let r = backend.query(&format!("SELECT {s}.calm(), random()"), 5).await;
+        assert!(r.is_ok(), "{:#}", r.unwrap_err());
+        backend.close().await;
+        client.delete_connection(ro).await.unwrap();
+        admin(
+            &f,
+            f.pg,
+            &format!("DROP SCHEMA {s} CASCADE; DROP OWNED BY {role}; DROP ROLE {role}"),
+        )
+        .await;
+    });
+}
+
+/// A query dropped midway (`notifications/cancelled`) leaves its
+/// transaction open on the session: the next query gets a fresh session.
+#[test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+fn a_cancelled_query_does_not_spoil_the_next() {
+    let f = fixture();
+    f.rt.block_on(async {
+        let backend = ServiceBackend::connect(&f.target, f.pg).await.unwrap();
+        let pid = "SELECT pg_backend_pid(), current_setting('transaction_read_only')";
+        let before = backend.query(pid, 5).await.unwrap().rows;
+        let slow = backend.query("SELECT count(*) FROM generate_series(1, 200000000) a", 5);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), slow)
+                .await
+                .is_err(),
+            "the slow query finished"
+        );
+        let start = std::time::Instant::now();
+        let after = backend.query(pid, 5).await.unwrap().rows;
+        // A new session (the old one may still be busy, its transaction
+        // open), in its own read-only transaction, without waiting.
+        assert_ne!(before[0][0], after[0][0]);
+        assert_eq!(after[0][1], json!("on"));
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            start.elapsed()
+        );
+        // Finished queries keep the session.
+        let again = backend.query(pid, 5).await.unwrap().rows;
+        assert_eq!(after[0][0], again[0][0]);
         backend.close().await;
     });
 }
@@ -305,6 +462,90 @@ fn adversarial_queries_on_sql_server_change_nothing() {
             "SELECT 1 IF @@TRANCOUNT > 0 COMMIT DELETE FROM {t}",
         ],
     );
+}
+
+/// SQL Server has no read-only transaction: assistant queries must take no
+/// shared locks, and give up on a lock long before the query timeout.
+#[test]
+#[ignore = "needs podman test databases (scripts/db.sh up)"]
+fn sql_server_assistant_queries_neither_block_nor_wait() {
+    let f = fixture();
+    let table = format!("sqail_lockwait_{}", Uuid::new_v4().simple());
+    f.rt.block_on(async {
+        admin(&f, f.ms, &format!("CREATE TABLE {table} (n int)")).await;
+        admin(&f, f.ms, &format!("INSERT INTO {table} VALUES (1)")).await;
+        let backend = ServiceBackend::connect(&f.target, f.ms).await.unwrap();
+        let r = backend
+            .query(
+                "SELECT @@LOCK_TIMEOUT, transaction_isolation_level \
+                 FROM sys.dm_exec_sessions WHERE session_id = @@SPID",
+                1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.rows[0][0], json!(5000), "{:?}", r.rows);
+        // 1 = READ UNCOMMITTED, 5 = SNAPSHOT.
+        let level = r.rows[0][1].as_i64().unwrap();
+        assert!(level == 1 || level == 5, "isolation level {level}");
+
+        // Another session holds an exclusive lock on the only row.
+        let client = Client::new(&f.target).unwrap();
+        let other = client.open_session(f.ms).await.unwrap().id;
+        let held = client
+            .query_all(
+                On::Session(other),
+                &QueryRequest::new(format!("BEGIN TRANSACTION; UPDATE {table} SET n = 2")),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !held.iter().any(|e| matches!(e, QueryEvent::Error { .. })),
+            "{held:?}"
+        );
+        // A plain read does not wait for it.
+        let start = std::time::Instant::now();
+        let rows = backend
+            .query(&format!("SELECT n FROM {table}"), 5)
+            .await
+            .unwrap();
+        assert_eq!(rows.rows.len(), 1);
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            start.elapsed()
+        );
+        // A read that asks for a shared lock gives up after the lock
+        // timeout, not the 30 s query timeout.
+        let start = std::time::Instant::now();
+        let err = backend
+            .query(
+                &format!("SELECT n FROM {table} WITH (READCOMMITTEDLOCK)"),
+                5,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("Lock request time out"),
+            "{err:#}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "{:?}",
+            start.elapsed()
+        );
+        // The assistant's session is still usable.
+        assert_eq!(
+            count(&backend, "SELECT COUNT(*) FROM sys.objects WHERE 1 = 0").await,
+            0
+        );
+        client
+            .query_all(On::Session(other), &QueryRequest::new("ROLLBACK"))
+            .await
+            .unwrap();
+        client.close_session(other).await.unwrap();
+        backend.close().await;
+        admin(&f, f.ms, &format!("DROP TABLE {table}")).await;
+    });
 }
 
 async fn count(b: &ServiceBackend, sql: &str) -> i64 {

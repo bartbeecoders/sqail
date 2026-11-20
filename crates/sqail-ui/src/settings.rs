@@ -241,7 +241,8 @@ impl Settings {
         // hand-set higher cap is deliberate.
         self.max_rows = self.max_rows.max(1);
         self.format_indent = self.format_indent.clamp(2, 4);
-        self.assistant.max_rows = self.assistant.max_rows.clamp(1, 10_000);
+        self.assistant.max_rows =
+            crate::assistant::mcp::effective_max_rows(self.assistant.max_rows);
     }
 
     pub fn save(&self) {

@@ -7,17 +7,18 @@
 use std::future::Future;
 use std::path::Path;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 use sqail_client::proto::{
-    ColumnInfo, Engine, ForeignKeyInfo, IndexInfo, QueryEvent, QueryRequest, TableInfo, TableKind,
+    ColumnInfo, Engine, ForeignKeyInfo, IndexInfo, Param, QueryEvent, QueryRequest, TableInfo,
+    TableKind,
 };
 use sqail_client::{Client, Identity, On, Target, Trust};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use super::guard::check_read_only;
+use super::guard::{called_names, check_read_only, without_terminator};
 
 /// Environment variables the assistant sets for `sqail mcp`.
 pub struct Env;
@@ -38,6 +39,79 @@ pub const DEFAULT_ROWS: u64 = 100;
 /// Longest cell value shown to the model, in characters.
 const CELL_CHARS: usize = 200;
 const QUERY_TIMEOUT_MS: u64 = 30_000;
+/// The temporary view through which PostgreSQL resolves the functions an
+/// assistant query calls.
+const PG_PROBE: &str = "pg_temp.sqail_assistant_probe";
+
+/// The volatile functions and operator functions the probe view depends on.
+const PG_PROBE_FUNCTIONS: &str = "\
+SELECT DISTINCT n.nspname::text, p.proname::text, pg_catalog.pg_get_function_identity_arguments(p.oid)
+FROM pg_catalog.pg_depend d
+JOIN pg_catalog.pg_rewrite r ON r.oid = d.objid
+LEFT JOIN pg_catalog.pg_operator o
+  ON d.refclassid = 'pg_catalog.pg_operator'::pg_catalog.regclass AND o.oid = d.refobjid
+JOIN pg_catalog.pg_proc p ON p.oid = CASE
+  WHEN d.refclassid = 'pg_catalog.pg_proc'::pg_catalog.regclass THEN d.refobjid
+  ELSE o.oprcode::pg_catalog.oid END
+JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+WHERE d.classid = 'pg_catalog.pg_rewrite'::pg_catalog.regclass
+  AND r.ev_class = 'pg_temp.sqail_assistant_probe'::pg_catalog.regclass
+  AND p.provolatile = 'v'
+ORDER BY 1, 2, 3";
+
+/// Volatile functions in any schema named like one of `$1` (a JSON array of
+/// lowercase names), for when the probe view can't be created.
+const PG_NAMED_FUNCTIONS: &str = "\
+SELECT DISTINCT n.nspname::text, p.proname::text, pg_catalog.pg_get_function_identity_arguments(p.oid)
+FROM pg_catalog.pg_proc p
+JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+WHERE p.provolatile = 'v'
+  AND pg_catalog.lower(p.proname::text) IN
+    (SELECT pg_catalog.jsonb_array_elements_text(($1::text)::pg_catalog.jsonb))
+ORDER BY 1, 2, 3";
+
+/// Built-in (`pg_catalog`) functions marked VOLATILE that only read: random
+/// numbers, clocks, sizes, sequence and WAL positions, lock and wait
+/// information. Everything else the catalog marks volatile is refused.
+const READ_ONLY_VOLATILE: &[&str] = &[
+    "array_sample",
+    "array_shuffle",
+    "clock_timestamp",
+    "currval",
+    "current_query",
+    "gen_random_uuid",
+    "lastval",
+    "pg_blocking_pids",
+    "pg_current_wal_flush_lsn",
+    "pg_current_wal_insert_lsn",
+    "pg_current_wal_lsn",
+    "pg_database_size",
+    "pg_get_wait_events",
+    "pg_indexes_size",
+    "pg_is_in_recovery",
+    "pg_jit_available",
+    "pg_last_wal_receive_lsn",
+    "pg_last_wal_replay_lsn",
+    "pg_last_xact_replay_timestamp",
+    "pg_lock_status",
+    "pg_partition_ancestors",
+    "pg_partition_tree",
+    "pg_relation_size",
+    "pg_safe_snapshot_blocking_pids",
+    "pg_sequence_last_value",
+    "pg_table_size",
+    "pg_tablespace_size",
+    "pg_total_relation_size",
+    "pg_xact_status",
+    "random",
+    "random_normal",
+    "timeofday",
+    "txid_status",
+];
+
+/// How long an assistant query on SQL Server waits for a lock before it
+/// fails, in milliseconds.
+pub const MSSQL_LOCK_TIMEOUT_MS: u64 = 5_000;
 
 /// What the tools need from a database. The real one is [`ServiceBackend`].
 pub trait Backend {
@@ -351,6 +425,9 @@ pub struct ServiceBackend {
     connection: Uuid,
     engine: Engine,
     session: Mutex<Option<Uuid>>,
+    /// SQL Server: the statements that start each assistant transaction,
+    /// decided on first use (see [`ServiceBackend::mssql_begin`]).
+    mssql_begin: Mutex<Option<String>>,
 }
 
 impl ServiceBackend {
@@ -366,6 +443,7 @@ impl ServiceBackend {
             connection,
             engine,
             session: Mutex::new(None),
+            mssql_begin: Mutex::new(None),
         })
     }
 
@@ -377,6 +455,142 @@ impl ServiceBackend {
         let id = self.client.open_session(self.connection).await?.id;
         *s = Some(id);
         Ok(id)
+    }
+
+    /// SQL Server has no read-only transaction, so an assistant query must
+    /// at least not block others or wait on them for long: a lock timeout,
+    /// and an isolation level that takes no shared locks. That is SNAPSHOT
+    /// where the database allows it (consistent reads from row versions),
+    /// else READ UNCOMMITTED (which may read uncommitted changes). Set
+    /// before every transaction, so a reset connection cannot lose it.
+    async fn mssql_begin(&self, on: On) -> Result<String> {
+        let mut cached = self.mssql_begin.lock().await;
+        if let Some(sql) = &*cached {
+            return Ok(sql.clone());
+        }
+        let mut req = QueryRequest::new(
+            "SELECT snapshot_isolation_state FROM sys.databases WHERE database_id = DB_ID()",
+        );
+        req.max_rows = Some(1);
+        let snapshot = self
+            .client
+            .query_all(on, &req)
+            .await?
+            .into_iter()
+            .any(|ev| match ev {
+                QueryEvent::Rows { rows, .. } => {
+                    rows.first().and_then(|r| r.first()).and_then(Value::as_i64) == Some(1)
+                }
+                _ => false,
+            });
+        let level = if snapshot {
+            "SNAPSHOT"
+        } else {
+            "READ UNCOMMITTED"
+        };
+        let sql = format!(
+            "SET LOCK_TIMEOUT {MSSQL_LOCK_TIMEOUT_MS}; \
+             SET TRANSACTION ISOLATION LEVEL {level}; BEGIN TRANSACTION"
+        );
+        *cached = Some(sql.clone());
+        Ok(sql)
+    }
+
+    /// PostgreSQL: refuse a query that calls a function the catalog marks
+    /// VOLATILE (it may have side effects), unless it is a known read-only
+    /// built-in ([`READ_ONLY_VOLATILE`]). The server resolves the names
+    /// itself (search path, overloads, operators, quoted and qualified
+    /// names): the query is wrapped in a temporary view, which parses it
+    /// without running it, and the view's dependencies list the functions
+    /// and operators it calls. The view lives in the assistant's transaction
+    /// and goes with the rollback. Then the transaction is made read-only
+    /// for the query itself.
+    ///
+    /// Where the transaction can't create the view (a standby, or
+    /// `default_transaction_read_only`), the check falls back to the names
+    /// written as calls in the query, refusing any of them that names a
+    /// volatile function in any schema.
+    async fn pg_check_functions(&self, on: On, sql: &str) -> Result<()> {
+        let body = without_terminator(sql, Engine::Postgres);
+        let show = body
+            .trim_start()
+            .get(..4)
+            .is_some_and(|w| w.eq_ignore_ascii_case("SHOW"));
+        let mut probed = false;
+        if !show {
+            // The guard checked that the parentheses balance, so the query
+            // means the same inside the subquery.
+            let mut req = QueryRequest::new(format!(
+                "CREATE TEMPORARY VIEW {PG_PROBE} AS SELECT 1 FROM (\n{body}\n) AS sqail_q"
+            ));
+            req.timeout_ms = Some(QUERY_TIMEOUT_MS);
+            req.single_statement = true;
+            let events = self.client.query_all(on, &req).await?;
+            match events.into_iter().find_map(|ev| match ev {
+                QueryEvent::Error {
+                    message, db_code, ..
+                } => Some((message, db_code)),
+                _ => None,
+            }) {
+                None => probed = true,
+                // A read-only transaction: check by name below.
+                Some((_, Some(code))) if code == "25006" => {
+                    run_all(&self.client, on, "ROLLBACK", 1).await?;
+                    run_all(&self.client, on, "BEGIN", 1).await?;
+                }
+                Some((message, Some(code))) if code == "42501" && message.contains("temporary") => {
+                    bail!(
+                        "refused: sqail checks which functions a query calls through a temporary \
+                     view, and this login may not create one (grant it TEMPORARY on the \
+                     database): {message}"
+                    )
+                }
+                // The query itself is wrong: the same error as running it.
+                Some((message, _)) => bail!("{message}"),
+            }
+        }
+        run_all(&self.client, on, "SET TRANSACTION READ ONLY", 1).await?;
+        if show {
+            return Ok(());
+        }
+        let mut req = if probed {
+            QueryRequest::new(PG_PROBE_FUNCTIONS)
+        } else {
+            let names = called_names(body, Engine::Postgres);
+            if names.is_empty() {
+                return Ok(());
+            }
+            let mut req = QueryRequest::new(PG_NAMED_FUNCTIONS);
+            req.params = vec![Param::Text(serde_json::to_string(&names)?)];
+            req
+        };
+        req.max_rows = Some(20);
+        let mut volatile = Vec::new();
+        for ev in self.client.query_all(on, &req).await? {
+            match ev {
+                QueryEvent::Rows { rows, .. } => {
+                    for row in rows {
+                        let text = |i: usize| row.get(i).and_then(Value::as_str).unwrap_or("");
+                        let (schema, name, args) = (text(0), text(1), text(2));
+                        if !(schema == "pg_catalog" && READ_ONLY_VOLATILE.contains(&name)) {
+                            volatile.push(format!("{schema}.{name}({args})"));
+                        }
+                    }
+                }
+                QueryEvent::Error { message, .. } => {
+                    bail!("checking the functions the query calls: {message}")
+                }
+                _ => {}
+            }
+        }
+        if !volatile.is_empty() {
+            bail!(
+                "refused: the query calls {}, which PostgreSQL marks VOLATILE (it may change \
+                 something); the assistant may only call STABLE or IMMUTABLE functions",
+                volatile.join(", ")
+            );
+        }
+        Ok(())
     }
 
     pub async fn close(&self) {
@@ -422,20 +636,27 @@ impl Backend for ServiceBackend {
     async fn query(&self, sql: &str, max_rows: u64) -> Result<Rows> {
         let session = On::Session(self.session().await?);
         let begin = match self.engine {
-            Engine::Postgres => "BEGIN READ ONLY",
-            Engine::Mssql => "BEGIN TRANSACTION",
-            Engine::Sqlite => "BEGIN",
+            // Read-only from the function check on, see `pg_check_functions`.
+            Engine::Postgres => "BEGIN".to_string(),
+            Engine::Mssql => self.mssql_begin(session).await?,
+            Engine::Sqlite => "BEGIN".to_string(),
             // No known way to make it read-only, so don't run anything.
             Engine::Unknown => anyhow::bail!("this engine is not supported by this sqail version"),
         };
-        run_all(&self.client, session, begin, 1).await?;
-        let mut req = QueryRequest::new(sql);
-        req.max_rows = Some(max_rows);
-        req.timeout_ms = Some(QUERY_TIMEOUT_MS);
-        // The service refuses a second statement even where the guard's
-        // lexer and the engine disagree on where a statement ends.
-        req.single_statement = true;
-        let result = self.client.query_all(session, &req).await;
+        run_all(&self.client, session, &begin, 1).await?;
+        let result = async {
+            if self.engine == Engine::Postgres {
+                self.pg_check_functions(session, sql).await?;
+            }
+            let mut req = QueryRequest::new(sql);
+            req.max_rows = Some(max_rows);
+            req.timeout_ms = Some(QUERY_TIMEOUT_MS);
+            // The service refuses a second statement even where the guard's
+            // lexer and the engine disagree on where a statement ends.
+            req.single_statement = true;
+            Ok::<_, anyhow::Error>(self.client.query_all(session, &req).await?)
+        }
+        .await;
         // Always undo, whatever the query did or however it failed.
         let rollback = run_all(&self.client, session, "ROLLBACK", 1).await;
         let events = result?;

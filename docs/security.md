@@ -105,7 +105,15 @@ the attestation is what catches a swapped one.
   (Claude Code) or xAI (Grok) under the user's own account. It uses the
   user's service token, so it sees exactly what the user may see. On SQL
   Server a rolled-back transaction undoes writes but can't stop every side
-  effect of a procedure; the statement check refuses `EXEC` for that reason.
+  effect of a procedure; the statement check refuses `EXEC` for that reason,
+  and also `NEXT VALUE FOR` (a sequence step survives the rollback) and
+  locking table hints (`TABLOCKX`, `HOLDLOCK`, `UPDLOCK`, `XLOCK`,
+  `SERIALIZABLE` and the like). Assistant transactions on SQL Server start
+  with `SET LOCK_TIMEOUT 5000` and the `SNAPSHOT` isolation level where the
+  database allows it, else `READ UNCOMMITTED`: they take no shared locks
+  and give up on a lock after five seconds, so they neither block other
+  sessions nor wait on them for long. Under `READ UNCOMMITTED` the
+  assistant may see changes another session has not committed yet.
   The statement check and the rollback are defence in depth, not a
   permission system: give the connection the assistant uses a **low-privilege
   login** that can only read (Postgres: a role with `SELECT` grants only, or

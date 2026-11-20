@@ -799,6 +799,11 @@ pub struct RoutineInfo {
     pub schema: Option<String>,
     pub name: String,
     pub kind: RoutineKind,
+    /// A function that returns a table, used in `FROM`: a SQL Server inline
+    /// or multi-statement table-valued function, a PostgreSQL set-returning
+    /// function. Absent (false) from older services.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub table_valued: bool,
 }
 
 /// One privilege on a table held by a role or user.

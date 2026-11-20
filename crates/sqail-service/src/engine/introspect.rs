@@ -502,7 +502,8 @@ pub async fn routines(conn: &mut dyn Conn, schema: Option<&str>) -> Result<Vec<R
     let (sql, params) = match conn.engine() {
         Engine::Unknown => return Err(DbError::unknown_engine()),
         Engine::Postgres => (
-            "SELECT n.nspname::text, p.proname::text, p.prokind::text
+            "SELECT n.nspname::text, p.proname::text,
+                    CASE WHEN p.prokind = 'f' AND p.proretset THEN 'tf' ELSE p.prokind::text END
              FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
              WHERE ($1::text IS NULL OR n.nspname = $1)
                AND n.nspname NOT IN ('pg_catalog', 'information_schema')
@@ -524,13 +525,17 @@ pub async fn routines(conn: &mut dyn Conn, schema: Option<&str>) -> Result<Vec<R
         .await?
         .iter()
         .filter_map(|r| {
+            let kind = get_str(&r[2]);
             Some(RoutineInfo {
                 schema: get_str(&r[0]),
                 name: get_str(&r[1])?,
-                kind: match get_str(&r[2]).as_deref() {
+                kind: match kind.as_deref() {
                     Some("p" | "P") => RoutineKind::Procedure,
                     _ => RoutineKind::Function,
                 },
+                // SQL Server: inline (IF) and multi-statement (TF) table-valued
+                // functions; Postgres: set-returning functions ('tf' above).
+                table_valued: matches!(kind.as_deref(), Some("IF" | "TF" | "tf")),
             })
         })
         .collect())

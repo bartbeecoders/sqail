@@ -197,4 +197,40 @@ fn assistant_panel_streams_an_answer_and_inserts_sql() {
     assert_eq!(app.tabs.len(), tabs + 1);
     assert_eq!(app.tabs[app.active].text, SQL);
     assert_eq!(app.tabs[app.active].connection, Some(conn));
+
+    // A tab on another connection: its SQL is not sent, and Insert leaves
+    // it alone.
+    let other = h.state_mut().new_tab(None);
+    h.state_mut().tabs[other].connection = Some(uuid::Uuid::new_v4());
+    h.state_mut().tabs[other].text = "SELECT TOP 5 * FROM elsewhere".into();
+    h.step();
+    h.get_by_label("Insert").click();
+    h.step();
+    assert_eq!(h.state().tabs[other].text, "SELECT TOP 5 * FROM elsewhere");
+    let before = h.state().assistant.entries.len();
+    h.state_mut().assistant.input = "Fix my query".into();
+    h.get_by_label("Send").click();
+    step_until(&mut h, "the second answer", |a| {
+        !a.assistant.is_running() && a.assistant.entries.len() > before + 2
+    });
+    let stdin = std::fs::read_to_string(dir.path().join("stdin.txt")).unwrap();
+    assert_eq!(stdin, "Fix my query", "{stdin}");
+    assert!(
+        matches!(&h.state().assistant.entries[before + 1],
+            Entry::Note(n) if n.contains("not on this chat's connection “people db”")),
+        "{:?}",
+        h.state().assistant.entries
+    );
+
+    // The chat's connection disappears (deleted, or another service): the
+    // next question says so instead of asking for a connection.
+    h.state_mut().service.connections.clear();
+    h.state_mut().assistant.input = "And now?".into();
+    h.state_mut().assistant_send();
+    assert!(
+        matches!(h.state().assistant.entries.last(),
+            Some(Entry::Error(e)) if e.contains("“people db” is no longer available")),
+        "{:?}",
+        h.state().assistant.entries.last()
+    );
 }
